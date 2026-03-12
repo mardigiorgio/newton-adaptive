@@ -415,7 +415,6 @@ from ._src.solvers import (
     SolverMuJoCoCENIC,
     SolverSemiImplicit,
     SolverStyle3D,
-    SolverVariableStepMuJoCo,
     SolverVBD,
     SolverXPBD,
     style3d,
