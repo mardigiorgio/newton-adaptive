@@ -1588,8 +1588,7 @@ class ViewerGL(ViewerBase):
         .. code-block:: python
 
             while viewer.is_running():
-                state_0, state_1 = solver.step_dt(DT, state_0, state_1, control,
-                                                   apply_forces=viewer.apply_forces)
+                state_0, state_1 = solver.step_dt(DT, state_0, state_1, control, apply_forces=viewer.apply_forces)
                 t += DT
                 viewer.render(state_0, t)
 
@@ -1616,7 +1615,6 @@ class ViewerGL(ViewerBase):
 
         if self.wind is not None:
             self.wind._apply_wind_force(state)
-
 
     def _update(self):
         """
