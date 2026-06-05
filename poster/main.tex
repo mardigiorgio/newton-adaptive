@@ -1,0 +1,229 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Adaptive Time-Stepping Poster
+% Based on Jacobs Landscape Poster template
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[final]{beamer}
+
+\usepackage[scale=1.24]{beamerposter}
+\usetheme{confposter}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath, amssymb}
+\usepackage{newtxmath}
+
+\setbeamercolor{block title}{fg=black,bg=white}
+\setbeamercolor{block body}{fg=black,bg=white}
+\setbeamercolor{block alerted title}{fg=white,bg=black}
+\setbeamercolor{block alerted body}{fg=black,bg=white}
+
+\newlength{\sepwid}
+\newlength{\onecolwid}
+\newlength{\twocolwid}
+\newlength{\threecolwid}
+\setlength{\paperwidth}{48in}
+\setlength{\paperheight}{38in}
+\setlength{\sepwid}{0.024\paperwidth}
+\setlength{\onecolwid}{0.22\paperwidth}
+\setlength{\twocolwid}{0.464\paperwidth}
+\setlength{\threecolwid}{0.708\paperwidth}
+\setlength{\topmargin}{-0.5in}
+
+\title{Adaptive Time-Stepping for Massively-Parallel Hardware-Accelerated Robot Simulation}
+\author{Marco DiGiorgio and Vince Kurtz}
+\institute{DePaul University}
+
+\begin{document}
+
+\addtobeamertemplate{block end}{}{\vspace*{2ex}}
+\addtobeamertemplate{block alerted end}{}{\vspace*{2ex}}
+
+\setlength{\belowcaptionskip}{2ex}
+\setlength\belowdisplayshortskip{2ex}
+
+% Thin border hugging each figure image.
+\setlength{\fboxsep}{0pt}
+\setlength{\fboxrule}{1.5pt}
+\newcommand{\figimg}[1]{\fbox{\includegraphics[width=\dimexpr\linewidth-2\fboxrule\relax]{#1}}}
+
+\begin{frame}[t]
+\begin{columns}[t]
+
+\begin{column}{\sepwid}\end{column}
+
+%==========================================================
+% LEFT COLUMN: motivation, hero scaling plot
+%==========================================================
+\begin{column}{\onecolwid}
+
+\begin{block}{The Problem}
+Massively parallel GPU simulators power modern robot learning, but every
+world runs a \textbf{single fixed timestep}. Small $\delta t$ wastes work
+everywhere to satisfy the stiffest contact; large $\delta t$ produces
+penetration, jitter, and non-physical artifacts \textbf{that learned
+policies exploit, breaking sim-to-real transfer}.
+
+\medskip
+\textbf{Error-controlled integration already solves this} by varying
+$\delta t$ with system stiffness. But existing controllers are
+\textbf{single-world and CPU-bound}: they assume one trajectory at a
+time, not thousands of worlds stepping in lockstep on a GPU.
+\end{block}
+
+\begin{figure}
+\centering
+\figimg{SCALING.png}
+\caption{\textbf{Wall-time scaling.} Per-world adaptive vs fixed-$\delta t$,
+$N = 4$ to $8192$ worlds.}
+\end{figure}
+
+\begin{block}{Our Contribution}
+We bring convex error-controlled integration\footnotesize$^{1}$\normalsize\
+\textbf{from the CPU to massively parallel GPU hardware}. Each of $N$
+worlds advances its \textbf{own inner $\delta t$} between fixed outer
+control boundaries, with step acceptance, error estimation, and step-size
+update all running on-device. The only host sync is a 4-byte boundary
+flag per iteration; no per-state PCIe transfers in the physics loop.
+
+\medskip
+\footnotesize$^{1}$Convex error-controlled integration (CENIC),
+\textit{arXiv:2511.08771}.\normalsize
+\end{block}
+
+\end{column}
+
+\begin{column}{\sepwid}\end{column}
+
+%==========================================================
+% CENTER COLUMN (two-wide): method + results
+%==========================================================
+\begin{column}{\twocolwid}
+
+%----- top row of center column: method, two sub-columns -----
+\begin{columns}[t,totalwidth=\twocolwid]
+
+\begin{column}{\onecolwid}\vspace{-.6in}
+
+\begin{block}{Per-World Adaptive Time Stepping}
+The system evolves continuously according to
+\[
+\Large
+x(t_{n+1}) = x(t_n) + \int_{t_n}^{t_{n+1}} f(\tau, x(\tau))\,d\tau,
+\]
+which the integrator approximates over $\delta t = t_{n+1} - t_n$.
+Each of the $N$ parallel worlds carries its own state $x^{(i)}$ and
+its own inner step $\delta t^{(i)}$, advancing independently between
+fixed outer control boundaries.
+\end{block}
+
+\end{column}
+
+\begin{column}{\onecolwid}\vspace{-.6in}
+
+\begin{block}{Step Doubling}
+Let $\Phi_{\delta t}(x_n)$ denote one MuJoCo Warp convex step. Compare a
+full step against two successive half-steps:
+\begin{align}
+\hat{x}_{n+1} &= \Phi_{\delta t}(x_n), \\
+x_{n+1}\;\;\, &= \Phi_{\delta t/2}\bigl(\Phi_{\delta t/2}(x_n)\bigr).
+\end{align}
+The step-doubling difference yields a second-order error estimate
+\begin{equation}
+e_{n+1} = \lVert S\,(q_{n+1} - \hat{q}_{n+1}) \rVert_{\infty}
+       \approx \bar{c}\,\delta t^{\,p}, \quad p = 2,
+\end{equation}
+a weighted, position-only inf-norm per world with $S = \operatorname{diag}(M)^{-1/2}$.
+\end{block}
+
+\end{column}
+\end{columns}
+
+%----- middle row: step-size update spans full width -----
+\setbeamercolor{block alerted title}{fg=black,bg=dalgold}
+\setbeamercolor{block alerted body}{fg=black,bg=white}
+
+\begin{alertblock}{Step-Size Selection}
+Accept if $e_{n+1} \le \varepsilon_{\mathrm{acc}}$ (or the controller
+grows $\delta t$); otherwise reject and retry. Update the step from the
+asymptotic error model:
+\[
+\delta t_{\mathrm{new}} = k_{\mathrm{safe}}\,\delta t \left(\frac{\varepsilon_{\mathrm{acc}}}{e_{n+1}}\right)^{\!1/p},
+\qquad
+\delta t = \min\!\left(\delta t_{\mathrm{new}},\;
+k_{\mathrm{grow}}\,\delta t,\; t_{\mathrm{outer}} - t_n\right).
+\]
+Constants: $k_{\mathrm{safe}} = 0.9$, $k_{\mathrm{grow}} = 5.0$. The
+boundary clamp prevents fast worlds from overshooting, while slow worlds
+catch up. A symmetric deadband $[0.9, 1.2]\,\delta t$ and shrink cap
+$k_{\mathrm{shrink}} = 0.1$ suppress step-size thrash.
+\end{alertblock}
+
+%----- bottom row: two result figures -----
+\begin{columns}[t,totalwidth=\twocolwid]
+
+\begin{column}{\onecolwid}
+
+\begin{figure}
+\centering
+\figimg{FORK_FIXED.png}
+\caption{\textbf{Fixed step, $\delta t = 10$ ms.} Fork penetrates rack.}
+\end{figure}
+
+\end{column}
+
+\begin{column}{\onecolwid}
+
+\begin{figure}
+\centering
+\figimg{FORK_ADAPTIVE.png}
+\caption{\textbf{Adaptive step, $\varepsilon_{\mathrm{acc}} = 10^{-4}$.}
+Fork rests on rack.}
+\end{figure}
+
+\end{column}
+\end{columns}
+
+\end{column}
+
+\begin{column}{\sepwid}\end{column}
+
+%==========================================================
+% RIGHT COLUMN: adaptive fork, results, contact
+%==========================================================
+\begin{column}{\onecolwid}
+
+\begin{figure}
+\centering
+\figimg{WORK_PRECISION.png}
+\caption{\textbf{Work-precision.} Per-world $\delta t$ beats global
+worst-case $\delta t$ across all tolerances.}
+\end{figure}
+
+\begin{figure}
+\centering
+\figimg{FRANKA_FARM.png}
+\caption{\textbf{1024 worlds in parallel.} Franka arms stepped
+simultaneously on one GPU, each tinted by its per-world adaptive
+$\delta t$ (green = large step / free motion, red = small step /
+stiff contact). Worlds diverge and each finds its own $\delta t$.}
+\end{figure}
+
+\begin{block}{Key Results}
+\begin{itemize}
+\item Integration error held inside user-specified tolerance
+\item Contact artifacts eliminated at comparable wall-time budgets
+\end{itemize}
+\end{block}
+
+\setbeamercolor{block title}{fg=black,bg=white}
+
+\setbeamercolor{block alerted title}{fg=black,bg=dalblue}
+\setbeamercolor{block alerted body}{fg=black,bg=white}
+
+\end{column}
+
+\end{columns}
+\end{frame}
+
+\end{document}

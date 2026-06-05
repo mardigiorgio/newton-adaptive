@@ -14,9 +14,9 @@
 # limitations under the License.
 
 from .solver_mujoco import SolverMuJoCo
-from .solver_mujoco_cenic import SolverMuJoCoCENIC
+from .solver_mujoco_adaptive import SolverMuJoCoAdaptive
 
 __all__ = [
     "SolverMuJoCo",
-    "SolverMuJoCoCENIC",
+    "SolverMuJoCoAdaptive",
 ]

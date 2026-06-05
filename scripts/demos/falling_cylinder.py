@@ -82,9 +82,15 @@ def main():
         default=None,
         help="Use fixed-step SolverMuJoCo with this dt instead of CENIC",
     )
+    parser.add_argument(
+        "--slow-mo", type=float, default=1.0,
+        help="Wall-clock slow-motion factor. 1.0 = realtime. 10.0 = each outer step takes "
+        "10x DT_OUTER seconds of wall time.",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    model = build_model_randomized(args.num_worlds)
+    model = build_model_randomized(args.num_worlds, seed=args.seed)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
@@ -112,43 +118,51 @@ def main():
     viewer.set_model(model)
     viewer.set_camera(pos=wp.vec3(1.5, -1.5, 0.8), pitch=-20.0, yaw=135.0)
 
-    if use_fixed:
-        contacts = newton.Contacts(
-            rigid_contact_max=64, soft_contact_max=0,
-            requested_attributes={"force"},
-        )
-    else:
-        # CENIC owns its own contacts buffer -- render that directly. Creating
-        # a separate buffer and calling update_contacts on it can corrupt CUDA
-        # memory when the viewer's "show contacts" overlay is toggled on.
-        contacts = solver.contacts
+    # Allocate our own Newton-format contacts buffer; for mjwarp-pipeline solvers
+    # (use_mujoco_contacts=True), solver.contacts is None and update_contacts pulls
+    # contacts out of mjw_data on demand.
+    contacts = newton.Contacts(
+        rigid_contact_max=solver.mjw_data.naconmax, soft_contact_max=0,
+        requested_attributes={"force"},
+    )
 
     step = 0
     t = 0.0
     t_start = time.perf_counter()
 
     while viewer.is_running():
-        if use_fixed:
-            for _ in range(n_inner):
-                state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
-                state_0, state_1 = state_1, state_0
-        else:
-            if viewer.apply_forces is not None:
-                viewer.apply_forces(state_0)
-            solver.step(state_0, state_1, control, None, DT_OUTER)
-        t += DT_OUTER
-        step += 1
+        step_start = time.perf_counter()
 
-        if not use_fixed and step % LOG_EVERY == 0:
-            _print_status(solver, step)
+        if not viewer.is_paused():
+            if use_fixed:
+                for _ in range(n_inner):
+                    state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
+                    state_0, state_1 = state_1, state_0
+            else:
+                if viewer.apply_forces is not None:
+                    viewer.apply_forces(state_0)
+                solver.step(state_0, state_1, control, None, DT_OUTER)
+            t += DT_OUTER
+            step += 1
 
-        if args.num_steps > 0 and step >= args.num_steps:
-            break
+            if not use_fixed and step % LOG_EVERY == 0:
+                _print_status(solver, step)
 
+            if args.num_steps > 0 and step >= args.num_steps:
+                break
+
+        if viewer.show_contacts:
+            solver.update_contacts(contacts, state_0)
         viewer.begin_frame(t)
         viewer.log_state(state_0)
         viewer.log_contacts(contacts, state_0)
         viewer.end_frame()
+
+        if args.slow_mo > 1.0 and not viewer.is_paused():
+            target = DT_OUTER * args.slow_mo
+            elapsed = time.perf_counter() - step_start
+            if elapsed < target:
+                time.sleep(target - elapsed)
 
     wall = time.perf_counter() - t_start
     fps = step / wall if wall > 0 else float("inf")

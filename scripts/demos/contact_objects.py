@@ -123,6 +123,10 @@ def main():
         "--fixed-dt", type=float, default=None, help="Use fixed-step SolverMuJoCo with this dt instead of CENIC"
     )
     parser.add_argument(
+        "--xpbd-dt", type=float, default=None,
+        help="Use fixed-step SolverXPBD with this dt (mutually exclusive with --fixed-dt and adaptive)",
+    )
+    parser.add_argument(
         "--tol", type=float, default=TOL,
         help=f"CENIC error tolerance (default {TOL:.0e}). Larger = looser = faster (fewer substeps).",
     )
@@ -157,13 +161,18 @@ def main():
         help="Seconds to render the initial state before starting the simulation (gives time to start recording).",
     )
     parser.add_argument(
-        "--nconmax-per-world", type=int, default=20,
+        "--nconmax-per-world", type=int, default=120,
         help="Max contact slots per world (mjwarp multiplies by nworld internally). "
-        "Scene default is 50; 20 is enough for steady-state rendering.",
+        "Random ICs at N=1 with the Newton SAP pipeline peak around 70-80 candidates; 120 gives margin.",
     )
     parser.add_argument(
-        "--njmax-per-world", type=int, default=80,
-        help="Max constraint slots per world. Scene default is 200; 80 fits the demo's actual constraint count.",
+        "--njmax-per-world", type=int, default=480,
+        help="Max constraint slots per world. ~4x nconmax fits pyramidal friction expansion.",
+    )
+    parser.add_argument(
+        "--slow-mo", type=float, default=1.0,
+        help="Wall-clock slow-motion factor. 1.0 = realtime. 10.0 = each outer step takes "
+        "10x DT_OUTER seconds of wall time (sim physics unchanged). Useful for capturing artifacts.",
     )
     args = parser.parse_args()
 
@@ -175,13 +184,25 @@ def main():
     state_1 = model.state()
     control = model.control()
 
+    if args.fixed_dt is not None and args.xpbd_dt is not None:
+        parser.error("--fixed-dt and --xpbd-dt are mutually exclusive")
     use_fixed = args.fixed_dt is not None
+    use_xpbd = args.xpbd_dt is not None
+    is_adaptive = not (use_fixed or use_xpbd)
 
     # mjwarp's nconmax/njmax are PER WORLD; it multiplies by nworld internally.
     nconmax = args.nconmax_per_world
     njmax = args.njmax_per_world
 
-    if use_fixed:
+    if use_xpbd:
+        solver = newton.solvers.SolverXPBD(model)
+        n_inner = round(DT_OUTER / args.xpbd_dt)
+        print(
+            f"XPBD demo: {args.num_worlds} world(s)  solver=SolverXPBD  "
+            f"dt={args.xpbd_dt:.4e}  substeps/outer={n_inner}",
+            flush=True,
+        )
+    elif use_fixed:
         solver = newton.solvers.SolverMuJoCo(model, separate_worlds=True, nconmax=nconmax, njmax=njmax)
         n_inner = round(DT_OUTER / args.fixed_dt)
         print(
@@ -199,6 +220,7 @@ def main():
             dt_max=DT_OUTER,
             nconmax=nconmax,
             njmax=njmax,
+            use_mujoco_contacts=True,
         )
         print(
             f"CENIC contact demo: {args.num_worlds} world(s)  solver=SolverMuJoCoAdaptive  "
@@ -211,7 +233,7 @@ def main():
     viewer.set_model(model, max_worlds=args.render_worlds)
     viewer.set_world_offsets((0.9, 0.9, 0.0))
 
-    if not use_fixed:
+    if is_adaptive:
         viewer.register_ui_callback(_hud_callback, position="stats")
 
     if args.grid_camera:
@@ -230,11 +252,15 @@ def main():
             yaw=136.3,
         )
 
-    contacts = newton.Contacts(
-        rigid_contact_max=solver.mjw_data.naconmax,
-        soft_contact_max=0,
-        requested_attributes={"force"},
-    )
+    if use_xpbd:
+        # XPBD uses Newton's own contact pipeline (not mjwarp).
+        contacts = model.contacts()
+    else:
+        contacts = newton.Contacts(
+            rigid_contact_max=solver.mjw_data.naconmax,
+            soft_contact_max=0,
+            requested_attributes={"force"},
+        )
 
     step = 0
     t = 0.0
@@ -250,32 +276,48 @@ def main():
     t_start = time.perf_counter()
 
     while viewer.is_running():
-        if use_fixed:
-            for _ in range(n_inner):
-                state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
-                state_0, state_1 = state_1, state_0
-        else:
-            if viewer.apply_forces is not None:
-                viewer.apply_forces(state_0)
-            solver.step(state_0, state_1, control, None, DT_OUTER)
-        t += DT_OUTER
-        step += 1
+        step_start = time.perf_counter()
 
-        if not use_fixed and step % HUD_EVERY == 0:
-            _update_hud(solver, step)
+        if not viewer.is_paused():
+            if use_xpbd:
+                for _ in range(n_inner):
+                    model.collide(state_0, contacts)
+                    solver.step(state_0, state_1, control, contacts, args.xpbd_dt)
+                    state_0, state_1 = state_1, state_0
+            elif use_fixed:
+                for _ in range(n_inner):
+                    state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
+                    state_0, state_1 = state_1, state_0
+            else:
+                if viewer.apply_forces is not None:
+                    viewer.apply_forces(state_0)
+                solver.step(state_0, state_1, control, None, DT_OUTER)
+            t += DT_OUTER
+            step += 1
 
-        if not use_fixed and step % LOG_EVERY == 0:
-            _print_status(solver, step)
+            if is_adaptive and step % HUD_EVERY == 0:
+                _update_hud(solver, step)
 
-        if args.num_steps > 0 and step >= args.num_steps:
-            break
+            if is_adaptive and step % LOG_EVERY == 0:
+                _print_status(solver, step)
 
-        if viewer.show_contacts:
+            if args.num_steps > 0 and step >= args.num_steps:
+                break
+
+        if viewer.show_contacts and not use_xpbd:
+            # update_contacts pulls mjw_data contacts into the Newton buffer.
+            # XPBD already populated contacts via model.collide above.
             solver.update_contacts(contacts, state_0)
         viewer.begin_frame(t)
         viewer.log_state(state_0)
         viewer.log_contacts(contacts, state_0)
         viewer.end_frame()
+
+        if args.slow_mo > 1.0 and not viewer.is_paused():
+            target = DT_OUTER * args.slow_mo
+            elapsed = time.perf_counter() - step_start
+            if elapsed < target:
+                time.sleep(target - elapsed)
 
     wall = time.perf_counter() - t_start
     fps = step / wall if wall > 0 else float("inf")

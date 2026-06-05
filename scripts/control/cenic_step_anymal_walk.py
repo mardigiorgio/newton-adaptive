@@ -73,7 +73,7 @@ device = wp.get_device()
 torch_device = wp.device_to_torch(device)
 
 robot = newton.ModelBuilder()
-newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(robot)
+newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(robot)
 robot.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
     armature=0.06,
     limit_ke=1.0e3,
@@ -131,7 +131,7 @@ model = scene.finalize()
 coords_per_world = model.joint_coord_count // num_worlds
 dofs_per_world = model.joint_dof_count // num_worlds
 
-solver = newton.solvers.SolverMuJoCoCENIC(
+solver = newton.solvers.SolverMuJoCoAdaptive(
     model,
     tol=1e-3,
     dt_init=0.005,

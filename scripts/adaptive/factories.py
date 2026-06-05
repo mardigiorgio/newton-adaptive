@@ -38,6 +38,28 @@ def _make_q_qd_error_norm(wrapper_ref):
     return error_norm_fn
 
 
+def _make_body_error_norm(wrapper_ref):
+    """Error norm reading body_q + dt*body_qd. Use for maximal-coord solvers
+    (XPBD, SemiImplicit) whose canonical state lives in body_q/body_qd rather
+    than joint_q/joint_qd. Reading joint_q for these solvers gives stale data
+    and the controller always sees error = 0.
+    """
+    def error_norm_fn():
+        wrapper = wrapper_ref[0]
+        n = wrapper.model.world_count
+        bodies_per_world = wrapper.model.body_count // n
+        wp.launch(
+            K._inf_norm_body_kernel, dim=n,
+            inputs=[
+                wrapper._state_full.body_q, wrapper._state_double.body_q,
+                wrapper._state_full.body_qd, wrapper._state_double.body_qd,
+                wrapper._dt, bodies_per_world,
+            ],
+            outputs=[wrapper._last_error], device=wrapper.model.device,
+        )
+    return error_norm_fn
+
+
 def _build_mujoco_q_weights(model, mjw_model) -> wp.array:
     """Build CENIC-style per-coord error weights from MuJoCo dof_invweight0.
 
@@ -193,7 +215,7 @@ def adaptive_xpbd_factory(
         # Forward declaration: the shim needs to read wrapper._world_active,
         # but wrapper is built AFTER step_fn. Box it via a list.
         wrapper_ref = []
-        error_norm = _make_q_qd_error_norm(wrapper_ref)
+        error_norm = _make_body_error_norm(wrapper_ref)
 
         def step_fn(model_arg, state_in, state_out, ctrl, contacts_arg, dt_array, dt_scalar_buf):
             wrapper = wrapper_ref[0]
@@ -236,7 +258,7 @@ def adaptive_semi_factory(
         underlying = newton.solvers.SolverSemiImplicit(model)
         contacts = model.contacts()
         wrapper_ref = []
-        error_norm = _make_q_qd_error_norm(wrapper_ref)
+        error_norm = _make_body_error_norm(wrapper_ref)
 
         def step_fn(model_arg, state_in, state_out, ctrl, contacts_arg, dt_array, dt_scalar_buf):
             wrapper = wrapper_ref[0]

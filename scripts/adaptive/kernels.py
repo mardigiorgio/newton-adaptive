@@ -328,3 +328,39 @@ def _inf_norm_q_qd_kernel(
         err = wp.max(err, dt_w * w * d)
 
     last_error[world] = err
+
+
+@wp.kernel
+def _inf_norm_body_kernel(
+    body_q_full: wp.array(dtype=wp.transform),
+    body_q_double: wp.array(dtype=wp.transform),
+    body_qd_full: wp.array(dtype=wp.spatial_vector),
+    body_qd_double: wp.array(dtype=wp.spatial_vector),
+    dt: wp.array(dtype=wp.float32),
+    bodies_per_world: int,
+    last_error: wp.array(dtype=wp.float32),
+):
+    """Weighted L-inf norm on body transforms + spatial velocities.
+
+    Used by maximal-coord solvers (XPBD, SemiImplicit). Their canonical state
+    is body_q (wp.transform [px,py,pz,qx,qy,qz,qw]) and body_qd
+    (wp.spatial_vector [wx,wy,wz,vx,vy,vz]); joint_q/joint_qd are stale because
+    the solvers don't write them back. Using joint_q here would always read 0.
+    """
+    world = wp.tid()
+    err = wp.float32(0.0)
+    dt_w = dt[world]
+
+    base = world * bodies_per_world
+    for i in range(bodies_per_world):
+        tf_full = body_q_full[base + i]
+        tf_double = body_q_double[base + i]
+        for j in range(7):
+            err = wp.max(err, wp.abs(tf_full[j] - tf_double[j]))
+
+        v_full = body_qd_full[base + i]
+        v_double = body_qd_double[base + i]
+        for j in range(6):
+            err = wp.max(err, dt_w * wp.abs(v_full[j] - v_double[j]))
+
+    last_error[world] = err

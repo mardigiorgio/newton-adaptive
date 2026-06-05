@@ -33,8 +33,18 @@ SolverBuilder = Callable[[newton.Model], tuple[object, StepFn]]
 def mujoco_adaptive_factory(
     *, tol: float, nconmax: int, njmax: int, dt_outer: float,
     dt_inner_min: float = 1e-6, dt_inner_max: float | None = None,
+    use_mujoco_contacts: bool = False,
 ) -> SolverBuilder:
-    """Adaptive MuJoCo solver. Inner loop is owned by ``solver.step``."""
+    """Adaptive MuJoCo solver. Inner loop is owned by ``solver.step``.
+
+    Args:
+        use_mujoco_contacts: If True, route contacts through mjwarp's native
+            broadphase+narrowphase (avoids the Newton SAP pipeline allocation,
+            which is O(N*nconmax) and hits int32 overflow at high N). Use True
+            for scenes with only primitives (sphere/box/plane/cylinder).
+            Leave False for scenes with non-convex meshes that need Newton's
+            collision pipeline (e.g. CoACD-decomposed assets).
+    """
     inner_max = dt_outer if dt_inner_max is None else dt_inner_max
 
     def build(model):
@@ -42,6 +52,7 @@ def mujoco_adaptive_factory(
             model, tol=tol, dt_init=dt_outer, dt_min=dt_inner_min,
             dt_max=inner_max,
             nconmax=nconmax, njmax=njmax,
+            use_mujoco_contacts=use_mujoco_contacts,
         )
 
         def step_fn(model, s0, s1, ctrl):

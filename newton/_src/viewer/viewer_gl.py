@@ -962,7 +962,7 @@ class ViewerGL(ViewerBase):
 
         Convenience wrapper for the ``begin_frame`` / ``log_state`` /
         ``end_frame`` sequence.  Pair with :meth:`step_dt
-        <newton.solvers.SolverMuJoCoCENIC.step_dt>` so the viewer is driven
+        <newton.solvers.SolverMuJoCoAdaptive.step_dt>` so the viewer is driven
         by simulation time in fixed increments:
 
         .. code-block:: python

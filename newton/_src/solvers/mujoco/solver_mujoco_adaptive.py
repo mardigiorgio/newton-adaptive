@@ -16,6 +16,42 @@ from ...sim import Contacts
 from .solver_mujoco import SolverMuJoCo
 
 
+# --- World-compaction kernels (active-world re-batching) ----------------------
+# Step only the still-active worlds each inner iteration by gathering their rows
+# into a smaller mjw_data "tier", stepping that, and scattering results back.
+# active_indices[0:n] holds the active world ids in ASCENDING order, so the
+# in-place 1-D gather (arr[k] = arr[idx[k]], idx[k] >= k) never reads an
+# already-overwritten slot.
+
+@wp.kernel
+def _gather_rows_2d(
+    src: wp.array2d(dtype=wp.float32),
+    idx: wp.array(dtype=wp.int32),
+    dst: wp.array2d(dtype=wp.float32),
+):
+    k, j = wp.tid()
+    dst[k, j] = src[idx[k], j]
+
+
+@wp.kernel
+def _scatter_rows_2d(
+    src: wp.array2d(dtype=wp.float32),
+    idx: wp.array(dtype=wp.int32),
+    dst: wp.array2d(dtype=wp.float32),
+):
+    k, j = wp.tid()
+    dst[idx[k], j] = src[k, j]
+
+
+@wp.kernel
+def _gather_inplace_1d(
+    arr: wp.array(dtype=wp.float32),
+    idx: wp.array(dtype=wp.int32),
+):
+    k = wp.tid()
+    arr[k] = arr[idx[k]]
+
+
 def _import_wrapper_bits():
     """Lazy import to avoid circular dependency at module load.
 
@@ -59,6 +95,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         dt_init: float = 0.01,
         dt_min: float = 1e-6,
         dt_max: float | None = None,
+        use_mujoco_contacts: bool = False,
         **kwargs,
     ):
         """
@@ -79,9 +116,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             model,
             separate_worlds=True,
             use_mujoco_cpu=False,
-            use_mujoco_contacts=False,
+            use_mujoco_contacts=use_mujoco_contacts,
             **kwargs,
         )
+        self._use_mujoco_contacts = use_mujoco_contacts
 
         # Display-only attrs accessed directly by callers for banner strings.
         # ``_dt_max`` is a plain float; ``_tol`` is a plain float.
@@ -104,19 +142,30 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             dt_max=self._dt_max,
         )
 
+        # World compaction: step only the still-active worlds each inner
+        # iteration via smaller mjw_data tiers. Requires native MuJoCo contacts
+        # (the tier recomputes its own contacts from the gathered qpos, so no
+        # contact re-batching is needed).
+        self._init_compaction()
+
     def _build_wrapper(self, *, tol, dt_init, dt_min, dt_max):
         """Construct the underlying AdaptiveCompactionWrapper with MuJoCo hooks."""
         AdaptiveCompactionWrapper, _build_mujoco_q_weights = _import_wrapper_bits()
 
         # Dedicated SAP collision pipeline sized to MJWarp's max contact count
-        # (CENIC v1 lines 415-418).  This is the buffer callers read via
-        # :attr:`contacts`; it must persist for the solver's lifetime.
-        self._pipeline = newton.CollisionPipeline(
-            self.model,
-            broad_phase="sap",
-            rigid_contact_max=self.mjw_data.naconmax,
-        )
-        self._contacts_start = self._pipeline.contacts()
+        # (CENIC v1 lines 415-418).  Only created when use_mujoco_contacts=False;
+        # otherwise mjwarp runs its own broadphase+narrowphase in step().
+        # Skipping this saves a large O(N*nconmax)-ish broadphase buffer.
+        if self._use_mujoco_contacts:
+            self._pipeline = None
+            self._contacts_start = None
+        else:
+            self._pipeline = newton.CollisionPipeline(
+                self.model,
+                broad_phase="sap",
+                rigid_contact_max=self.mjw_data.naconmax,
+            )
+            self._contacts_start = self._pipeline.contacts()
 
         # Per-coord error weights from ``dof_invweight0`` (paper Sec V-E).
         q_weights = _build_mujoco_q_weights(self.model, self.mjw_model)
@@ -133,7 +182,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._update_mjc_data(self.mjw_data, model_arg, state_in)
             wp.copy(self.mjw_model.opt.timestep, dt_array)
             with wp.ScopedDevice(model_arg.device):
-                self._mujoco_warp_step()
+                if self._cur_tier is None:
+                    self._run_step(self.mjw_data)
+                else:
+                    self._compacted_warp_step()
             self._update_newton_state(model_arg, state_out, self.mjw_data)
 
         def _pre_boundary_hook(model_arg, state_0, control, contacts_arg):
@@ -147,9 +199,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         def _pre_iter_hook(model_arg, state_cur, contacts_arg):
             """Once per inner iteration (before the 3 substeps): re-transform
             body-frame contacts to world frame using the current state.  Matches
-            CENIC v1._run_iteration_body lines 469-471."""
+            CENIC v1._run_iteration_body lines 469-471.  Also selects the
+            compaction tier for this iteration's active-world count."""
             if not self.mjw_model.opt.run_collision_detection:
                 self._convert_contacts_to_mjwarp(model_arg, state_cur, contacts_arg)
+            self._select_tier()
 
         return AdaptiveCompactionWrapper(
             model=self.model,
@@ -165,6 +219,127 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             pre_boundary_hook=_pre_boundary_hook,
             pre_iter_hook=_pre_iter_hook,
         )
+
+    # ----- World compaction -----
+
+    def _init_compaction(self):
+        """Pre-allocate smaller mjw_data tiers for stepping only active worlds.
+
+        Disabled unless native MuJoCo contacts are on (a tier recomputes its own
+        contacts from gathered qpos; with external Newton contacts we would have
+        to re-batch the contact arrays, which is not done here).
+        """
+        import mujoco_warp
+
+        self._cur_tier = None  # selected tier mjw_data for the current iteration
+        self._cur_na = self.model.world_count
+        self._tiers: list[tuple[int, object]] = []
+        self._step_graphs: dict[int, object] = {}
+
+        n = self.model.world_count
+        self._compaction_enabled = bool(self._use_mujoco_contacts) and n >= 256
+        if not self._compaction_enabled:
+            return
+
+        self._nq = int(self.mjw_data.qpos.shape[1])
+        self._nv = int(self.mjw_data.qvel.shape[1])
+        per_world_ncon = max(1, int(self.mjw_data.naconmax) // n)
+        per_world_njmax = int(self.mjw_data.njmax)
+
+        # Tier sizes: geometric (ratio 1.5) below N, down to 64. Finer than
+        # powers of two so the stepped tier wastes at most ~50% over the active
+        # count instead of ~100%.
+        sizes = []
+        s = n
+        while True:
+            s = int(s / 1.5)
+            if s < 64:
+                break
+            sizes.append(s)
+        for size in sizes:
+            data = mujoco_warp.make_data(
+                self.mj_model, nworld=size,
+                nconmax=per_world_ncon, njmax=per_world_njmax,
+            )
+            self._tiers.append((size, data))
+        self._tiers.sort(key=lambda t: t[0])  # ascending
+
+        # CUDA-graph capture of each step. MuJoCo Warp fires dozens of small
+        # kernels per step; at low world counts that launch overhead dominates,
+        # so replaying one captured graph instead collapses it. opt.timestep and
+        # the tier data arrays are stable buffers, so the graph reads whatever
+        # gather wrote before replay.
+        if wp.get_device(self.model.device).is_cuda:
+            for _size, data in self._tiers:
+                self._capture_step_graph(data)
+            self._capture_step_graph(self.mjw_data)
+
+    def _capture_step_graph(self, data):
+        """Warm up then CUDA-graph-capture one ``mujoco_warp.step`` on ``data``."""
+        with wp.ScopedDevice(self.model.device):
+            self._mujoco_warp.step(self.mjw_model, data)  # compile + warm
+            wp.synchronize()
+            try:
+                with wp.ScopedCapture() as cap:
+                    self._mujoco_warp.step(self.mjw_model, data)
+                self._step_graphs[id(data)] = cap.graph
+            except Exception:
+                pass  # capture unsupported here -> eager fallback
+
+    def _run_step(self, data):
+        """Replay the captured step graph for ``data`` (eager fallback)."""
+        g = self._step_graphs.get(id(data))
+        if g is not None:
+            wp.capture_launch(g)
+        else:
+            self._mujoco_warp.step(self.mjw_model, data)
+
+    def _select_tier(self):
+        """Pick the smallest tier that fits this iteration's active-world count.
+
+        Reads the active count once per iteration (one 4-byte host sync); the
+        three step-doubling substeps reuse the selection.
+        """
+        if not self._compaction_enabled:
+            self._cur_tier = None
+            return
+        na = int(self._wrapper._n_active_buf.numpy()[0])
+        self._cur_na = na
+        self._cur_tier = None
+        for size, data in self._tiers:
+            if size >= na:
+                self._cur_tier = data
+                return  # full step (no tier big enough) if loop exhausts
+
+    def _compacted_warp_step(self):
+        """Step only the active worlds via the selected tier, then scatter back.
+
+        ``mjw_data`` already holds all N worlds (written by ``_update_mjc_data``)
+        and ``opt.timestep`` holds the per-world dt; gather the active rows into
+        the tier, step it (native contacts), and scatter qpos/qvel back. Inactive
+        worlds are untouched in ``mjw_data`` (they are boundary-stalled no-ops).
+        """
+        tier = self._cur_tier
+        na = self._cur_na
+        idx = self._wrapper._active_indices
+        ts = self.mjw_model.opt.timestep
+        # Gather active rows / dt (idx ascending, idx[k] >= k -> in-place safe).
+        wp.launch(_gather_rows_2d, dim=(na, self._nq),
+                  inputs=[self.mjw_data.qpos, idx], outputs=[tier.qpos])
+        wp.launch(_gather_rows_2d, dim=(na, self._nv),
+                  inputs=[self.mjw_data.qvel, idx], outputs=[tier.qvel])
+        # Carry warmstart so the tier's contact solver converges from the active
+        # worlds' previous acceleration instead of cold-starting each step.
+        wp.launch(_gather_rows_2d, dim=(na, self._nv),
+                  inputs=[self.mjw_data.qacc_warmstart, idx], outputs=[tier.qacc_warmstart])
+        wp.launch(_gather_inplace_1d, dim=na, inputs=[ts, idx])
+        self._run_step(tier)
+        wp.launch(_scatter_rows_2d, dim=(na, self._nq),
+                  inputs=[tier.qpos, idx], outputs=[self.mjw_data.qpos])
+        wp.launch(_scatter_rows_2d, dim=(na, self._nv),
+                  inputs=[tier.qvel, idx], outputs=[self.mjw_data.qvel])
+        wp.launch(_scatter_rows_2d, dim=(na, self._nv),
+                  inputs=[tier.qacc_warmstart, idx], outputs=[self.mjw_data.qacc_warmstart])
 
     # ----- Public API methods -----
 

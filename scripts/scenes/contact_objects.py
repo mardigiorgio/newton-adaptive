@@ -13,7 +13,7 @@ import warp as wp
 import newton
 import newton.solvers
 
-DT_OUTER = 0.01  # 100 Hz control / render cadence [s]
+DT_OUTER = 0.02  # 50 Hz control / render cadence [s] -- gives adaptive room above the fixed_10ms baseline
 TOL = 1e-3
 DT_INNER_MIN = 1e-6
 LOG_EVERY = 250
@@ -31,7 +31,7 @@ def build_template() -> newton.ModelBuilder:
     template = newton.ModelBuilder()
     newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
-    cfg_obj = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=200, mu=0.3, margin=0.005)
+    cfg_obj = newton.ModelBuilder.ShapeConfig(ke=1e5, kd=500, mu=0.3, margin=0.005)
 
     for ox in GRID_OFFSETS:
         for oy in GRID_OFFSETS:
@@ -78,7 +78,7 @@ def build_model(n_worlds: int) -> newton.Model:
     builder.replicate(template, n_worlds)
     builder.add_ground_plane()
 
-    cfg_wall = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=200, mu=0.3, margin=0.005, is_visible=False)
+    cfg_wall = newton.ModelBuilder.ShapeConfig(ke=1e5, kd=500, mu=0.3, margin=0.005, is_visible=False)
     half_inner = 0.350
     wt = 0.025
     wh = 0.750
@@ -96,6 +96,8 @@ def build_model(n_worlds: int) -> newton.Model:
             hz=wh,
             cfg=cfg_wall,
         )
+    # Required by SolverVBD; harmless for other solvers.
+    builder.color()
     return builder.finalize()
 
 
@@ -204,6 +206,10 @@ def make_solver(
 ) -> newton.solvers.SolverMuJoCoAdaptive:
     """CENIC solver with canonical contact-demo parameters.
 
+    Uses mjwarp's native contact pipeline (use_mujoco_contacts=True) since this
+    scene is all primitives. Avoids the Newton SAP pipeline's O(N*nconmax)
+    allocation that overflows int32 above N=2048.
+
     Args:
         model: The model to simulate.
         tol: Inf-norm error tolerance on joint_q per world.
@@ -216,6 +222,7 @@ def make_solver(
         dt_max=DT_OUTER,
         nconmax=128,
         njmax=640,
+        use_mujoco_contacts=True,
     )
 
 
@@ -227,19 +234,23 @@ def make_fixed_solver(model: newton.Model) -> newton.solvers.SolverMuJoCo:
 
 
 # --- Multi-solver factories for cross-solver benchmarks ----------------------
-# Per-world budgets (mjwarp multiplies by nworld). Tuned for this scene's
-# steady-state contact count (~20 contacts/world).
-_NCON = 50
-_NJM = 200
+# Per-world budgets (mjwarp multiplies by nworld). Sized for impact phase of
+# random ICs with 18-body cascade: steady-state ~20 contacts/world, impact
+# peak ~100/world. 2x margin for safety.
+_NCON = 200
+_NJM = 600
 
 from scripts.scenes import _solvers as _s  # noqa: E402
+from scripts.adaptive import factories as _af  # noqa: E402
 
 SOLVER_FACTORIES: dict = {
     "mujoco_adaptive_1e-3": _s.mujoco_adaptive_factory(
         tol=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+        use_mujoco_contacts=True,
     ),
     "mujoco_adaptive_1e-2": _s.mujoco_adaptive_factory(
         tol=1e-2, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+        use_mujoco_contacts=True,
     ),
     "mujoco_fixed_1ms": _s.mujoco_fixed_factory(
         dt=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
@@ -251,5 +262,15 @@ SOLVER_FACTORIES: dict = {
     # randomized ICs (objects spawn slightly interpenetrating). Stable on the
     # deterministic build_model() but not build_model_randomized().
     # "featherstone_1ms": _s.featherstone_factory(dt=1e-3, dt_outer=DT_OUTER),
+    "semi_implicit_1ms": _s.semi_implicit_factory(dt=1e-3, dt_outer=DT_OUTER),
     "xpbd_1ms": _s.xpbd_factory(dt=1e-3, dt_outer=DT_OUTER),
+    "vbd_1ms": _s.vbd_factory(dt=1e-3, dt_outer=DT_OUTER),
+    "xpbd_adaptive_1e-3": _af.adaptive_xpbd_factory(
+        tol=1e-3, dt_init=DT_OUTER, dt_min=1e-6, dt_max=DT_OUTER,
+        dt_outer=DT_OUTER,
+    ),
+    "semi_adaptive_1e-3": _af.adaptive_semi_factory(
+        tol=1e-3, dt_init=DT_OUTER, dt_min=1e-6, dt_max=DT_OUTER,
+        dt_outer=DT_OUTER,
+    ),
 }

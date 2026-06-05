@@ -18,7 +18,7 @@ import warp as wp
 import newton
 import newton.solvers
 
-DT_OUTER = 0.01  # 100 Hz control / render cadence [s]
+DT_OUTER = 0.02  # 50 Hz control / render cadence [s] -- gives adaptive room above the fixed_10ms baseline
 TOL = 1e-3
 DT_INNER_MIN = 1e-6
 LOG_EVERY = 250
@@ -39,7 +39,7 @@ def build_template() -> newton.ModelBuilder:
     template = newton.ModelBuilder()
     newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
-    cfg = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=200, mu=0.4, margin=5e-3)
+    cfg = newton.ModelBuilder.ShapeConfig(ke=1e5, kd=500, mu=0.4, margin=5e-3)
     body = template.add_body(
         xform=wp.transform(p=wp.vec3(0.0, 0.0, DROP_Z_DEFAULT), q=_tilt_quat(TILT_RAD)),
     )
@@ -125,6 +125,7 @@ def make_solver(
         dt_max=DT_OUTER,
         nconmax=_NCON,
         njmax=_NJM,
+        use_mujoco_contacts=True,
     )
 
 
@@ -139,12 +140,13 @@ from scripts.scenes import _solvers as _s  # noqa: E402
 from scripts.adaptive import factories as _af  # noqa: E402
 
 SOLVER_FACTORIES: dict = {
-    "mujoco_adaptive_1e-3": _af.adaptive_mujoco_factory(
-        tol=1e-3, dt_init=DT_OUTER, dt_min=1e-6, dt_max=DT_OUTER,
-        dt_outer=DT_OUTER, nconmax=_NCON, njmax=_NJM,
+    "mujoco_adaptive_1e-3": _s.mujoco_adaptive_factory(
+        tol=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+        use_mujoco_contacts=True,
     ),
     "mujoco_adaptive_1e-2": _s.mujoco_adaptive_factory(
         tol=1e-2, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+        use_mujoco_contacts=True,
     ),
     "mujoco_fixed_1ms": _s.mujoco_fixed_factory(
         dt=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,

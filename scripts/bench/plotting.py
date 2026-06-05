@@ -32,31 +32,34 @@ class PlotStyle:
 
 
 # Consistent style registry for stepping modes.
+# Every label is tagged "(adaptive)" or "(fixed)" so the legend reads cleanly
+# even on busy multi-curve plots.
 STYLES: dict[str, PlotStyle] = {
-    # CENIC adaptive: blues, marker varies by tol.
-    "mujoco_cenic_1e-3": PlotStyle("#1f77b4", "o", "-", "CENIC tol=1e-3"),
-    "mujoco_cenic_1e-2": PlotStyle("#17becf", "o", "-", "CENIC tol=1e-2"),
-    "cenic": PlotStyle("#1f77b4", "o", "-", "CENIC adaptive"),  # legacy
-    # New adaptive solvers: stars, color-coded by solver type.
-    "mujoco_adaptive_1e-3": PlotStyle("#0066cc", "*", "-", "MuJoCo adaptive (wrapper) tol=1e-3"),
-    "xpbd_adaptive_1e-3": PlotStyle("#cc6600", "*", "-", "XPBD adaptive tol=1e-3"),
-    "semi_adaptive_1e-3": PlotStyle("#660066", "*", "-", "SemiImplicit adaptive tol=1e-3"),
-    # MuJoCo fixed: orange/red, marker by dt.
-    "mujoco_fixed_10ms": PlotStyle("#ff7f0e", "D", "-", "MuJoCo fixed dt=10 ms"),
-    "mujoco_fixed_1ms": PlotStyle("#d62728", "s", "-", "MuJoCo fixed dt=1 ms"),
-    "fixed_10ms": PlotStyle("#ff7f0e", "D", "-", "Fixed dt=10 ms"),  # legacy
-    "fixed_1ms": PlotStyle("#d62728", "s", "-", "Fixed dt=1 ms"),    # legacy
-    "fixed": PlotStyle("#ff7f0e", "D", "-", "Fixed-step (dt=10 ms)"),  # legacy
-    # Other solver families: distinct colors.
-    "featherstone_1ms": PlotStyle("#2ca02c", "^", "-", "Featherstone dt=1 ms"),
-    "semi_implicit_1ms": PlotStyle("#9467bd", "v", "-", "Semi-implicit dt=1 ms"),
-    "xpbd_1ms": PlotStyle("#8c564b", "P", "-", "XPBD dt=1 ms"),
-    "vbd_1ms": PlotStyle("#e377c2", "X", "-", "VBD dt=1 ms"),
-    # Legacy keys kept so older result JSONs still plot.
-    "single_iter": PlotStyle("#d62728", "s", "--", "Single iteration"),
-    "identical": PlotStyle("#2ca02c", "^", "-", "Identical ICs"),
-    "perturbed": PlotStyle("#9467bd", "v", "-", "Perturbed ICs"),
-    "randomized": PlotStyle("#d62728", "v", "-", "Randomized ICs"),
+    # Adaptive (current keys) — stars, MuJoCo blue, others distinct.
+    "mujoco_adaptive_1e-3": PlotStyle("#0066cc", "*", "-", "MuJoCo tol=1e-3 (adaptive)"),
+    "mujoco_adaptive_1e-2": PlotStyle("#3399ff", "*", "-", "MuJoCo tol=1e-2 (adaptive)"),
+    "xpbd_adaptive_1e-3":   PlotStyle("#cc6600", "*", "-", "XPBD tol=1e-3 (adaptive)"),
+    "semi_adaptive_1e-3":   PlotStyle("#660066", "*", "-", "Semi-implicit tol=1e-3 (adaptive)"),
+    # Adaptive (legacy keys — old JSONs).
+    "mujoco_cenic_1e-3": PlotStyle("#1f77b4", "o", "-", "MuJoCo tol=1e-3 (adaptive, legacy)"),
+    "mujoco_cenic_1e-2": PlotStyle("#17becf", "o", "-", "MuJoCo tol=1e-2 (adaptive, legacy)"),
+    "cenic":             PlotStyle("#1f77b4", "o", "-", "MuJoCo (adaptive, legacy)"),
+    # Fixed-step (current keys) — diamonds/squares, color by family.
+    "mujoco_fixed_10ms":  PlotStyle("#ff7f0e", "D", "-", "MuJoCo dt=10 ms (fixed)"),
+    "mujoco_fixed_1ms":   PlotStyle("#d62728", "s", "-", "MuJoCo dt=1 ms (fixed)"),
+    "featherstone_1ms":   PlotStyle("#2ca02c", "^", "-", "Featherstone dt=1 ms (fixed)"),
+    "semi_implicit_1ms":  PlotStyle("#9467bd", "v", "-", "Semi-implicit dt=1 ms (fixed)"),
+    "xpbd_1ms":           PlotStyle("#8c564b", "P", "-", "XPBD dt=1 ms (fixed)"),
+    "vbd_1ms":            PlotStyle("#e377c2", "X", "-", "VBD dt=1 ms (fixed)"),
+    # Fixed-step (legacy keys).
+    "fixed_10ms": PlotStyle("#ff7f0e", "D", "-", "dt=10 ms (fixed, legacy)"),
+    "fixed_1ms":  PlotStyle("#d62728", "s", "-", "dt=1 ms (fixed, legacy)"),
+    "fixed":      PlotStyle("#ff7f0e", "D", "-", "dt=10 ms (fixed, legacy)"),
+    # Other legacy keys kept so older result JSONs still plot.
+    "single_iter": PlotStyle("#d62728", "s", "--", "Single iteration (legacy)"),
+    "identical":   PlotStyle("#2ca02c", "^", "-", "Identical ICs (legacy)"),
+    "perturbed":   PlotStyle("#9467bd", "v", "-", "Perturbed ICs (legacy)"),
+    "randomized":  PlotStyle("#d62728", "v", "-", "Randomized ICs (legacy)"),
 }
 
 
@@ -98,14 +101,16 @@ def log_log_plot(
     ax.set_title(title, fontsize=11)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
-    ax.legend(fontsize=9, loc="upper left")
+    # Legend OUTSIDE plot area (top-right of axes) so it never covers data.
+    ax.legend(fontsize=9, loc="upper left", bbox_to_anchor=(1.02, 1.0),
+              borderaxespad=0.0, frameon=True)
     ax.grid(True, which="both", alpha=0.3)
     return exponents
 
 
 def save_fig(fig: Figure, path: str | Path, dpi: int = 150) -> None:
-    """tight_layout + savefig + close."""
-    fig.tight_layout()
-    fig.savefig(path, dpi=dpi)
+    """tight_layout + savefig + close. bbox_inches='tight' captures the
+    outside-axes legend without clipping."""
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved -> {path}", flush=True)

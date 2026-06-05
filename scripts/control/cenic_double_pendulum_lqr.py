@@ -172,7 +172,7 @@ def build_model(num_worlds: int) -> newton.Model:
     m, l = MASS, LENGTH
 
     pendulum = newton.ModelBuilder()
-    newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(pendulum)
+    newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(pendulum)
 
     I_bend = m * l**2 / 12.0
     inertia = wp.mat33(
@@ -281,7 +281,7 @@ def main() -> None:
     stored_tau = wp.zeros(args.num_worlds, dtype=wp.float32, device=device)
 
     model = build_model(args.num_worlds)
-    solver = newton.solvers.SolverMuJoCoCENIC(
+    solver = newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=1e-3,
         dt_init=0.005,

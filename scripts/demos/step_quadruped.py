@@ -13,7 +13,7 @@ STEP_DT = 0.002  # 2 ms — advance by this much simulation time before each ren
 LOG_EVERY_N_STEPS = 10
 
 quadruped = newton.ModelBuilder()
-newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(quadruped)
+newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(quadruped)
 
 quadruped.default_body_armature = 0.01
 quadruped.default_joint_cfg.armature = 0.01
@@ -39,7 +39,7 @@ builder.replicate(quadruped, num_worlds)
 builder.add_ground_plane()
 model = builder.finalize()
 
-solver = newton.solvers.SolverMuJoCoCENIC(
+solver = newton.solvers.SolverMuJoCoAdaptive(
     model,
     tol=1e-3,
     dt_init=0.01,
