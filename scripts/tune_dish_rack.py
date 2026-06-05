@@ -27,7 +27,7 @@ def main() -> None:
 
     dts, errs, accepts = [], [], []
     for _ in range(N_STEPS):
-        state_0, state_1 = solver.step_dt(DT_OUTER, state_0, state_1, control)
+        solver.step(state_0, state_1, control, None, DT_OUTER)
         dts.append(float(solver.dt.numpy()[0]))
         errs.append(float(solver.last_error.numpy()[0]))
         accepts.append(bool(solver.accepted.numpy()[0]))

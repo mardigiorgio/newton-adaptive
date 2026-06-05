@@ -51,6 +51,7 @@ def eval_particle_contact(
     particle_v: wp.array(dtype=wp.vec3),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     k_contact: float,
     k_damp: float,
     k_friction: float,
@@ -59,6 +60,7 @@ def eval_particle_contact(
     max_radius: float,
     # outputs
     particle_f: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -68,6 +70,10 @@ def eval_particle_contact(
         # hash grid has not been built yet
         return
     if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     x = particle_x[i]
@@ -105,12 +111,18 @@ def eval_triangle_contact(
     indices: wp.array2d(dtype=int),
     materials: wp.array2d(dtype=float),
     particle_radius: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     contact_stiffness: float,
     f: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
     face_no = tid // num_particles  # which face
     particle_no = tid % num_particles  # which particle
+
+    world_idx = particle_world[particle_no]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     # at the moment, just one particle
     pos = x[particle_no]
@@ -160,6 +172,7 @@ def eval_particle_body_contact(
     body_qd: wp.array(dtype=wp.spatial_vector),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     body_com: wp.array(dtype=wp.vec3),
     shape_body: wp.array(dtype=int),
     shape_material_ke: wp.array(dtype=float),
@@ -183,6 +196,7 @@ def eval_particle_body_contact(
     # outputs
     particle_f: wp.array(dtype=wp.vec3),
     body_f: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -194,6 +208,10 @@ def eval_particle_body_contact(
     body_index = shape_body[shape_index]
     particle_index = contact_particle[tid]
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[particle_index]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     px = particle_x[particle_index]
@@ -288,14 +306,20 @@ def eval_triangles_body_contact(
     contact_dist: wp.array(dtype=float),
     contact_mat: wp.array(dtype=int),
     materials: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     #   body_f : wp.array(dtype=wp.vec3),
     #   body_t : wp.array(dtype=wp.vec3),
     tri_f: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
     face_no = tid // num_particles  # which face
     particle_no = tid % num_particles  # which particle
+
+    world_idx = particle_world[particle_no]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     # -----------------------
     # load body body point
@@ -401,6 +425,7 @@ def eval_body_contact(
     shape_material_ka: wp.array(dtype=float),
     shape_material_mu: wp.array(dtype=float),
     shape_body: wp.array(dtype=int),
+    body_world: wp.array(dtype=wp.int32),
     contact_count: wp.array(dtype=int),
     contact_point0: wp.array(dtype=wp.vec3),
     contact_point1: wp.array(dtype=wp.vec3),
@@ -416,6 +441,7 @@ def eval_body_contact(
     friction_smoothing: float,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -454,6 +480,17 @@ def eval_body_contact(
         ka += shape_material_ka[shape_b]
         mu += shape_material_mu[shape_b]
         body_b = shape_body[shape_b]
+
+    # Skip contact if either body's world is inactive. A pair must be entirely
+    # within active worlds; the design invariant is that contacts never cross
+    # worlds, so checking either body is sufficient.
+    world_idx = wp.int32(-1)
+    if body_a >= 0:
+        world_idx = body_world[body_a]
+    elif body_b >= 0:
+        world_idx = body_world[body_b]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
     if mat_nonzero > 0:
         ke /= float(mat_nonzero)
         kd /= float(mat_nonzero)
@@ -567,8 +604,27 @@ def eval_body_contact(
             wp.atomic_add(body_f, body_b, wp.spatial_vector(f_total, wp.cross(r_b, f_total)))
 
 
-def eval_particle_contact_forces(model: Model, state: State, particle_f: wp.array):
+# Module-level cache of an all-True default mask, keyed by (device, world_count).
+# Avoids reallocating a default mask per launcher call when callers (e.g.,
+# SolverFeatherstone) don't supply one.
+_DEFAULT_WORLD_ACTIVE_CACHE: dict[tuple[str, int], wp.array] = {}
+
+
+def _default_world_active(model: Model) -> wp.array:
+    key = (str(model.device), int(model.world_count))
+    cached = _DEFAULT_WORLD_ACTIVE_CACHE.get(key)
+    if cached is None or cached.shape[0] != model.world_count:
+        cached = wp.full(model.world_count, True, dtype=wp.bool, device=model.device)
+        _DEFAULT_WORLD_ACTIVE_CACHE[key] = cached
+    return cached
+
+
+def eval_particle_contact_forces(
+    model: Model, state: State, particle_f: wp.array, world_active: wp.array | None = None
+):
     if model.particle_count > 1 and model.particle_grid is not None:
+        if world_active is None:
+            world_active = _default_world_active(model)
         wp.launch(
             kernel=eval_particle_contact,
             dim=model.particle_count,
@@ -578,6 +634,7 @@ def eval_particle_contact_forces(model: Model, state: State, particle_f: wp.arra
                 state.particle_qd,
                 model.particle_radius,
                 model.particle_flags,
+                model.particle_world,
                 model.particle_ke,
                 model.particle_kd,
                 model.particle_kf,
@@ -585,13 +642,17 @@ def eval_particle_contact_forces(model: Model, state: State, particle_f: wp.arra
                 model.particle_cohesion,
                 model.particle_max_radius,
             ],
-            outputs=[particle_f],
+            outputs=[particle_f, world_active],
             device=model.device,
         )
 
 
-def eval_triangle_contact_forces(model: Model, state: State, particle_f: wp.array):
+def eval_triangle_contact_forces(
+    model: Model, state: State, particle_f: wp.array, world_active: wp.array | None = None
+):
     if model.tri_count and model.particle_count:
+        if world_active is None:
+            world_active = _default_world_active(model)
         wp.launch(
             kernel=eval_triangle_contact,
             dim=model.tri_count * model.particle_count,
@@ -602,9 +663,10 @@ def eval_triangle_contact_forces(model: Model, state: State, particle_f: wp.arra
                 model.tri_indices,
                 model.tri_materials,
                 model.particle_radius,
+                model.particle_world,
                 model.soft_contact_ke,
             ],
-            outputs=[particle_f],
+            outputs=[particle_f, world_active],
             device=model.device,
         )
 
@@ -613,6 +675,7 @@ def eval_body_contact_forces(
     model: Model,
     state: State,
     contacts: Contacts | None,
+    world_active: wp.array | None = None,
     friction_smoothing: float = 1.0,
     force_in_world_frame: bool = False,
     body_f_out: wp.array | None = None,
@@ -620,6 +683,8 @@ def eval_body_contact_forces(
     if contacts is not None and contacts.rigid_contact_max:
         if body_f_out is None:
             body_f_out = state.body_f
+        if world_active is None:
+            world_active = _default_world_active(model)
         wp.launch(
             kernel=eval_body_contact,
             dim=contacts.rigid_contact_max,
@@ -633,6 +698,7 @@ def eval_body_contact_forces(
                 model.shape_material_ka,
                 model.shape_material_mu,
                 model.shape_body,
+                model.body_world,
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_point0,
                 contacts.rigid_contact_point1,
@@ -647,7 +713,7 @@ def eval_body_contact_forces(
                 force_in_world_frame,
                 friction_smoothing,
             ],
-            outputs=[body_f_out],
+            outputs=[body_f_out, world_active],
             device=model.device,
         )
 
@@ -658,9 +724,12 @@ def eval_particle_body_contact_forces(
     contacts: Contacts | None,
     particle_f: wp.array,
     body_f: wp.array,
+    world_active: wp.array | None = None,
     body_f_in_world_frame: bool = False,
 ):
     if contacts is not None and contacts.soft_contact_max:
+        if world_active is None:
+            world_active = _default_world_active(model)
         wp.launch(
             kernel=eval_particle_body_contact,
             dim=contacts.soft_contact_max,
@@ -671,6 +740,7 @@ def eval_particle_body_contact_forces(
                 state.body_qd,
                 model.particle_radius,
                 model.particle_flags,
+                model.particle_world,
                 model.body_com,
                 model.shape_body,
                 model.shape_material_ke,
@@ -693,6 +763,6 @@ def eval_particle_body_contact_forces(
                 body_f_in_world_frame,
             ],
             # outputs
-            outputs=[particle_f, body_f],
+            outputs=[particle_f, body_f, world_active],
             device=model.device,
         )

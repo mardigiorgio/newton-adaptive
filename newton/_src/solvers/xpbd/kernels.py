@@ -34,6 +34,7 @@ def apply_particle_shape_restitution(
     particle_v_old: wp.array(dtype=wp.vec3),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     body_q: wp.array(dtype=wp.transform),
     body_q_prev: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
@@ -50,6 +51,7 @@ def apply_particle_shape_restitution(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_max: int,
     particle_v_out: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -62,6 +64,10 @@ def apply_particle_shape_restitution(
     particle_index = contact_particle[tid]
 
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[particle_index]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     v_new = particle_v_new[particle_index]
@@ -114,6 +120,7 @@ def solve_particle_shape_contacts(
     particle_invmass: wp.array(dtype=float),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
@@ -135,6 +142,7 @@ def solve_particle_shape_contacts(
     # outputs
     delta: wp.array(dtype=wp.vec3),
     body_delta: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -147,6 +155,10 @@ def solve_particle_shape_contacts(
     particle_index = contact_particle[tid]
 
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[particle_index]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     px = particle_x[particle_index]
@@ -226,6 +238,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array(dtype=float),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -233,6 +246,7 @@ def solve_particle_particle_contacts(
     relaxation: float,
     # outputs
     deltas: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -242,6 +256,10 @@ def solve_particle_particle_contacts(
         # hash grid has not been built yet
         return
     if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     x = particle_x[i]
@@ -290,6 +308,7 @@ def solve_springs(
     x: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     invmass: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     spring_indices: wp.array(dtype=int),
     spring_rest_lengths: wp.array(dtype=float),
     spring_stiffness: wp.array(dtype=float),
@@ -297,11 +316,16 @@ def solve_springs(
     dt: float,
     lambdas: wp.array(dtype=float),
     delta: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
     i = spring_indices[tid * 2 + 0]
     j = spring_indices[tid * 2 + 1]
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     ke = spring_stiffness[tid]
     kd = spring_damping[tid]
@@ -356,12 +380,14 @@ def bending_constraint(
     x: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     invmass: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     indices: wp.array2d(dtype=int),
     rest: wp.array(dtype=float),
     bending_properties: wp.array2d(dtype=float),
     dt: float,
     lambdas: wp.array(dtype=float),
     delta: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
     eps = 1.0e-6
@@ -375,6 +401,10 @@ def bending_constraint(
     l = indices[tid, 3]
 
     if i == -1 or j == -1 or k == -1 or l == -1:
+        return
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     rest_angle = rest[tid]
@@ -457,6 +487,7 @@ def solve_tetrahedra(
     x: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     inv_mass: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     indices: wp.array(dtype=int, ndim=2),
     rest_matrix: wp.array(dtype=wp.mat33),
     activation: wp.array(dtype=float),
@@ -464,6 +495,7 @@ def solve_tetrahedra(
     dt: float,
     relaxation: float,
     delta: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -471,6 +503,10 @@ def solve_tetrahedra(
     j = indices[tid, 1]
     k = indices[tid, 2]
     l = indices[tid, 3]
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     # act = activation[tid]
 
@@ -628,6 +664,7 @@ def solve_tetrahedra2(
     x: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     inv_mass: wp.array(dtype=float),
+    particle_world: wp.array(dtype=wp.int32),
     indices: wp.array(dtype=int, ndim=2),
     pose: wp.array(dtype=wp.mat33),
     activation: wp.array(dtype=float),
@@ -635,6 +672,7 @@ def solve_tetrahedra2(
     dt: float,
     relaxation: float,
     delta: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -642,6 +680,10 @@ def solve_tetrahedra2(
     j = indices[tid, 1]
     k = indices[tid, 2]
     l = indices[tid, 3]
+
+    world_idx = particle_world[i]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     # act = activation[tid]
 
@@ -774,14 +816,20 @@ def apply_particle_deltas(
     x_orig: wp.array(dtype=wp.vec3),
     x_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
     v_max: float,
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
     if (particle_flags[tid] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    world_idx = particle_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
         return
 
     x0 = x_orig[tid]
@@ -810,14 +858,24 @@ def apply_body_deltas(
     body_I: wp.array(dtype=wp.mat33),
     body_inv_m: wp.array(dtype=float),
     body_inv_I: wp.array(dtype=wp.mat33),
+    body_world: wp.array(dtype=wp.int32),
     deltas: wp.array(dtype=wp.spatial_vector),
     constraint_inv_weights: wp.array(dtype=float),
     dt: float,
     # outputs
     q_out: wp.array(dtype=wp.transform),
     qd_out: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = body_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        # Preserve state for inactive worlds; the kernel writes both outputs
+        # unconditionally so we must mirror inputs to outputs to avoid
+        # leaving uninitialized values when state_out aliases a fresh buffer.
+        q_out[tid] = q_in[tid]
+        qd_out[tid] = qd_in[tid]
+        return
     inv_m = body_inv_m[tid]
     if inv_m == 0.0:
         q_out[tid] = q_in[tid]
@@ -877,9 +935,14 @@ def apply_body_deltas(
 @wp.kernel
 def apply_body_delta_velocities(
     deltas: wp.array(dtype=wp.spatial_vector),
+    body_world: wp.array(dtype=wp.int32),
     qd_out: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = body_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
     wp.atomic_add(qd_out, tid, deltas[tid])
 
 
@@ -896,9 +959,14 @@ def apply_joint_forces(
     joint_dof_dim: wp.array(dtype=int, ndim=2),
     joint_axis: wp.array(dtype=wp.vec3),
     joint_f: wp.array(dtype=float),
+    joint_world: wp.array(dtype=wp.int32),
     body_f: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = joint_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
     type = joint_type[tid]
     if type == JointType.FIXED:
         return
@@ -1135,14 +1203,19 @@ def solve_simple_body_joints(
     joint_target: wp.array(dtype=float),
     joint_target_ke: wp.array(dtype=float),
     joint_target_kd: wp.array(dtype=float),
+    joint_world: wp.array(dtype=wp.int32),
     joint_linear_compliance: float,
     joint_angular_compliance: float,
     angular_relaxation: float,
     linear_relaxation: float,
     dt: float,
     deltas: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = joint_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
     type = joint_type[tid]
 
     if not joint_enabled[tid]:
@@ -1453,14 +1526,19 @@ def solve_body_joints(
     joint_target_vel: wp.array(dtype=float),
     joint_target_ke: wp.array(dtype=float),
     joint_target_kd: wp.array(dtype=float),
+    joint_world: wp.array(dtype=wp.int32),
     joint_linear_compliance: float,
     joint_angular_compliance: float,
     angular_relaxation: float,
     linear_relaxation: float,
     dt: float,
     deltas: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = joint_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
     type = joint_type[tid]
 
     if not joint_enabled[tid]:
@@ -2051,6 +2129,7 @@ def solve_body_contact_positions(
     body_com: wp.array(dtype=wp.vec3),
     body_m_inv: wp.array(dtype=float),
     body_I_inv: wp.array(dtype=wp.mat33),
+    body_world: wp.array(dtype=wp.int32),
     shape_body: wp.array(dtype=int),
     contact_count: wp.array(dtype=int),
     contact_point0: wp.array(dtype=wp.vec3),
@@ -2070,6 +2149,7 @@ def solve_body_contact_positions(
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
     contact_inv_weight: wp.array(dtype=float),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -2088,6 +2168,17 @@ def solve_body_contact_positions(
     if shape_b >= 0:
         body_b = shape_body[shape_b]
     if body_a == body_b:
+        return
+
+    # Determine the contact's world: prefer the first body that exists
+    # (contacts span two shapes which may include a globally-shared one
+    # such as the ground plane).
+    contact_world = wp.int32(-1)
+    if body_a >= 0:
+        contact_world = body_world[body_a]
+    if contact_world < 0 and body_b >= 0:
+        contact_world = body_world[body_b]
+    if contact_world >= 0 and not world_active[contact_world]:
         return
 
     # find body to world transform
@@ -2270,10 +2361,15 @@ def update_body_velocities(
     poses: wp.array(dtype=wp.transform),
     poses_prev: wp.array(dtype=wp.transform),
     body_com: wp.array(dtype=wp.vec3),
+    body_world: wp.array(dtype=wp.int32),
     dt: float,
     qd_out: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+    world_idx = body_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
 
     pose = poses[tid]
     pose_prev = poses_prev[tid]
@@ -2327,6 +2423,7 @@ def apply_rigid_restitution(
     dt: float,
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
 
@@ -2354,6 +2451,17 @@ def apply_rigid_restitution(
     if mat_nonzero > 0:
         restitution /= float(mat_nonzero)
     if body_a == body_b:
+        return
+
+    # Determine the contact's world: prefer the first body that exists
+    # (contacts span two shapes which may include a globally-shared one
+    # such as the ground plane).
+    contact_world = wp.int32(-1)
+    if body_a >= 0:
+        contact_world = body_world[body_a]
+    if contact_world < 0 and body_b >= 0:
+        contact_world = body_world[body_b]
+    if contact_world >= 0 and not world_active[contact_world]:
         return
 
     m_inv_a = 0.0

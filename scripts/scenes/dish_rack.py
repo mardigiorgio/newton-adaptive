@@ -330,14 +330,14 @@ def build_template(
     rack_margin: float = 0.005,
 ) -> newton.ModelBuilder:
     template = newton.ModelBuilder()
-    newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(template)
+    newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
     # Contact stiffness / damping.  ke/kd map to MuJoCo solref via
     # convert_solref() in newton/_src/solvers/mujoco/kernels.py:
     #   timeconst = 2/kd        -- must stay above 2*dt for stability
     #   dampratio = kd/(2*sqrt(ke))
     # Tuned for dt ~ 2 ms (the adaptive solver's typical contact-regime dt).
-    # dt_inner_max is capped to 2 ms in make_solver to match.
+    # dt_max is capped to 2 ms in make_solver to match.
     _KD = 400.0
     _KE = 40000.0  # dampratio = kd/(2*sqrt(ke)) = 1.0 -> critically damped
 
@@ -470,15 +470,13 @@ def build_model_randomized(n_worlds: int, seed: int = 42, **tpl_kwargs) -> newto
 def make_solver(
     model: newton.Model,
     tol: float = TOL,
-    dt_mode: str = "per_world",
-) -> newton.solvers.SolverMuJoCoCENIC:
-    return newton.solvers.SolverMuJoCoCENIC(
+) -> newton.solvers.SolverMuJoCoAdaptive:
+    return newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
-        dt_inner_init=DT_OUTER,
-        dt_inner_min=DT_INNER_MIN,
-        dt_inner_max=0.01,
-        dt_mode=dt_mode,
+        dt_init=DT_OUTER,
+        dt_min=DT_INNER_MIN,
+        dt_max=0.01,
         nconmax=2048,
         njmax=8192,
         cone="elliptic",
@@ -489,7 +487,7 @@ def make_solver(
 
 
 # Inner step for the fixed-step baseline.  2 ms stays below solref
-# timeconst = 2/kd = 5 ms (kd=400), matching CENIC's dt_inner_max.
+# timeconst = 2/kd = 5 ms (kd=400), matching CENIC's dt_max.
 FIXED_DT_INNER = 0.01
 
 

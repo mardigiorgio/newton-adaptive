@@ -18,6 +18,7 @@ import warp as wp
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ..semi_implicit.kernels_contact import (
+    _default_world_active,
     eval_body_contact,
     eval_particle_body_contact_forces,
     eval_particle_contact_forces,
@@ -407,6 +408,9 @@ class SolverFeatherstone(SolverBase):
                 )
 
                 if contacts is not None and contacts.rigid_contact_max:
+                    # Featherstone has no per-world masking, so pass an all-True
+                    # default mask. The cached helper avoids repeated allocation.
+                    world_active = _default_world_active(model)
                     wp.launch(
                         kernel=eval_body_contact,
                         dim=contacts.rigid_contact_max,
@@ -420,6 +424,7 @@ class SolverFeatherstone(SolverBase):
                             model.shape_material_ka,
                             model.shape_material_mu,
                             model.shape_body,
+                            model.body_world,
                             contacts.rigid_contact_count,
                             contacts.rigid_contact_point0,
                             contacts.rigid_contact_point1,
@@ -434,7 +439,7 @@ class SolverFeatherstone(SolverBase):
                             True,
                             self.friction_smoothing,
                         ],
-                        outputs=[body_f],
+                        outputs=[body_f, world_active],
                         device=model.device,
                     )
 

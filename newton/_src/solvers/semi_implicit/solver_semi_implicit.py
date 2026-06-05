@@ -97,6 +97,7 @@ class SolverSemiImplicit(SolverBase):
         control: Control | None,
         contacts: Contacts | None,
         dt: float,
+        world_active: wp.array | None = None,
     ):
         """
         Simulate the model for a given time step using the given control input.
@@ -110,6 +111,10 @@ class SolverSemiImplicit(SolverBase):
             contacts: The contact information.
                 Defaults to `None` which means no contacts are used.
             dt: The time step (typically in seconds).
+            world_active: Optional per-world activity mask, shape ``[world_count]``,
+                dtype ``wp.bool``. When provided, kernels skip work for worlds
+                whose entry is ``False``. Defaults to ``None`` (treated as all True
+                for backward compatibility).
 
         .. warning::
             The ``eval_particle_contact`` kernel for particle-particle contact handling may corrupt the gradient computation
@@ -127,6 +132,18 @@ class SolverSemiImplicit(SolverBase):
                 body_f = state_in.body_f
 
             model = self.model
+
+            # Default: all worlds active (backward compat for existing callers).
+            if world_active is None:
+                n = model.world_count
+                if (
+                    not hasattr(self, "_default_world_active")
+                    or self._default_world_active.shape[0] != n
+                ):
+                    self._default_world_active = wp.full(
+                        n, True, dtype=wp.bool, device=model.device
+                    )
+                world_active = self._default_world_active
 
             if control is None:
                 control = model.control(clone_variables=False)
@@ -149,27 +166,34 @@ class SolverSemiImplicit(SolverBase):
             eval_tetrahedra_forces(model, state_in, control, particle_f)
 
             # body joints
-            eval_body_joint_forces(model, state_in, control, body_f_work, self.joint_attach_ke, self.joint_attach_kd)
+            eval_body_joint_forces(
+                model, state_in, control, body_f_work, self.joint_attach_ke, self.joint_attach_kd, world_active
+            )
 
             # muscles
             if False:
                 eval_muscle_forces(model, state_in, control, body_f)
 
             # particle-particle interactions
-            eval_particle_contact_forces(model, state_in, particle_f)
+            eval_particle_contact_forces(model, state_in, particle_f, world_active)
 
             # triangle/triangle contacts
             if self.enable_tri_contact:
-                eval_triangle_contact_forces(model, state_in, particle_f)
+                eval_triangle_contact_forces(model, state_in, particle_f, world_active)
 
             # body contacts
             eval_body_contact_forces(
-                model, state_in, contacts, friction_smoothing=self.friction_smoothing, body_f_out=body_f_work
+                model,
+                state_in,
+                contacts,
+                world_active,
+                friction_smoothing=self.friction_smoothing,
+                body_f_out=body_f_work,
             )
 
             # particle shape contact
             eval_particle_body_contact_forces(
-                model, state_in, contacts, particle_f, body_f_work, body_f_in_world_frame=False
+                model, state_in, contacts, particle_f, body_f_work, world_active, body_f_in_world_frame=False
             )
 
             self.integrate_particles(model, state_in, state_out, dt)

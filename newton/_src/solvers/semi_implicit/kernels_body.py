@@ -85,9 +85,16 @@ def eval_body_joints(
     joint_limit_kd: wp.array(dtype=float),
     joint_attach_ke: float,
     joint_attach_kd: float,
+    joint_world: wp.array(dtype=wp.int32),
     body_f: wp.array(dtype=wp.spatial_vector),
+    world_active: wp.array(dtype=wp.bool),
 ):
     tid = wp.tid()
+
+    world_idx = joint_world[tid]
+    if world_idx >= 0 and not world_active[world_idx]:
+        return
+
     type = joint_type[tid]
 
     c_child = joint_child[tid]
@@ -513,7 +520,13 @@ def eval_body_joints(
 
 
 def eval_body_joint_forces(
-    model: Model, state: State, control: Control, body_f: wp.array, joint_attach_ke: float, joint_attach_kd: float
+    model: Model,
+    state: State,
+    control: Control,
+    body_f: wp.array,
+    joint_attach_ke: float,
+    joint_attach_kd: float,
+    world_active: wp.array,
 ):
     if model.joint_count:
         wp.launch(
@@ -543,7 +556,8 @@ def eval_body_joint_forces(
                 model.joint_limit_kd,
                 joint_attach_ke,
                 joint_attach_kd,
+                model.joint_world,
             ],
-            outputs=[body_f],
+            outputs=[body_f, world_active],
             device=model.device,
         )

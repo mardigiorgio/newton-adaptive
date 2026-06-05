@@ -1,21 +1,21 @@
 ## CENIC simulation loop pattern
 
-All scripts using `SolverMuJoCoCENIC` must use `step_dt` — never reimplement the inner loop manually.
+All scripts using `SolverMuJoCoAdaptive` must call `step` once per outer DT — never reimplement the inner loop manually.
 
 ```python
 DT = 0.002  # 500 Hz — default control and render period [s]
 
 while viewer.is_running():
-    state_0, state_1 = solver.step_dt(
-        DT, state_0, state_1, control,
-        apply_forces=viewer.apply_forces,
-    )
+    if viewer.apply_forces is not None:
+        viewer.apply_forces(state_0)
+    solver.step(state_0, state_1, control, None, DT)
+    # state_0 updated in place; state_1 is unused scratch.
     # control / policy updates go here — once per DT boundary
     t += DT
     viewer.render(state_0, t)  # begin_frame(t) + log_state + end_frame
 ```
 
-`step_dt` owns the inner loop, the GPU boundary kernels, `clear_forces`, and `apply_forces` ordering. Never call `viewer.begin_frame`, policy updates, or `for _ in range(N)` inside the inner loop.
+`step` owns the inner loop, the GPU boundary kernels, `clear_forces`, and `apply_forces` ordering. Never call `viewer.begin_frame`, policy updates, or `for _ in range(N)` inside the inner loop.
 
 ---
 
@@ -33,12 +33,12 @@ while True:
         break
 ```
 
-Correct — use `step_dt`, which handles the inner loop internally:
+Correct — use `step`, which handles the inner loop internally:
 ```python
-# step_dt launches kernels directly via wp.launch() per iteration and checks a
+# step launches kernels directly via wp.launch() per iteration and checks a
 # 4-byte boundary flag via .numpy() -- one int32 per iteration (K~3).
 # Do not reimplement this loop manually.
-state_0, state_1 = solver.step_dt(DT, state_0, state_1, control)
+solver.step(state_0, state_1, control, None, DT)
 ```
 
 ### Why N worlds do not hurt physics throughput — but do hurt render throughput

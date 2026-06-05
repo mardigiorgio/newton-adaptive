@@ -29,7 +29,7 @@ Z_BOXES = 1.25
 def build_template() -> newton.ModelBuilder:
     """Single-world template: 9 spheres + 9 tilted boxes."""
     template = newton.ModelBuilder()
-    newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(template)
+    newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
     cfg_obj = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=200, mu=0.3, margin=0.005)
 
@@ -201,24 +201,19 @@ def build_model_randomized(n_worlds: int, seed: int = 42) -> newton.Model:
 def make_solver(
     model: newton.Model,
     tol: float = TOL,
-    dt_mode: str = "per_world",
-) -> newton.solvers.SolverMuJoCoCENIC:
+) -> newton.solvers.SolverMuJoCoAdaptive:
     """CENIC solver with canonical contact-demo parameters.
 
     Args:
         model: The model to simulate.
         tol: Inf-norm error tolerance on joint_q per world.
-        dt_mode: ``"per_world"`` (default) or ``"global"``.  ``"global"`` forces
-            every world to share a single dt driven by the worst-case error,
-            used as a baseline for measuring the value of per-world adaptivity.
     """
-    return newton.solvers.SolverMuJoCoCENIC(
+    return newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
-        dt_inner_init=DT_OUTER,
-        dt_inner_min=DT_INNER_MIN,
-        dt_inner_max=DT_OUTER,
-        dt_mode=dt_mode,
+        dt_init=DT_OUTER,
+        dt_min=DT_INNER_MIN,
+        dt_max=DT_OUTER,
         nconmax=128,
         njmax=640,
     )
@@ -229,3 +224,32 @@ def make_fixed_solver(model: newton.Model) -> newton.solvers.SolverMuJoCo:
     return newton.solvers.SolverMuJoCo(
         model, separate_worlds=True, nconmax=128, njmax=640,
     )
+
+
+# --- Multi-solver factories for cross-solver benchmarks ----------------------
+# Per-world budgets (mjwarp multiplies by nworld). Tuned for this scene's
+# steady-state contact count (~20 contacts/world).
+_NCON = 50
+_NJM = 200
+
+from scripts.scenes import _solvers as _s  # noqa: E402
+
+SOLVER_FACTORIES: dict = {
+    "mujoco_adaptive_1e-3": _s.mujoco_adaptive_factory(
+        tol=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+    ),
+    "mujoco_adaptive_1e-2": _s.mujoco_adaptive_factory(
+        tol=1e-2, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+    ),
+    "mujoco_fixed_1ms": _s.mujoco_fixed_factory(
+        dt=1e-3, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+    ),
+    "mujoco_fixed_10ms": _s.mujoco_fixed_factory(
+        dt=1e-2, nconmax=_NCON, njmax=_NJM, dt_outer=DT_OUTER,
+    ),
+    # Featherstone uses spring-damper contacts that go NaN on the bench's
+    # randomized ICs (objects spawn slightly interpenetrating). Stable on the
+    # deterministic build_model() but not build_model_randomized().
+    # "featherstone_1ms": _s.featherstone_factory(dt=1e-3, dt_outer=DT_OUTER),
+    "xpbd_1ms": _s.xpbd_factory(dt=1e-3, dt_outer=DT_OUTER),
+}

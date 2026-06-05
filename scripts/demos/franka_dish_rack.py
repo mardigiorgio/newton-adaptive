@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
+"""Interactive Franka FR3 drops mug, fork, spatula into the LBM dish rack.
 
-"""Interactive dish-rack demo using the CENIC adaptive solver.
-
-Drops a random mix of mugs, forks, spoons, bowls, plates, knives and cups onto
-a peg rack.  Object layout per world is deterministic from ``--seed``.
+Uses the canonical CENIC solver.step loop with two per-step helpers:
+  update_franka_targets: writes joint_target_pos from the keyframe table.
+  update_held_objects:   kinematically pins held bodies to the EE until
+                         RELEASE_TIME, then lets them fall freely.
 
 Usage::
 
-    uv run python -m scripts.demos.dish_rack [--num-worlds N] [--headless] [--seed S]
+    uv run python -m scripts.demos.franka_dish_rack [--num-worlds N] [--headless] [--tol FLOAT]
 """
 
 import argparse
@@ -19,14 +20,14 @@ import warp as wp
 
 import newton
 import newton.solvers
-from scripts.scenes.dish_rack import (
+from scripts.scenes.franka_dish_rack import (
     DT_OUTER,
-    FIXED_DT_INNER,
     LOG_EVERY,
     build_model_randomized,
-    make_pipeline,
+    make_fixed_solver,
     make_solver,
-    make_solver_fixed,
+    update_franka_targets,
+    update_held_objects,
 )
 
 _grid_lines = 0
@@ -54,7 +55,7 @@ def _print_status(solver, step):
 
         col = 16
         bar = "+" + ("-" * col + "+") * 5
-        hdr = f"{'world':>{col}}{'sim_time (s)':>{col}}{'dt (s)':>{col}}{'state err':>{col}}{'status':>{col}}"
+        hdr = f"{'world':>{col}}{'sim_time (s)':>{col}}{'dt (s)':>{col}}{'Linf error':>{col}}{'status':>{col}}"
         lines = [f"  step {step}  tol={solver._tol:.1e}", bar, hdr, bar]
         for i in range(len(sim_times)):
             lines.append(
@@ -75,82 +76,83 @@ def _print_status(solver, step):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-worlds", type=int, default=1, help="parallel worlds")
+    parser.add_argument("--num-worlds", type=int, default=1)
     parser.add_argument("--num-steps", type=int, default=0, help="0 = run until closed")
-    parser.add_argument("--seed", type=int, default=42, help="RNG seed for object layout")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
-        "--solver",
-        choices=("cenic", "mujoco"),
-        default="cenic",
-        help="cenic = SolverMuJoCoAdaptive adaptive; mujoco = fixed-step SolverMuJoCo baseline",
+        "--tol",
+        type=float,
+        default=None,
+        help="CENIC tolerance override (default uses scene's TOL).",
+    )
+    parser.add_argument(
+        "--fixed-dt",
+        type=float,
+        default=None,
+        help="Use fixed-step SolverMuJoCo with this dt instead of CENIC.",
     )
     args = parser.parse_args()
 
-    model = build_model_randomized(args.num_worlds, seed=args.seed)
+    model = build_model_randomized(args.num_worlds)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
 
-    if args.solver == "cenic":
-        solver = make_solver(model)
+    use_fixed = args.fixed_dt is not None
+
+    if use_fixed:
+        solver = make_fixed_solver(model)
+        n_inner = round(DT_OUTER / args.fixed_dt)
         print(
-            f"Dish-rack demo: {args.num_worlds} world(s)  seed={args.seed}  "
-            f"solver=SolverMuJoCoAdaptive  tol={solver._tol:.1e}  "
-            f"dt_init={solver._dt.numpy()[0]:.4f}  dt_max={solver._dt_max:.4f}",
+            f"Fixed-step Franka demo: {args.num_worlds} world(s)  dt={args.fixed_dt:.4e}  substeps/outer={n_inner}",
             flush=True,
         )
     else:
-        solver = make_solver_fixed(model)
+        solver = make_solver(model, tol=args.tol)
         print(
-            f"Dish-rack demo: {args.num_worlds} world(s)  seed={args.seed}  "
-            f"solver=SolverMuJoCo (fixed)  dt={FIXED_DT_INNER:.4f}  "
-            f"substeps/frame={int(round(DT_OUTER / FIXED_DT_INNER))}",
+            f"CENIC Franka demo: {args.num_worlds} world(s)  tol={solver._tol:.1e}  "
+            f"dt_init={solver._dt.numpy()[0]:.4f}",
             flush=True,
         )
 
     viewer = newton.viewer.ViewerGL(headless=args.headless)
     viewer.set_model(model)
-    # Rack bbox is 0.46 x 0.316 m; spacing wider than that so worlds don't overlap.
-    viewer.set_world_offsets((0.6, 0.5, 0.0))
-    viewer.set_camera(
-        pos=wp.vec3(0.85, -0.95, 0.70),
-        pitch=-25.0,
-        yaw=135.0,
-    )
+    viewer.set_camera(pos=wp.vec3(0.9, -0.9, 0.6), pitch=-15.0, yaw=135.0)
 
-    pipeline, contacts = make_pipeline(model, solver)
-    if args.solver == "cenic":
-        # CENIC owns its own pipeline; render its internal contacts buffer
-        # instead of the unused external one.
+    if use_fixed:
+        contacts = newton.Contacts(
+            rigid_contact_max=2048,
+            soft_contact_max=0,
+            requested_attributes={"force"},
+        )
+    else:
         contacts = solver.contacts
 
     step = 0
     t = 0.0
     t_start = time.perf_counter()
-    fixed_substeps = int(round(DT_OUTER / FIXED_DT_INNER))
 
     while viewer.is_running():
-        if args.solver == "cenic":
+        update_franka_targets(model, control, t)
+        update_held_objects(model, state_0, t)
+
+        if use_fixed:
+            for _ in range(n_inner):
+                state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
+                state_0, state_1 = state_1, state_0
+        else:
             if viewer.apply_forces is not None:
                 viewer.apply_forces(state_0)
             solver.step(state_0, state_1, control, None, DT_OUTER)
-        else:
-            for _ in range(fixed_substeps):
-                state_0.clear_forces()
-                if viewer.apply_forces is not None:
-                    viewer.apply_forces(state_0)
-                pipeline.collide(state_0, contacts)
-                solver.step(state_0, state_1, control, contacts, FIXED_DT_INNER)
-                state_0, state_1 = state_1, state_0
         t += DT_OUTER
         step += 1
 
-        if step % LOG_EVERY == 0 and args.solver == "cenic":
+        if not use_fixed and step % LOG_EVERY == 0:
             _print_status(solver, step)
 
         if args.num_steps > 0 and step >= args.num_steps:
             break
+
         viewer.begin_frame(t)
         viewer.log_state(state_0)
         viewer.log_contacts(contacts, state_0)
@@ -158,10 +160,7 @@ def main():
 
     wall = time.perf_counter() - t_start
     fps = step / wall if wall > 0 else float("inf")
-    print(
-        f"\n{step} steps  {t:.3f} s sim  {wall:.2f} s wall  {fps:.1f} fps",
-        flush=True,
-    )
+    print(f"\n{step} steps  {t:.3f} s sim  {wall:.2f} s wall  {fps:.1f} fps", flush=True)
 
 
 if __name__ == "__main__":

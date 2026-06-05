@@ -33,8 +33,26 @@ class PlotStyle:
 
 # Consistent style registry for stepping modes.
 STYLES: dict[str, PlotStyle] = {
-    "cenic": PlotStyle("#1f77b4", "o", "-", "CENIC adaptive"),
-    "fixed": PlotStyle("#ff7f0e", "D", "-", "Fixed-step (dt=10 ms)"),
+    # CENIC adaptive: blues, marker varies by tol.
+    "mujoco_cenic_1e-3": PlotStyle("#1f77b4", "o", "-", "CENIC tol=1e-3"),
+    "mujoco_cenic_1e-2": PlotStyle("#17becf", "o", "-", "CENIC tol=1e-2"),
+    "cenic": PlotStyle("#1f77b4", "o", "-", "CENIC adaptive"),  # legacy
+    # New adaptive solvers: stars, color-coded by solver type.
+    "mujoco_adaptive_1e-3": PlotStyle("#0066cc", "*", "-", "MuJoCo adaptive (wrapper) tol=1e-3"),
+    "xpbd_adaptive_1e-3": PlotStyle("#cc6600", "*", "-", "XPBD adaptive tol=1e-3"),
+    "semi_adaptive_1e-3": PlotStyle("#660066", "*", "-", "SemiImplicit adaptive tol=1e-3"),
+    # MuJoCo fixed: orange/red, marker by dt.
+    "mujoco_fixed_10ms": PlotStyle("#ff7f0e", "D", "-", "MuJoCo fixed dt=10 ms"),
+    "mujoco_fixed_1ms": PlotStyle("#d62728", "s", "-", "MuJoCo fixed dt=1 ms"),
+    "fixed_10ms": PlotStyle("#ff7f0e", "D", "-", "Fixed dt=10 ms"),  # legacy
+    "fixed_1ms": PlotStyle("#d62728", "s", "-", "Fixed dt=1 ms"),    # legacy
+    "fixed": PlotStyle("#ff7f0e", "D", "-", "Fixed-step (dt=10 ms)"),  # legacy
+    # Other solver families: distinct colors.
+    "featherstone_1ms": PlotStyle("#2ca02c", "^", "-", "Featherstone dt=1 ms"),
+    "semi_implicit_1ms": PlotStyle("#9467bd", "v", "-", "Semi-implicit dt=1 ms"),
+    "xpbd_1ms": PlotStyle("#8c564b", "P", "-", "XPBD dt=1 ms"),
+    "vbd_1ms": PlotStyle("#e377c2", "X", "-", "VBD dt=1 ms"),
+    # Legacy keys kept so older result JSONs still plot.
     "single_iter": PlotStyle("#d62728", "s", "--", "Single iteration"),
     "identical": PlotStyle("#2ca02c", "^", "-", "Identical ICs"),
     "perturbed": PlotStyle("#9467bd", "v", "-", "Perturbed ICs"),

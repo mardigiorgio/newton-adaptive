@@ -13,6 +13,7 @@ Usage::
 """
 
 import argparse
+import math
 import sys
 import time
 
@@ -20,9 +21,56 @@ import warp as wp
 
 import newton
 import newton.solvers
-from scripts.scenes.contact_objects import DT_OUTER, LOG_EVERY, build_model, make_solver
+from scripts.scenes.contact_objects import (
+    DT_INNER_MIN,
+    DT_OUTER,
+    LOG_EVERY,
+    TOL,
+    build_model,
+    build_model_randomized,
+    make_solver,
+)
 
 _grid_lines = 0
+
+# HUD state shared between the main loop (updates) and the imgui callback (reads).
+# Updated every HUD_EVERY outer steps so we get one extra GPU sync per ~150 ms
+# instead of every frame — invisible alongside the viewer's existing per-frame sync.
+HUD_EVERY = 15
+_hud = {
+    "sim_time": 0.0,
+    "mean_dt_ms": 0.0,
+    "dt_min_ms": 0.0,
+    "dt_max_ms": 0.0,
+    "error_max": 0.0,
+    "iters_last": 0,
+    "step": 0,
+}
+
+
+def _update_hud(solver, step: int) -> None:
+    """Read aggregated CENIC stats off the GPU. One reduction + a few small copies."""
+    s = solver.get_status_summary()
+    mean_dt = float(solver.dt.numpy().mean())  # N float32s — negligible
+    k = int(solver.iteration_count.numpy()[0])  # 1 int32 — negligible
+    _hud["sim_time"] = s["sim_time_max"]
+    _hud["mean_dt_ms"] = mean_dt * 1e3
+    _hud["dt_min_ms"] = s["dt_min"] * 1e3
+    _hud["dt_max_ms"] = s["dt_max"] * 1e3
+    _hud["error_max"] = s["error_max"]
+    _hud["iters_last"] = k
+    _hud["step"] = step
+
+
+def _hud_callback(imgui) -> None:
+    imgui.separator()
+    imgui.text("Solver live stats")
+    imgui.text(f"Sim time:  {_hud['sim_time']:7.3f} s")
+    imgui.text(f"Mean dt:   {_hud['mean_dt_ms']:7.3f} ms")
+    imgui.text(f"dt range:  [{_hud['dt_min_ms']:.3f}, {_hud['dt_max_ms']:.3f}] ms")
+    imgui.text(f"Max error: {_hud['error_max']:.2e}")
+    imgui.text(f"Substeps/outer: {_hud['iters_last']}")
+    imgui.text(f"Step:      {_hud['step']}")
 
 
 def _print_status(solver, step):
@@ -74,40 +122,113 @@ def main():
     parser.add_argument(
         "--fixed-dt", type=float, default=None, help="Use fixed-step SolverMuJoCo with this dt instead of CENIC"
     )
+    parser.add_argument(
+        "--tol", type=float, default=TOL,
+        help=f"CENIC error tolerance (default {TOL:.0e}). Larger = looser = faster (fewer substeps).",
+    )
+    parser.add_argument(
+        "--randomized", action="store_true",
+        help="Per-world randomized initial poses (recommended for many-world demos).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Seed for --randomized initial conditions.",
+    )
+    parser.add_argument(
+        "--grid-camera", action="store_true",
+        help="Pull camera back proportional to N so the whole world grid fits in frame.",
+    )
+    parser.add_argument(
+        "--camera-scale", type=float, default=None,
+        help="Override the grid-camera scale factor (higher = farther back). Default auto-scales with N.",
+    )
+    parser.add_argument(
+        "--render-worlds", type=int, default=None,
+        help="Cap how many worlds the viewer renders (physics still steps all --num-worlds). "
+        "Drop this to recover FPS at high N — the bottleneck is the viewer, not the solver.",
+    )
+    parser.add_argument(
+        "--width", type=int, default=1920, help="Viewer window width (smaller = faster rasterization).",
+    )
+    parser.add_argument(
+        "--height", type=int, default=1080, help="Viewer window height.",
+    )
+    parser.add_argument(
+        "--start-delay", type=float, default=0.0,
+        help="Seconds to render the initial state before starting the simulation (gives time to start recording).",
+    )
+    parser.add_argument(
+        "--nconmax-per-world", type=int, default=20,
+        help="Max contact slots per world (mjwarp multiplies by nworld internally). "
+        "Scene default is 50; 20 is enough for steady-state rendering.",
+    )
+    parser.add_argument(
+        "--njmax-per-world", type=int, default=80,
+        help="Max constraint slots per world. Scene default is 200; 80 fits the demo's actual constraint count.",
+    )
     args = parser.parse_args()
 
-    model = build_model(args.num_worlds)
+    if args.randomized:
+        model = build_model_randomized(args.num_worlds, seed=args.seed)
+    else:
+        model = build_model(args.num_worlds)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
 
     use_fixed = args.fixed_dt is not None
 
+    # mjwarp's nconmax/njmax are PER WORLD; it multiplies by nworld internally.
+    nconmax = args.nconmax_per_world
+    njmax = args.njmax_per_world
+
     if use_fixed:
-        solver = newton.solvers.SolverMuJoCo(model, separate_worlds=True, nconmax=128, njmax=640)
+        solver = newton.solvers.SolverMuJoCo(model, separate_worlds=True, nconmax=nconmax, njmax=njmax)
         n_inner = round(DT_OUTER / args.fixed_dt)
         print(
             f"Fixed-step demo: {args.num_worlds} world(s)  solver=SolverMuJoCo  "
-            f"dt={args.fixed_dt:.4e}  substeps/outer={n_inner}",
+            f"dt={args.fixed_dt:.4e}  substeps/outer={n_inner}  "
+            f"nconmax={nconmax}  njmax={njmax}",
             flush=True,
         )
     else:
-        solver = make_solver(model)
+        solver = newton.solvers.SolverMuJoCoAdaptive(
+            model,
+            tol=args.tol,
+            dt_init=DT_OUTER,
+            dt_min=DT_INNER_MIN,
+            dt_max=DT_OUTER,
+            nconmax=nconmax,
+            njmax=njmax,
+        )
         print(
-            f"CENIC contact demo: {args.num_worlds} world(s)  solver=SolverMuJoCoCENIC  "
-            f"tol={solver._tol:.1e}  dt_inner_init={solver._dt.numpy()[0]:.4f}  "
-            f"dt_inner_max={solver._dt_max:.4f}",
+            f"CENIC contact demo: {args.num_worlds} world(s)  solver=SolverMuJoCoAdaptive  "
+            f"tol={solver._tol:.1e}  dt_init={solver._dt.numpy()[0]:.4f}  "
+            f"dt_max={solver._dt_max:.4f}  nconmax={nconmax}  njmax={njmax}",
             flush=True,
         )
 
-    viewer = newton.viewer.ViewerGL(headless=args.headless)
-    viewer.set_model(model)
+    viewer = newton.viewer.ViewerGL(headless=args.headless, width=args.width, height=args.height)
+    viewer.set_model(model, max_worlds=args.render_worlds)
     viewer.set_world_offsets((0.9, 0.9, 0.0))
-    viewer.set_camera(
-        pos=wp.vec3(1.97, -2.07, 1.07),
-        pitch=-22.5,
-        yaw=136.3,
-    )
+
+    if not use_fixed:
+        viewer.register_ui_callback(_hud_callback, position="stats")
+
+    if args.grid_camera:
+        # Scale the default framing by the grid radius so all worlds stay in view.
+        side = math.ceil(math.sqrt(max(1, args.num_worlds)))
+        scale = args.camera_scale if args.camera_scale is not None else max(1.0, side * 0.45)
+        viewer.set_camera(
+            pos=wp.vec3(1.97 * scale, -2.07 * scale, 1.07 * scale),
+            pitch=-22.5,
+            yaw=136.3,
+        )
+    else:
+        viewer.set_camera(
+            pos=wp.vec3(1.97, -2.07, 1.07),
+            pitch=-22.5,
+            yaw=136.3,
+        )
 
     contacts = newton.Contacts(
         rigid_contact_max=solver.mjw_data.naconmax,
@@ -117,6 +238,15 @@ def main():
 
     step = 0
     t = 0.0
+
+    if args.start_delay > 0.0:
+        print(f"Start delay: rendering initial state for {args.start_delay:.1f} s...", flush=True)
+        delay_start = time.perf_counter()
+        while viewer.is_running() and (time.perf_counter() - delay_start) < args.start_delay:
+            viewer.begin_frame(t)
+            viewer.log_state(state_0)
+            viewer.end_frame()
+
     t_start = time.perf_counter()
 
     while viewer.is_running():
@@ -125,15 +255,14 @@ def main():
                 state_1 = solver.step(state_0, state_1, control, contacts, args.fixed_dt)
                 state_0, state_1 = state_1, state_0
         else:
-            state_0, state_1 = solver.step_dt(
-                DT_OUTER,
-                state_0,
-                state_1,
-                control,
-                apply_forces=viewer.apply_forces,
-            )
+            if viewer.apply_forces is not None:
+                viewer.apply_forces(state_0)
+            solver.step(state_0, state_1, control, None, DT_OUTER)
         t += DT_OUTER
         step += 1
+
+        if not use_fixed and step % HUD_EVERY == 0:
+            _update_hud(solver, step)
 
         if not use_fixed and step % LOG_EVERY == 0:
             _print_status(solver, step)

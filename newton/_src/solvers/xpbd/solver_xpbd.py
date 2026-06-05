@@ -112,6 +112,7 @@ class SolverXPBD(SolverBase):
         state_out: State,
         particle_deltas: wp.array,
         dt: float,
+        world_active: wp.array,
     ):
         if state_in.requires_grad:
             particle_q = state_out.particle_q
@@ -137,11 +138,12 @@ class SolverXPBD(SolverBase):
                 self.particle_q_init,
                 particle_q,
                 model.particle_flags,
+                model.particle_world,
                 particle_deltas,
                 dt,
                 model.particle_max_velocity,
             ],
-            outputs=[new_particle_q, new_particle_qd],
+            outputs=[new_particle_q, new_particle_qd, world_active],
             device=model.device,
         )
 
@@ -158,6 +160,7 @@ class SolverXPBD(SolverBase):
         state_out: State,
         body_deltas: wp.array,
         dt: float,
+        world_active: wp.array,
         rigid_contact_inv_weight: wp.array = None,
     ):
         with wp.ScopedTimer("apply_body_deltas", False):
@@ -190,6 +193,7 @@ class SolverXPBD(SolverBase):
                     model.body_inertia,
                     model.body_inv_mass,
                     model.body_inv_inertia,
+                    model.body_world,
                     body_deltas,
                     rigid_contact_inv_weight,
                     dt,
@@ -197,6 +201,7 @@ class SolverXPBD(SolverBase):
                 outputs=[
                     new_body_q,
                     new_body_qd,
+                    world_active,
                 ],
                 device=model.device,
             )
@@ -208,12 +213,32 @@ class SolverXPBD(SolverBase):
         return new_body_q, new_body_qd
 
     @override
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+    def step(
+        self,
+        state_in: State,
+        state_out: State,
+        control: Control,
+        contacts: Contacts,
+        dt: float,
+        world_active: wp.array | None = None,
+    ):
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
         model = self.model
+
+        # Default: all worlds active (backward compat for existing callers).
+        if world_active is None:
+            n = model.world_count
+            if (
+                not hasattr(self, "_default_world_active")
+                or self._default_world_active.shape[0] != n
+            ):
+                self._default_world_active = wp.full(
+                    n, True, dtype=wp.bool, device=model.device
+                )
+            world_active = self._default_world_active
 
         particle_q = None
         particle_qd = None
@@ -283,8 +308,9 @@ class SolverXPBD(SolverBase):
                             model.joint_dof_dim,
                             model.joint_axis,
                             control.joint_f,
+                            model.joint_world,
                         ],
-                        outputs=[body_f_tmp],
+                        outputs=[body_f_tmp, world_active],
                         device=model.device,
                     )
 
@@ -328,6 +354,7 @@ class SolverXPBD(SolverBase):
                                     model.particle_inv_mass,
                                     model.particle_radius,
                                     model.particle_flags,
+                                    model.particle_world,
                                     body_q,
                                     body_qd,
                                     model.body_com,
@@ -348,7 +375,7 @@ class SolverXPBD(SolverBase):
                                     self.soft_contact_relaxation,
                                 ],
                                 # outputs
-                                outputs=[particle_deltas, body_deltas],
+                                outputs=[particle_deltas, body_deltas, world_active],
                                 device=model.device,
                             )
 
@@ -365,13 +392,14 @@ class SolverXPBD(SolverBase):
                                     model.particle_inv_mass,
                                     model.particle_radius,
                                     model.particle_flags,
+                                    model.particle_world,
                                     model.particle_mu,
                                     model.particle_cohesion,
                                     model.particle_max_radius,
                                     dt,
                                     self.soft_contact_relaxation,
                                 ],
-                                outputs=[particle_deltas],
+                                outputs=[particle_deltas, world_active],
                                 device=model.device,
                             )
 
@@ -385,6 +413,7 @@ class SolverXPBD(SolverBase):
                                     particle_q,
                                     particle_qd,
                                     model.particle_inv_mass,
+                                    model.particle_world,
                                     model.spring_indices,
                                     model.spring_rest_length,
                                     model.spring_stiffness,
@@ -392,7 +421,7 @@ class SolverXPBD(SolverBase):
                                     dt,
                                     spring_constraint_lambdas,
                                 ],
-                                outputs=[particle_deltas],
+                                outputs=[particle_deltas, world_active],
                                 device=model.device,
                             )
 
@@ -406,13 +435,14 @@ class SolverXPBD(SolverBase):
                                     particle_q,
                                     particle_qd,
                                     model.particle_inv_mass,
+                                    model.particle_world,
                                     model.edge_indices,
                                     model.edge_rest_angle,
                                     model.edge_bending_properties,
                                     dt,
                                     edge_constraint_lambdas,
                                 ],
-                                outputs=[particle_deltas],
+                                outputs=[particle_deltas, world_active],
                                 device=model.device,
                             )
 
@@ -425,6 +455,7 @@ class SolverXPBD(SolverBase):
                                     particle_q,
                                     particle_qd,
                                     model.particle_inv_mass,
+                                    model.particle_world,
                                     model.tet_indices,
                                     model.tet_poses,
                                     model.tet_activations,
@@ -432,12 +463,12 @@ class SolverXPBD(SolverBase):
                                     dt,
                                     self.soft_body_relaxation,
                                 ],
-                                outputs=[particle_deltas],
+                                outputs=[particle_deltas, world_active],
                                 device=model.device,
                             )
 
                         particle_q, particle_qd = self._apply_particle_deltas(
-                            model, state_in, state_out, particle_deltas, dt
+                            model, state_in, state_out, particle_deltas, dt, world_active
                         )
 
                     # handle rigid bodies
@@ -502,17 +533,20 @@ class SolverXPBD(SolverBase):
                                 control.joint_target_vel,
                                 model.joint_target_ke,
                                 model.joint_target_kd,
+                                model.joint_world,
                                 self.joint_linear_compliance,
                                 self.joint_angular_compliance,
                                 self.joint_angular_relaxation,
                                 self.joint_linear_relaxation,
                                 dt,
                             ],
-                            outputs=[body_deltas],
+                            outputs=[body_deltas, world_active],
                             device=model.device,
                         )
 
-                        body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
+                        body_q, body_qd = self._apply_body_deltas(
+                            model, state_in, state_out, body_deltas, dt, world_active
+                        )
 
                     # Solve rigid contact constraints
                     if model.body_count and contacts is not None:
@@ -529,6 +563,7 @@ class SolverXPBD(SolverBase):
                                 model.body_com,
                                 model.body_inv_mass,
                                 model.body_inv_inertia,
+                                model.body_world,
                                 model.shape_body,
                                 contacts.rigid_contact_count,
                                 contacts.rigid_contact_point0,
@@ -549,6 +584,7 @@ class SolverXPBD(SolverBase):
                             outputs=[
                                 body_deltas,
                                 rigid_contact_inv_weight,
+                                world_active,
                             ],
                             device=model.device,
                         )
@@ -570,7 +606,7 @@ class SolverXPBD(SolverBase):
                                 rigid_contact_inv_weight_init = None
 
                         body_q, body_qd = self._apply_body_deltas(
-                            model, state_in, state_out, body_deltas, dt, rigid_contact_inv_weight
+                            model, state_in, state_out, body_deltas, dt, world_active, rigid_contact_inv_weight
                         )
 
             if model.particle_count:
@@ -596,8 +632,8 @@ class SolverXPBD(SolverBase):
                 wp.launch(
                     kernel=update_body_velocities,
                     dim=model.body_count,
-                    inputs=[state_out.body_q, body_q_init, model.body_com, dt],
-                    outputs=[out_body_qd],
+                    inputs=[state_out.body_q, body_q_init, model.body_com, model.body_world, dt],
+                    outputs=[out_body_qd, world_active],
                     device=model.device,
                 )
 
@@ -612,6 +648,7 @@ class SolverXPBD(SolverBase):
                             self.particle_qd_init,
                             model.particle_radius,
                             model.particle_flags,
+                            model.particle_world,
                             body_q,
                             body_q_init,
                             body_qd,
@@ -628,7 +665,7 @@ class SolverXPBD(SolverBase):
                             contacts.soft_contact_normal,
                             contacts.soft_contact_max,
                         ],
-                        outputs=[state_out.particle_qd],
+                        outputs=[state_out.particle_qd, world_active],
                         device=model.device,
                     )
 
@@ -665,6 +702,7 @@ class SolverXPBD(SolverBase):
                         ],
                         outputs=[
                             body_deltas,
+                            world_active,
                         ],
                         device=model.device,
                     )
@@ -674,8 +712,9 @@ class SolverXPBD(SolverBase):
                         dim=model.body_count,
                         inputs=[
                             body_deltas,
+                            model.body_world,
                         ],
-                        outputs=[state_out.body_qd],
+                        outputs=[state_out.body_qd, world_active],
                         device=model.device,
                     )
 
