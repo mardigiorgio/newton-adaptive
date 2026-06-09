@@ -138,6 +138,8 @@ def _run_scaling_per_n(args: dict, out_dir: Path) -> tuple[float, dict | None]:
             cmd.extend(["--steps", str(args["steps"])])
         if "warmup" in args:
             cmd.extend(["--warmup", str(args["warmup"])])
+        if args.get("kinds"):
+            cmd.extend(["--kinds", *[str(k) for k in args["kinds"]]])
 
         print(f"\n  --- N={n} ---", flush=True)
         # Per-N timeout scales with N: small Ns finish in seconds, but N>=4096 with the

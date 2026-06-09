@@ -51,7 +51,7 @@ def _print_status(solver, step):
 
         col = 16
         bar = "+" + ("-" * col + "+") * 5
-        hdr = f"{'world':>{col}}{'sim_time (s)':>{col}}{'dt (s)':>{col}}{'L2 error':>{col}}{'status':>{col}}"
+        hdr = f"{'world':>{col}}{'sim_time (s)':>{col}}{'dt (s)':>{col}}{'inf-norm err':>{col}}{'status':>{col}}"
         lines = [f"  step {step}  tol={solver._tol:.1e}", bar, hdr, bar]
         for i in range(len(sim_times)):
             lines.append(

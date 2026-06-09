@@ -28,6 +28,16 @@ StepFn = Callable[[newton.Model, newton.State, newton.State, newton.Control],
 SolverBuilder = Callable[[newton.Model], tuple[object, StepFn]]
 
 
+def _resolve_buf(x, n: int) -> int:
+    """Resolve a buffer size that may be a plain int or a callable of N.
+
+    ``nconmax``/``njmax`` can be passed as ``int`` (same for every world count)
+    or as ``Callable[[int], int]`` so a scene can hand each N its own
+    finely-tuned, minimal-safe buffer (see ``contact_objects.buffer_sizes``).
+    """
+    return int(x(n)) if callable(x) else int(x)
+
+
 # --- MuJoCo Adaptive (per-world step-doubling) ---------------------------
 
 def mujoco_adaptive_factory(
@@ -48,10 +58,11 @@ def mujoco_adaptive_factory(
     inner_max = dt_outer if dt_inner_max is None else dt_inner_max
 
     def build(model):
+        nc, nj = _resolve_buf(nconmax, model.world_count), _resolve_buf(njmax, model.world_count)
         solver = newton.solvers.SolverMuJoCoAdaptive(
             model, tol=tol, dt_init=dt_outer, dt_min=dt_inner_min,
             dt_max=inner_max,
-            nconmax=nconmax, njmax=njmax,
+            nconmax=nc, njmax=nj,
             use_mujoco_contacts=use_mujoco_contacts,
         )
 
@@ -75,8 +86,9 @@ def mujoco_fixed_factory(
     n_sub = max(1, round(dt_outer / dt))
 
     def build(model):
+        nc, nj = _resolve_buf(nconmax, model.world_count), _resolve_buf(njmax, model.world_count)
         solver = newton.solvers.SolverMuJoCo(
-            model, separate_worlds=True, nconmax=nconmax, njmax=njmax,
+            model, separate_worlds=True, nconmax=nc, njmax=nj,
         )
         contacts = model.contacts()  # MuJoCo populates via its own pipeline.
 

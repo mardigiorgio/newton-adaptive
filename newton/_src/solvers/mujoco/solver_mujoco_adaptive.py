@@ -15,13 +15,13 @@ import newton
 from ...sim import Contacts
 from .solver_mujoco import SolverMuJoCo
 
-
 # --- World-compaction kernels (active-world re-batching) ----------------------
 # Step only the still-active worlds each inner iteration by gathering their rows
 # into a smaller mjw_data "tier", stepping that, and scattering results back.
 # active_indices[0:n] holds the active world ids in ASCENDING order, so the
 # in-place 1-D gather (arr[k] = arr[idx[k]], idx[k] >= k) never reads an
 # already-overwritten slot.
+
 
 @wp.kernel
 def _gather_rows_2d(
@@ -59,12 +59,9 @@ def _import_wrapper_bits():
     public ``newton.solvers`` interface, which in turn re-exports this module.
     Importing at function call time avoids that cycle.
     """
-    from scripts.adaptive.factories import (
-        AdaptiveCompactionWrapper,
-        _build_mujoco_q_weights,
-    )
+    from scripts.adaptive.factories import AdaptiveCompactionWrapper
 
-    return AdaptiveCompactionWrapper, _build_mujoco_q_weights
+    return AdaptiveCompactionWrapper
 
 
 class SolverMuJoCoAdaptive(SolverMuJoCo):
@@ -150,7 +147,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     def _build_wrapper(self, *, tol, dt_init, dt_min, dt_max):
         """Construct the underlying AdaptiveCompactionWrapper with MuJoCo hooks."""
-        AdaptiveCompactionWrapper, _build_mujoco_q_weights = _import_wrapper_bits()
+        AdaptiveCompactionWrapper = _import_wrapper_bits()
 
         # Dedicated SAP collision pipeline sized to MJWarp's max contact count
         # (CENIC v1 lines 415-418).  Only created when use_mujoco_contacts=False;
@@ -166,9 +163,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 rigid_contact_max=self.mjw_data.naconmax,
             )
             self._contacts_start = self._pipeline.contacts()
-
-        # Per-coord error weights from ``dof_invweight0`` (paper Sec V-E).
-        q_weights = _build_mujoco_q_weights(self.model, self.mjw_model)
 
         def _step_fn(model_arg, state_in, state_out, ctrl, contacts_arg, dt_array, dt_scalar_buf):
             """One MuJoCo substep: sync state -> set per-world dt -> step -> read back.
@@ -215,7 +209,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             dt_outer=dt_init,  # safe default; step_dt() overrides per call
             needs_collide=False,
             contacts=self._contacts_start,
-            q_weights=q_weights,
             pre_boundary_hook=_pre_boundary_hook,
             pre_iter_hook=_pre_iter_hook,
         )
@@ -237,7 +230,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._step_graphs: dict[int, object] = {}
 
         n = self.model.world_count
-        self._compaction_enabled = bool(self._use_mujoco_contacts) and n >= 256
+        # Compaction + CUDA-graph capture run at ALL N (native contacts only).
+        # The graph capture collapses MuJoCo Warp's per-kernel launch overhead --
+        # the dominant cost at low world counts -- so gating it (previously n>=256)
+        # left every low-N point running eager and artificially slow. The tier
+        # loop below naturally builds zero tiers when N is too small for a >=64
+        # tier, so small N just gets the full-data graph with no tier overhead.
+        self._compaction_enabled = bool(self._use_mujoco_contacts)
         if not self._compaction_enabled:
             return
 
@@ -258,8 +257,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             sizes.append(s)
         for size in sizes:
             data = mujoco_warp.make_data(
-                self.mj_model, nworld=size,
-                nconmax=per_world_ncon, njmax=per_world_njmax,
+                self.mj_model,
+                nworld=size,
+                nconmax=per_world_ncon,
+                njmax=per_world_njmax,
             )
             self._tiers.append((size, data))
         self._tiers.sort(key=lambda t: t[0])  # ascending
@@ -324,22 +325,26 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         idx = self._wrapper._active_indices
         ts = self.mjw_model.opt.timestep
         # Gather active rows / dt (idx ascending, idx[k] >= k -> in-place safe).
-        wp.launch(_gather_rows_2d, dim=(na, self._nq),
-                  inputs=[self.mjw_data.qpos, idx], outputs=[tier.qpos])
-        wp.launch(_gather_rows_2d, dim=(na, self._nv),
-                  inputs=[self.mjw_data.qvel, idx], outputs=[tier.qvel])
+        wp.launch(_gather_rows_2d, dim=(na, self._nq), inputs=[self.mjw_data.qpos, idx], outputs=[tier.qpos])
+        wp.launch(_gather_rows_2d, dim=(na, self._nv), inputs=[self.mjw_data.qvel, idx], outputs=[tier.qvel])
         # Carry warmstart so the tier's contact solver converges from the active
         # worlds' previous acceleration instead of cold-starting each step.
-        wp.launch(_gather_rows_2d, dim=(na, self._nv),
-                  inputs=[self.mjw_data.qacc_warmstart, idx], outputs=[tier.qacc_warmstart])
+        wp.launch(
+            _gather_rows_2d,
+            dim=(na, self._nv),
+            inputs=[self.mjw_data.qacc_warmstart, idx],
+            outputs=[tier.qacc_warmstart],
+        )
         wp.launch(_gather_inplace_1d, dim=na, inputs=[ts, idx])
         self._run_step(tier)
-        wp.launch(_scatter_rows_2d, dim=(na, self._nq),
-                  inputs=[tier.qpos, idx], outputs=[self.mjw_data.qpos])
-        wp.launch(_scatter_rows_2d, dim=(na, self._nv),
-                  inputs=[tier.qvel, idx], outputs=[self.mjw_data.qvel])
-        wp.launch(_scatter_rows_2d, dim=(na, self._nv),
-                  inputs=[tier.qacc_warmstart, idx], outputs=[self.mjw_data.qacc_warmstart])
+        wp.launch(_scatter_rows_2d, dim=(na, self._nq), inputs=[tier.qpos, idx], outputs=[self.mjw_data.qpos])
+        wp.launch(_scatter_rows_2d, dim=(na, self._nv), inputs=[tier.qvel, idx], outputs=[self.mjw_data.qvel])
+        wp.launch(
+            _scatter_rows_2d,
+            dim=(na, self._nv),
+            inputs=[tier.qacc_warmstart, idx],
+            outputs=[self.mjw_data.qacc_warmstart],
+        )
 
     # ----- Public API methods -----
 
@@ -392,9 +397,28 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     @property
     def last_error(self) -> wp.array:
-        """Inf-norm state error from the most recent accepted step,
-        shape ``[world_count]``, float32, on device."""
-        return self._wrapper._accepted_error
+        """Worst per-step inf-norm state error committed over the most recent
+        outer step, shape ``[world_count]``, float32, on device.
+
+        This is the running maximum over the boundary's real accepted substeps
+        (those with ``dt > 0``), i.e. the largest step-doubling error the
+        integration actually committed while advancing one outer step. It is the
+        meaningful "did error stay under the tolerance" quantity. (The error of
+        only the final substep is not representative: that substep is clamped to
+        fill the remaining time to the boundary, so its dt -- and hence its
+        error -- is tiny.)"""
+        return self._wrapper._accepted_error_max
+
+    @property
+    def last_dt(self) -> wp.array:
+        """Largest accepted step size [s] ridden over the most recent outer step,
+        shape ``[world_count]``, float32, on device.
+
+        Running maximum over the boundary's real accepted substeps; the
+        representative adaptive step size (large in free motion, small during
+        stiff contact). Unlike :attr:`dt`, it is not the tiny fill-to-boundary
+        final substep."""
+        return self._wrapper._accepted_dt_max
 
     @property
     def accepted(self) -> wp.array:

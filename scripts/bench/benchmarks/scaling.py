@@ -78,10 +78,26 @@ def _measure_kind(scene_entry, kind: str, n: int, steps: int, warmup: int) -> Me
     )
 
 
-def run(scene_entry, ns: list[int], steps: int, warmup: int) -> dict:
+def run(scene_entry, ns: list[int], steps: int, warmup: int,
+        kinds: list[str] | None = None) -> dict:
     """Run every kind in the scene's solver_factories at every N. Failures
-    for one kind don't kill the others — they're recorded as missing data."""
-    kinds = scene_entry.solver_kinds()
+    for one kind don't kill the others — they're recorded as missing data.
+
+    If ``kinds`` is given, only those solver kinds are run (validated against the
+    scene's available kinds); useful for high-N sweeps where the maximal-coord
+    solvers don't scale and only the MuJoCo adaptive-vs-fixed curves matter.
+    """
+    available = scene_entry.solver_kinds()
+    if kinds:
+        unknown = [k for k in kinds if k not in available]
+        if unknown:
+            print(f"  WARNING: ignoring unknown kinds {unknown}; "
+                  f"available={available}", flush=True)
+        kinds = [k for k in available if k in kinds]
+        if not kinds:
+            raise SystemExit(f"No valid --kinds selected. Available: {available}")
+    else:
+        kinds = available
     data: dict = {
         "ns": ns, "steps": steps, "warmup": warmup,
         "scene": scene_entry.name, "kinds": kinds,
@@ -186,6 +202,9 @@ def main():
     parser.add_argument("--out-dir", type=str, default="scripts/bench/results")
     parser.add_argument("--scene", type=str, default="contact_objects",
                         help="Scene to benchmark (see scripts.scenes._registry.bench_scenes()).")
+    parser.add_argument("--kinds", type=str, nargs="+", default=None,
+                        help="Restrict to these solver kinds (default: all in the "
+                        "scene's SOLVER_FACTORIES).")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -195,7 +214,7 @@ def main():
     print(f"=== Scaling benchmark: scene={args.scene} kinds={scene_entry.solver_kinds()} ===",
           flush=True)
 
-    data = run(scene_entry, sorted(args.ns), args.steps, args.warmup)
+    data = run(scene_entry, sorted(args.ns), args.steps, args.warmup, kinds=args.kinds)
 
     suffix = "" if args.scene == "contact_objects" else f"_{args.scene}"
     json_path = out_dir / f"scaling{suffix}.json"

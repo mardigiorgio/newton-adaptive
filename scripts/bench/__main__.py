@@ -28,6 +28,8 @@ def main():
 
     # Benchmark parameter overrides.
     parser.add_argument("--ns", type=int, nargs="+", default=None, help="Override N values for scaling")
+    parser.add_argument("--kinds", type=str, nargs="+", default=None,
+                        help="Restrict scaling to these solver kinds (default: all).")
     parser.add_argument("--steps", type=int, default=None, help="Override timed steps for scaling")
     parser.add_argument("--warmup", type=int, default=None, help="Override warmup steps for scaling")
     parser.add_argument("--trials", type=int, default=None, help="Override trial count for accuracy")
@@ -48,6 +50,8 @@ def main():
     bench_args = {}
     if args.ns is not None:
         bench_args["ns"] = sorted(args.ns)
+    if args.kinds is not None:
+        bench_args["kinds"] = args.kinds
     if args.steps is not None:
         bench_args["steps"] = args.steps
     if args.warmup is not None:

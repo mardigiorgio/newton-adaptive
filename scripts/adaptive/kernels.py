@@ -29,17 +29,14 @@ def _apply_dt_cap(
 def _inf_norm_state_error_kernel(
     joint_q_full: wp.array(dtype=wp.float32),
     joint_q_double: wp.array(dtype=wp.float32),
-    q_weights: wp.array2d(dtype=wp.float32),
     coords_per_world: int,
     error_out: wp.array(dtype=wp.float32),
 ):
-    """Weighted position-only inf-norm error between full-step and doubled half-step.
+    """Position-only inf-norm error between full-step and doubled half-step.
 
-    Error = ``max_i w_i · |Δq_i|`` across joint coordinates in the world.
-    Matches the paper's weighted position-only norm (Sec. V-E),
-    ``|| S · (q - q̂) ||_∞`` with ``S = diag(M)^{-1/2}``.  Weights are
-    normalized per world so the heaviest DoF has weight 1 and clipped to
-    ``[1, 10]``.  Diverged sims get error = 1e10.
+    Error = ``max_i |Δq_i|`` across the world's joint coordinates, i.e. the
+    unweighted ``|| q - q̂ ||_∞`` (the error-norm weighting is the identity).
+    Diverged sims get error = 1e10.
     """
     world = wp.tid()
     q_start = world * coords_per_world
@@ -47,7 +44,7 @@ def _inf_norm_state_error_kernel(
     max_err = float(0.0)
     for i in range(coords_per_world):
         d = wp.abs(joint_q_double[q_start + i] - joint_q_full[q_start + i])
-        max_err = wp.max(max_err, q_weights[world, i] * d)
+        max_err = wp.max(max_err, d)
 
     if wp.isnan(max_err) or wp.isinf(max_err):
         max_err = float(1.0e10)
@@ -118,12 +115,25 @@ def _advance_sim_time(
     accepted: wp.array(dtype=wp.bool),
     error: wp.array(dtype=wp.float32),
     accepted_error: wp.array(dtype=wp.float32),
+    accepted_error_max: wp.array(dtype=wp.float32),
+    accepted_dt_max: wp.array(dtype=wp.float32),
 ):
-    """Advance sim_time[i] by dt[i] and snapshot error for accepted worlds only."""
+    """Advance sim_time and snapshot per-boundary error/dt for accepted worlds.
+
+    ``accepted_error`` keeps the LAST accepted step's error (legacy). The last
+    accepted step of a boundary is the fill-to-target substep clamped by
+    ``_clamp_dt_to_boundary`` to a tiny dt, so its error is tiny and unrepresentative.
+    ``accepted_error_max`` / ``accepted_dt_max`` instead keep the running max over
+    the boundary's REAL accepted steps (dt > 0): the worst per-step error actually
+    committed and the largest step size ridden. These are reset each boundary.
+    """
     i = wp.tid()
     if accepted[i]:
         sim_time[i] = sim_time[i] + dt[i]
         accepted_error[i] = error[i]
+        if dt[i] > wp.float32(1.0e-9):
+            accepted_error_max[i] = wp.max(accepted_error_max[i], error[i])
+            accepted_dt_max[i] = wp.max(accepted_dt_max[i], dt[i])
 
 
 @wp.kernel
@@ -269,7 +279,6 @@ def _update_active_mask(
     world_active[i] = sim_time[i] < next_time[i]
 
 
-
 @wp.kernel
 def _scalar_max_dt_reset(
     out: wp.array(dtype=wp.float32),
@@ -296,18 +305,17 @@ def _inf_norm_q_qd_kernel(
     q_double: wp.array(dtype=wp.float32),
     qd_full: wp.array(dtype=wp.float32),
     qd_double: wp.array(dtype=wp.float32),
-    q_weights: wp.array2d(dtype=wp.float32),
-    qd_weights: wp.array2d(dtype=wp.float32),
     dt: wp.array(dtype=wp.float32),
     coords_per_world: int,
     dofs_per_world: int,
     last_error: wp.array(dtype=wp.float32),
 ):
-    """Weighted L-inf norm on joint_q AND dt*joint_qd combined.
+    """Unweighted L-inf norm on joint_q AND dt*joint_qd combined.
 
     Captures position-equivalent error from velocity divergence -- useful for
     solvers (XPBD, SemiImplicit) whose position step is too smooth for a
-    pure-q norm to detect step-doubling differences.
+    pure-q norm to detect step-doubling differences. The error-norm weighting
+    is the identity.
     """
     world = wp.tid()
     err = wp.float32(0.0)
@@ -317,15 +325,13 @@ def _inf_norm_q_qd_kernel(
     q_base = world * coords_per_world
     for i in range(coords_per_world):
         d = wp.abs(q_full[q_base + i] - q_double[q_base + i])
-        w = q_weights[world, i]
-        err = wp.max(err, w * d)
+        err = wp.max(err, d)
 
     # dt * qd contribution (position-equivalent)
     qd_base = world * dofs_per_world
     for i in range(dofs_per_world):
         d = wp.abs(qd_full[qd_base + i] - qd_double[qd_base + i])
-        w = qd_weights[world, i]
-        err = wp.max(err, dt_w * w * d)
+        err = wp.max(err, dt_w * d)
 
     last_error[world] = err
 

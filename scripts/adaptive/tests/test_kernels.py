@@ -18,8 +18,7 @@ def test_apply_dt_cap_clamps_to_min_max():
     dt_min = 1e-6
     dt_max = 1e-2
 
-    wp.launch(K._apply_dt_cap, dim=n,
-              inputs=[ideal, dt_min, dt_max, dt_out, dt_half_out])
+    wp.launch(K._apply_dt_cap, dim=n, inputs=[ideal, dt_min, dt_max, dt_out, dt_half_out])
     wp.synchronize()
 
     got = dt_out.numpy()
@@ -32,8 +31,8 @@ def test_apply_dt_cap_clamps_to_min_max():
     np.testing.assert_allclose(half, got / 2.0, rtol=1e-6)
 
 
-def test_inf_norm_state_error_kernel_returns_max_weighted_diff():
-    """error[i] = max_j (weights[i,j] * |full[i,j] - double[i,j]|)."""
+def test_inf_norm_state_error_kernel_returns_max_abs_diff():
+    """error[i] = max_j |full[i,j] - double[i,j]| (unweighted, S = identity)."""
     wp.init()
     n_world = 2
     coords_per_world = 3
@@ -45,17 +44,13 @@ def test_inf_norm_state_error_kernel_returns_max_weighted_diff():
         np.array([[1.0, 2.5, 3.0], [10.0, 20.0, 31.0]], dtype=np.float32).flatten(),
         dtype=wp.float32,
     )
-    weights = wp.from_numpy(
-        np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 2.0]], dtype=np.float32),
-        dtype=wp.float32,
-    )
     last_error = wp.zeros(n_world, dtype=wp.float32)
 
-    wp.launch(K._inf_norm_state_error_kernel, dim=n_world,
-              inputs=[full, double, weights, coords_per_world],
-              outputs=[last_error])
+    wp.launch(
+        K._inf_norm_state_error_kernel, dim=n_world, inputs=[full, double, coords_per_world], outputs=[last_error]
+    )
     wp.synchronize()
 
     got = last_error.numpy()
-    np.testing.assert_allclose(got[0], 0.5, rtol=1e-6)  # |2.0 - 2.5| * 1.0
-    np.testing.assert_allclose(got[1], 2.0, rtol=1e-6)  # |30 - 31| * 2.0
+    np.testing.assert_allclose(got[0], 0.5, rtol=1e-6)  # |2.0 - 2.5|
+    np.testing.assert_allclose(got[1], 1.0, rtol=1e-6)  # |30 - 31|
