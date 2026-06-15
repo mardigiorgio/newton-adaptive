@@ -438,7 +438,7 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
         with wp.ScopedDevice(self.model.device):
             self._mujoco_warp_step()
 
-        self._update_newton_state(self.model, state_out, self.mjw_data)
+        self._update_newton_state(self.model, state_out, self.mjw_data, state_prev=state_in)
 
     def _run_iteration_body(self, effective_dt_max: float) -> None:
         """One step-doubling iteration: 3-eval + error control + dt cap + boundary check."""
