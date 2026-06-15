@@ -1,0 +1,8 @@
+﻿newton.solvers.SolverMuJoCoCENIC
+================================
+
+.. autoclass:: newton.solvers.SolverMuJoCoCENIC
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise
