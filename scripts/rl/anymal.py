@@ -1,9 +1,8 @@
 """ANYmal-C velocity-tracking task: model build + vectorized obs/reward/termination.
 
-Obs/action layout and PD/contact parameters mirror the reference playback script
-``scripts/control/cenic_step_anymal_walk.py`` exactly, so a policy trained here
-uses the same 48-dim observation and 12-dim action convention as the Isaac Lab /
-rsl_rl ANYmal-C locomotion policy already in the repo.
+Obs/action layout and PD/contact parameters follow the Isaac Lab / rsl_rl
+ANYmal-C locomotion convention (48-dim observation, 12-dim action), matching
+the pretrained policy shipped with the ``anybotics_anymal_c`` asset.
 
 All per-step functions are fully vectorized (all worlds at once) over zero-copy
 ``wp.to_torch`` views — no per-world Python loop, no ``.numpy()`` in the hot path.
@@ -64,8 +63,7 @@ class TaskMeta:
 def build_anymal_model(num_worlds: int, *, spacing=(1.5, 0.0, 0.0), device=None):
     """Build a replicated ANYmal-C model. Returns ``(model, TaskMeta)``.
 
-    Mirrors ``cenic_step_anymal_walk.py`` lines 75-129. ``register_custom_attributes``
-    must run before ``add_urdf``.
+    ``register_custom_attributes`` must run before ``add_urdf``.
     """
     robot = newton.ModelBuilder()
     newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(robot)
