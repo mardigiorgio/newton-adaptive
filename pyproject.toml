@@ -100,6 +100,16 @@ torch-cu13 = [
     "torch>=2.10.0",    # CUDA 13 PyTorch
 ]
 
+# RL training stack for the CENIC-vs-fixed locomotion workflow (scripts/rl).
+# Train on a CUDA box: install torch from the cu12 index first, then `uv sync --extra rl`.
+rl = [
+    "newton[torch-cu12]",                                                   # torch (cu12) + sim + examples
+    "rsl-rl @ git+https://github.com/leggedrobotics/rsl_rl.git@v1.0.2",      # legged-locomotion PPO
+    "tensorboard>=2.16",                                                     # training curves
+    "rliable>=1.0.8",                                                        # IQM + bootstrap CIs (eval analysis)
+    "matplotlib>=3.8",                                                       # log-log scaling plots
+]
+
 # Development and Testing
 # Contains all w/o torch, plus development debugging dependencies
 dev = [
