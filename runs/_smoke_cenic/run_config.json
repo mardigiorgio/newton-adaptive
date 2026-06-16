@@ -1,0 +1,19 @@
+{
+  "backend": {
+    "kind": "cenic",
+    "tol": 0.001,
+    "dt_inner_init": 0.005,
+    "dt_inner_min": 2e-07,
+    "dt_inner_max": 0.02,
+    "dt_mode": "per_world",
+    "fixed_dt": 0.005,
+    "solver": "newton",
+    "ls_iterations": 50,
+    "njmax": 50,
+    "nconmax": 100
+  },
+  "dr_enabled": false,
+  "num_envs": 64,
+  "seed": 1,
+  "max_iterations": 3
+}

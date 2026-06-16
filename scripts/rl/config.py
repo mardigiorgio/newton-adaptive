@@ -21,6 +21,7 @@ class EnvConfig:
     command_wz: tuple[float, float] = (-1.0, 1.0)
     ic_joint_noise: float = 0.1  # uniform +/- rad on actuated joints at reset
     ic_yaw: bool = True  # randomize base yaw at reset
+    eval_seed: int | None = None  # if set, IC+command draws use dedicated paired-eval generators
 
     @property
     def max_episode_length(self) -> int:

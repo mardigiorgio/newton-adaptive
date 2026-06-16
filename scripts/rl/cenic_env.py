@@ -62,6 +62,18 @@ class CenicLocomotionEnv:
         self.max_episode_length = env_cfg.max_episode_length
         self.control_dt = env_cfg.control_dt
 
+        # Paired-eval RNG: when ``eval_seed`` is set, initial-condition and command
+        # draws come from dedicated generators seeded identically across backends, so
+        # world w sees byte-identical ICs+commands regardless of how many domain-
+        # randomization randoms a reference consumes. Training leaves this None and
+        # keeps the global-RNG path unchanged. See project_eval_rng_confound.
+        eval_seed = getattr(env_cfg, "eval_seed", None)
+        self._ic_gen: torch.Generator | None = None
+        self._cmd_gen: torch.Generator | None = None
+        if eval_seed is not None:
+            self._ic_gen = torch.Generator(device=device).manual_seed(int(eval_seed))
+            self._cmd_gen = torch.Generator(device=device).manual_seed(int(eval_seed) + 1)
+
         wp_device = wp.get_device() if device == "cpu" else device
         with wp.ScopedDevice(wp_device):
             self.model, self.meta = build_anymal_model(self.num_envs, spacing=env_cfg.spacing, device=wp_device)
@@ -97,7 +109,8 @@ class CenicLocomotionEnv:
         self._step_count = 0
 
         self.command = anymal.VelocityCommand(
-            N, device, vx=env_cfg.command_vx, vy=env_cfg.command_vy, wz=env_cfg.command_wz
+            N, device, vx=env_cfg.command_vx, vy=env_cfg.command_vy, wz=env_cfg.command_wz,
+            generator=self._cmd_gen,
         )
         self.dr = DomainRandomizer(dr_cfg or DRConfig(), self.meta, self.model, device)
 
@@ -197,13 +210,15 @@ class CenicLocomotionEnv:
         self.jqd[env_ids] = 0.0
         k = len(env_ids)
         if self.cfg.ic_yaw:
-            yaw = (2.0 * torch.rand(k, device=self.device) - 1.0) * math.pi
+            yaw = (2.0 * torch.rand(k, device=self.device, generator=self._ic_gen) - 1.0) * math.pi
             self.jq[env_ids, 3] = 0.0
             self.jq[env_ids, 4] = 0.0
             self.jq[env_ids, 5] = torch.sin(yaw * 0.5)
             self.jq[env_ids, 6] = torch.cos(yaw * 0.5)
         if self.cfg.ic_joint_noise > 0:
-            noise = (2.0 * torch.rand(k, anymal.ACT_DIM, device=self.device) - 1.0) * self.cfg.ic_joint_noise
+            noise = (
+                2.0 * torch.rand(k, anymal.ACT_DIM, device=self.device, generator=self._ic_gen) - 1.0
+            ) * self.cfg.ic_joint_noise
             self.jq[env_ids, 7:] += noise
 
         newton.eval_fk(self.model, self.s0.joint_q, self.s0.joint_qd, self.s0)

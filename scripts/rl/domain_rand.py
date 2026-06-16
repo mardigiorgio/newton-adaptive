@@ -53,6 +53,44 @@ class DRConfig:
             )
         raise ValueError(f"unknown DR preset {name!r}")
 
+    # Single-term knobs at training-band magnitude, used to attribute the transfer
+    # gap to one channel at a time (error-budget ranking, Phase 0a/0b). Each opens
+    # exactly one term; obs_noise and pushes are OFF unless they ARE the term.
+    SINGLE_TERMS = ("friction", "mass", "kp", "kd", "push", "obsnoise")
+
+    @classmethod
+    def single(cls, term: str) -> DRConfig:
+        """One-knob preset: identity everywhere except ``term``.
+
+        Starting from a fully-disabled randomizer (all ranges pinned to identity,
+        obs noise and pushes off), open a single channel at its nominal training
+        magnitude. ``friction``/``mass``/``kp``/``kd``/``push`` are dynamics terms;
+        ``obsnoise`` is a SENSING term (perturbs the observation, not the sim) and
+        must be ranked on a separate axis, not as a physical-dynamics term.
+        """
+        base = dict(
+            enable=True,
+            friction=(1.0, 1.0),
+            base_mass_add=(0.0, 0.0),
+            motor_strength=(1.0, 1.0),
+            kd_scale=(1.0, 1.0),
+            push_vel_xy=0.0,
+            push_interval_steps=0,
+            obs_noise=False,
+            obs_noise_std=0.0,
+        )
+        knobs = {
+            "friction": dict(friction=(0.6, 1.25)),
+            "mass": dict(base_mass_add=(-1.0, 2.0)),
+            "kp": dict(motor_strength=(0.9, 1.1)),
+            "kd": dict(kd_scale=(0.8, 1.2)),
+            "push": dict(push_vel_xy=0.8, push_interval_steps=500),
+            "obsnoise": dict(obs_noise=True, obs_noise_std=0.05),
+        }
+        if term not in knobs:
+            raise ValueError(f"unknown single-term {term!r}; choose from {cls.SINGLE_TERMS}")
+        return cls(**{**base, **knobs[term]})
+
 
 def _uniform(lo: float, hi: float, n: int, device) -> torch.Tensor:
     return lo + (hi - lo) * torch.rand(n, device=device)

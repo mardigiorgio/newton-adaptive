@@ -37,17 +37,21 @@ def _apply_dt_cap(
 def _inf_norm_state_error_kernel(
     joint_q_full: wp.array(dtype=wp.float32),
     joint_q_double: wp.array(dtype=wp.float32),
-    q_weights: wp.array2d(dtype=wp.float32),
+    state_scale: wp.array2d(dtype=wp.float32),
     coords_per_world: int,
     error_out: wp.array(dtype=wp.float32),
 ):
-    """Weighted position-only inf-norm error between full-step and doubled half-step.
+    """CENIC accuracy metric (Kurtz & Castro, Sec. V-E)::
 
-    Error = ``max_i w_i · |Δq_i|`` across joint coordinates in the world.
-    Matches the paper's weighted position-only norm (Sec. V-E),
-    ``|| S · (q - q̂) ||_∞`` with ``S = diag(M)^{-1/2}``.  Weights are
-    normalized per world so the heaviest DoF has weight 1 and clipped to
-    ``[1, 10]``.  Diverged sims get error = 1e10.
+        e^{n+1} = || S (q^{n+1} - q̂^{n+1}) ||_∞
+
+    Position-only inf-norm of the difference between the doubled half-step ``q`` and the
+    full step ``q̂``, scaled by the diagonal ``S`` that "maps each component to a
+    dimensionless unit." Velocity and contact impulses are excluded from the controller,
+    exactly as the paper specifies. The paper gives no formula for ``S`` and mandates NO
+    mass weighting, clipping, or normalization ("S can be estimated from knowledge of
+    coordinate types or specified by expert users"); here ``S = identity`` per PI
+    directive. Diverged sims get error = 1e10.
     """
     world = wp.tid()
     q_start = world * coords_per_world
@@ -55,7 +59,7 @@ def _inf_norm_state_error_kernel(
     max_err = float(0.0)
     for i in range(coords_per_world):
         d = wp.abs(joint_q_double[q_start + i] - joint_q_full[q_start + i])
-        max_err = wp.max(max_err, q_weights[world, i] * d)
+        max_err = wp.max(max_err, state_scale[world, i] * d)
 
     if wp.isnan(max_err) or wp.isinf(max_err):
         max_err = float(1.0e10)
@@ -378,39 +382,28 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
         self._status_scalars = wp.zeros(6, dtype=wp.float32, device=device)
 
         self._iteration_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
+        # Non-resetting cumulative boundary-loop iteration count (NOT zeroed per
+        # step_dt, unlike _iteration_count_buf). Each iteration runs the 3-eval
+        # step-doubling attempt, so total MuJoCo opt-steps = iterations * 3, and
+        # rejected attempts are counted (a rejection is just another iteration).
+        # Used as the compute axis for work-precision (V1). Reset with
+        # reset_compute_counter().
+        self._cum_iters = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Stable buffer for opt.timestep; updated via wp.copy() per substep.
         self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
         self.mjw_model.opt.timestep = self._timestep_buf
 
-        # Per-qpos error weights for the paper's weighted position-only norm
-        # (Sec. V-E), S = diag(M)^{-1/2}.  MuJoCo's mass reference lives on
-        # DoFs (nv), not qpos (nq), so for each joint we take the max invweight
-        # across its DoFs (= lightest effective DoF) and broadcast to all qpos
-        # coords of that joint.  Normalize per world so the heaviest DoF has
-        # weight 1 (keeps tol at its old numeric scale) and clip to [1, 10] so
-        # tiny-inertia rotational DoFs can't blow up the weight ratio.
-        jnt_qposadr = self.mjw_model.jnt_qposadr.numpy()
-        jnt_dofadr = self.mjw_model.jnt_dofadr.numpy()
-        invweight = self.mjw_model.dof_invweight0.numpy()  # [world_count, nv]
-        coords_per_world = self._coords_per_world
-        dofs_per_world = self._dofs_per_world
-        njnt = len(jnt_qposadr)
-
-        q_weights = np.ones((world_count, coords_per_world), dtype=np.float32)
-        for w in range(world_count):
-            dof_w = np.clip(invweight[w], 1.0e-30, None)
-            for j in range(njnt):
-                q_s = int(jnt_qposadr[j])
-                q_e = int(jnt_qposadr[j + 1]) if j + 1 < njnt else coords_per_world
-                qd_s = int(jnt_dofadr[j])
-                qd_e = int(jnt_dofadr[j + 1]) if j + 1 < njnt else dofs_per_world
-                joint_max_invweight = float(dof_w[qd_s:qd_e].max())
-                q_weights[w, q_s:q_e] = np.sqrt(joint_max_invweight)
-            # Normalize per world so the heaviest qpos coord has weight 1.
-            q_weights[w] /= q_weights[w].min()
-        q_weights = np.clip(q_weights, 1.0, 10.0)
-        self._q_weights = wp.array(q_weights, dtype=wp.float32, device=device)
+        # CENIC accuracy-metric scaling S (Sec. V-E): e = || S (q - q̂) ||_inf. The paper
+        # gives no formula for S and specifies NO mass weighting, clipping, or
+        # normalization -- "S can be estimated from knowledge of coordinate types or
+        # specified by expert users." Per PI directive (project_s_removed_identity),
+        # S = identity. To use expert per-coordinate scales, overwrite self._state_scale
+        # (shape [world_count, coords_per_world]) after construction.
+        self._state_scale = wp.array(
+            np.ones((world_count, self._coords_per_world), dtype=np.float32),
+            dtype=wp.float32, device=device,
+        )
 
         self._pipeline = newton.CollisionPipeline(
             model, broad_phase="sap", rigid_contact_max=self.mjw_data.naconmax,
@@ -447,6 +440,7 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
         dev = model.device
 
         wp.launch(_iter_count_increment, dim=1, inputs=[self._iteration_count_buf], device=dev)
+        wp.launch(_iter_count_increment, dim=1, inputs=[self._cum_iters], device=dev)
 
         # Clamp dt so no world overshoots its boundary target.
         wp.launch(
@@ -481,7 +475,7 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
             inputs=[
                 self._scratch_full.joint_q,
                 self._scratch_double.joint_q,
-                self._q_weights,
+                self._state_scale,
                 self._coords_per_world,
             ],
             outputs=[self._last_error],
@@ -614,7 +608,7 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
             inputs=[
                 self._scratch_full.joint_q,
                 self._scratch_double.joint_q,
-                self._q_weights,
+                self._state_scale,
                 self._coords_per_world,
             ],
             outputs=[self._last_error],
@@ -763,6 +757,23 @@ class SolverMuJoCoCENIC(SolverMuJoCo):
     def iteration_count(self) -> wp.array:
         """Iteration count from the most recent ``step_dt``, shape ``[1]``, int32, on device."""
         return self._iteration_count_buf
+
+    @property
+    def cumulative_iterations(self) -> wp.array:
+        """Boundary-loop iterations accumulated since the last :meth:`reset_compute_counter`,
+        shape ``[1]``, int32, on device. Includes rejected attempts. Read with ``.numpy()``
+        OUTSIDE the inner loop only (it is a device sync)."""
+        return self._cum_iters
+
+    def cumulative_substeps(self) -> int:
+        """Total MuJoCo opt-steps since the last :meth:`reset_compute_counter` (= iterations * 3
+        for the step-doubling 3-eval). Compute axis for work-precision. Host sync; call outside
+        the hot path."""
+        return int(self._cum_iters.numpy()[0]) * 3
+
+    def reset_compute_counter(self) -> None:
+        """Zero the cumulative iteration/substep counter."""
+        self._cum_iters.fill_(0)
 
     @property
     def sim_time(self) -> wp.array:

@@ -253,18 +253,22 @@ class VelocityCommand:
         vy=(-1.0, 1.0),
         wz=(-1.0, 1.0),
         deadband: float = 0.2,
+        generator: torch.Generator | None = None,
     ):
         self.device = device
         self.ranges = torch.tensor([vx, vy, wz], device=device, dtype=torch.float32)  # (3,2)
         self.deadband = deadband
         self.cmd = torch.zeros(num_worlds, 3, device=device, dtype=torch.float32)
+        # Dedicated stream so command draws stay paired across backends in eval,
+        # independent of how many domain-randomization randoms a reference consumes.
+        self.generator = generator
 
     def resample(self, env_ids: torch.Tensor):
         if len(env_ids) == 0:
             return
         lo = self.ranges[:, 0]
         hi = self.ranges[:, 1]
-        u = torch.rand(len(env_ids), 3, device=self.device)
+        u = torch.rand(len(env_ids), 3, device=self.device, generator=self.generator)
         c = lo + u * (hi - lo)
         # zero tiny planar commands so the policy learns a clean standstill gait
         small = c[:, :2].norm(dim=1) < self.deadband

@@ -25,13 +25,22 @@ from .domain_rand import DRConfig
 
 
 def eval_backend_spec(name: str, train_spec: BackendSpec) -> tuple[BackendSpec, DRConfig | None]:
-    """Resolve an --eval-backends token to (BackendSpec, DRConfig)."""
+    """Resolve an --eval-backends token to (BackendSpec, DRConfig).
+
+    Single-term tokens (``ref_friction``/``ref_mass``/``ref_kp``/``ref_kd``/
+    ``ref_push``/``ref_obsnoise``) hold the integrator IDENTICAL to ``id`` and
+    perturb exactly one physical/sensing channel, so the gap vs ``id`` isolates that
+    channel (not channel + integrator) for the error-budget ranking; ``ref_tol``/
+    ``ref_dt`` change only the integrator and isolate it.
+    """
     if name == "id":
         return train_spec, None
     if name in REF_SPECS:
         return REF_SPECS[name], None
     if name == "ref_perturbed":
         return REF_SPECS["ref_tol"], DRConfig.preset("ood")
+    if name.startswith("ref_") and name[len("ref_") :] in DRConfig.SINGLE_TERMS:
+        return train_spec, DRConfig.single(name[len("ref_") :])
     raise ValueError(f"unknown eval backend {name!r}")
 
 
@@ -81,6 +90,7 @@ def main():
     p.add_argument("--eval-backends", nargs="+", default=["id", "ref_tol", "ref_dt"])
     p.add_argument("--episodes", type=int, default=64, help="parallel worlds = episodes")
     p.add_argument("--horizon", type=int, default=1000)
+    p.add_argument("--seed", type=int, default=0, help="paired-eval seed: identical ICs+commands across backends")
     p.add_argument("--device", default="cuda")
     p.add_argument("--out", required=True)
     args = p.parse_args()
@@ -90,10 +100,24 @@ def main():
     from .config import backend_from_name  # noqa: PLC0415
 
     train_spec = backend_from_name(args.train_backend)
+    # Freeze the command for the whole horizon (resample period >> horizon) so each
+    # world tracks one paired command until it falls; combined with eval_seed this
+    # makes world w's IC+command byte-identical across backends and the gap isolates
+    # the backend. episode length covers the horizon so no mid-rollout timeout reset.
+    env_cfg = EnvConfig(
+        num_envs=args.episodes,
+        eval_seed=args.seed,
+        command_resample_s=1.0e9,
+        episode_length_s=max(20.0, (args.horizon + 10) * EnvConfig().control_dt),
+    )
     results = {}
     for name in args.eval_backends:
         spec, dr = eval_backend_spec(name, train_spec)
-        env = CenicLocomotionEnv(EnvConfig(num_envs=args.episodes), spec, dr, device=args.device, headless=True)
+        # Seed the global stream too so per-reference DR draws are reproducible run-to-run.
+        torch.manual_seed(args.seed)
+        if str(args.device).startswith("cuda"):
+            torch.cuda.manual_seed_all(args.seed)
+        env = CenicLocomotionEnv(env_cfg, spec, dr, device=args.device, headless=True)
         runner = OnPolicyRunner(env, make_ppo_cfg(1, 0), log_dir=None, device=args.device)
         runner.load(args.checkpoint)
         policy = runner.get_inference_policy(device=args.device)

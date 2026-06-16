@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "gold_dt": 2e-05,
+    "gold_zmin": 0.023365367203950882,
+    "gold_pen_mm": 26.63463279604912,
+    "integrator": "euler",
+    "Z0": 0.052,
+    "VZ": -4.0,
+    "ke": 10000.0
+  },
+  "cenic": [
+    {
+      "tol": 0.03,
+      "substeps": 120,
+      "pen_err_mm": 13.233263045549393
+    },
+    {
+      "tol": 0.01,
+      "substeps": 126,
+      "pen_err_mm": 9.794708341360092
+    },
+    {
+      "tol": 0.003,
+      "substeps": 132,
+      "pen_err_mm": 5.578380078077316
+    },
+    {
+      "tol": 0.001,
+      "substeps": 156,
+      "pen_err_mm": 3.5052914172410965
+    },
+    {
+      "tol": 0.0003,
+      "substeps": 171,
+      "pen_err_mm": 2.0591262727975845
+    },
+    {
+      "tol": 0.0001,
+      "substeps": 228,
+      "pen_err_mm": 1.2665726244449615
+    }
+  ],
+  "fixed": [
+    {
+      "fixed_dt": 0.01,
+      "substeps": 40,
+      "pen_err_mm": 29.335584491491318
+    },
+    {
+      "fixed_dt": 0.005,
+      "substeps": 80,
+      "pen_err_mm": 14.275312423706055
+    },
+    {
+      "fixed_dt": 0.002,
+      "substeps": 200,
+      "pen_err_mm": 5.518186837434769
+    },
+    {
+      "fixed_dt": 0.001,
+      "substeps": 400,
+      "pen_err_mm": 2.7080364525318146
+    },
+    {
+      "fixed_dt": 0.0005,
+      "substeps": 800,
+      "pen_err_mm": 1.3209767639636993
+    }
+  ]
+}
