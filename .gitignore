@@ -77,3 +77,6 @@ docs/_static/viser/
 
 #reference files
 integrator_base.cc
+
+# editable-install build artifact
+*.egg-info/
