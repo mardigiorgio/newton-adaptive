@@ -84,6 +84,15 @@ memory) and re-`pip install -e /repo/scripts/rl/trossen`.
   `14 != 16` actuator warning is expected/benign).
 - Cube spawn pos `[0.3,0,0.055]` + command ranges copied from WXAI; tune to the left-arm reach.
 
+## If you move to native Ubuntu (planned — no container needed)
+On Ubuntu 22.04 LTS, Isaac Lab runs natively; drop the whole podman/CDI/`label=disable` layer.
+1. Install Ubuntu to the new M.2 (separate drive → pick boot drive via the BIOS boot menu / GRUB).
+2. NVIDIA **proprietary** driver: `sudo ubuntu-drivers autoinstall && reboot`; verify `nvidia-smi`.
+3. Isaac Lab native: python3.11 venv → `pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com` + `torch==2.7.0 torchvision==0.22.0 --index-url .../cu128`; `git clone IsaacLab && ./isaaclab.sh --install` (the `tabs 4` abort was a non-tty *podman exec* thing — a real terminal won't hit it); `pip install -e trossen_ai_isaac/source/trossen_ai_isaac`; `pip install -U 'rsl-rl-lib<6'` (→5.4.1); clone this repo + `pip install -e scripts/rl/trossen`.
+4. Bring checkpoints over to resume: copy `model_650.pt` (USB / shared ext4 partition / scp) — else re-train (~30 min for 650).
+5. Run natively: `~/IsaacLab/isaaclab.sh -p scripts/rl/trossen/train_teacher.py --headless --num_envs 2048 --max_iterations 850 --resume_from <.../model_650.pt>`.
+The CODE-level gotchas (AppLauncher before importing `isaaclab.*`; `handle_deprecated_rsl_rl_cfg`; `torch.no_grad` for multi-ckpt rollouts; marker files) still apply — they are not container-specific. The container path remains valid as a fallback.
+
 ## Next (Phase 4–6) — see the plan
 `docs/superpowers/plans/2026-06-16-trossen-cube-pickup-teacher-student.md` and
 `scripts/rl/trossen/IMPL_GROUND_TRUTH.md` (pinned Isaac Lab values + corrections).
