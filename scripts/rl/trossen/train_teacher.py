@@ -15,11 +15,29 @@ import os
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--num_envs", type=int, default=4096)
+parser.add_argument("--num_envs", type=int, default=2048,
+                    help="2048 is validated (banked teacher + GPU buffers sized for 1-2k). 4096 is "
+                         "UNVERIFIED -- contact-drop there is silent (shows as object_dropping, not an "
+                         "error); boot-smoke and watch object_dropping before trusting it.")
 parser.add_argument("--max_iterations", type=int, default=1500)
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--video", action="store_true")
 parser.add_argument("--resume_from", default=None, help="checkpoint .pt to resume from")
+parser.add_argument("--entropy_coef", type=float, default=None,
+                    help="override algorithm.entropy_coef. Use a low value (e.g. 0.001) with "
+                         "--resume_from for the precision/still-hold anneal continuation; rsl-rl has no "
+                         "built-in entropy schedule, so this is the reference-faithful fine-tune lever.")
+parser.add_argument("--run_label", default=None,
+                    help="suffix appended to experiment_name (e.g. 'jv03') so one-var-per-run jitter "
+                         "experiments each write their own log dir instead of clobbering the canonical one.")
+parser.add_argument("--joint_vel_weight", type=float, default=None,
+                    help="override the joint_vel still-hold penalty weight (stock -1e-1 terminal). Sets "
+                         "BOTH the base reward weight AND the curriculum terminal weight, so the penalty "
+                         "is active from step 0 -- a --resume_from RESETS common_step_counter, so the "
+                         "iter-~417 curriculum would otherwise leave it at the base -1e-4 for most of a "
+                         "short fine-tune.")
+parser.add_argument("--action_rate_weight", type=float, default=None,
+                    help="override the action_rate still-hold penalty weight (see --joint_vel_weight).")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -40,9 +58,24 @@ LOG_ROOT = os.environ.get("TROSSEN_LOG_ROOT", "/isaac/logs/trossen")
 def main():
     env_cfg = parse_env_cfg(TASK, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+
+    # Still-hold (jitter) lever: strengthen a motion penalty (one var per run). Override the base
+    # reward weight AND the curriculum terminal weight together so the penalty bites immediately --
+    # crucial on --resume_from, where common_step_counter resets and the stock iter-~417 curriculum
+    # would otherwise keep the weight at -1e-4 for most of a short fine-tune. See JITTER_FIX_GUIDE.md.
+    for term, weight in (("joint_vel", args.joint_vel_weight), ("action_rate", args.action_rate_weight)):
+        if weight is not None:
+            getattr(env_cfg.rewards, term).weight = weight
+            getattr(env_cfg.curriculum, term).params["weight"] = weight
+            print(f"[expt] {term} penalty weight -> {weight} (base + curriculum, active from step 0)")
+
     agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
     agent_cfg.max_iterations = args.max_iterations
     agent_cfg.seed = args.seed
+    if args.entropy_coef is not None:
+        agent_cfg.algorithm.entropy_coef = args.entropy_coef
+    if args.run_label:
+        agent_cfg.experiment_name = f"{agent_cfg.experiment_name}.{args.run_label}"
     # Migrate legacy cfg fields (e.g. `stochastic`) to match the installed rsl-rl-lib, as
     # Isaac Lab's own train.py does -- otherwise rsl-rl's MLPModel rejects the extra kwarg.
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))

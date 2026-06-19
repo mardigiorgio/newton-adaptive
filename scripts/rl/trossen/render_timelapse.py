@@ -19,6 +19,8 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=120, help="rollout steps per checkpoint")
 parser.add_argument("--every", type=int, default=1, help="use every Nth checkpoint")
+parser.add_argument("--ckpts", type=int, nargs="+", default=None,
+                    help="render only these exact checkpoint iters (e.g. --ckpts 1499 3498); overrides --every")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--fps", type=int, default=30)
 parser.add_argument("--width", type=int, default=640)
@@ -26,6 +28,10 @@ parser.add_argument("--height", type=int, default=360)
 parser.add_argument("--out", default="/isaac/teacher_timelapse.mp4")
 parser.add_argument("--log_dir", default="/isaac/logs/trossen/stationary_ai_lift_teacher")
 parser.add_argument("--task", default="Isaac-Lift-Cube-StationaryAI-Teacher-Play-v0")
+parser.add_argument("--seed", type=int, default=None,
+                    help="fix the cube spawn + goal target so different checkpoints/runs are compared on "
+                         "the SAME target (fair still-hold A/B -- otherwise an easy low goal looks stiller "
+                         "for free). Re-seeded right before each checkpoint's reset.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -51,11 +57,13 @@ def main():
     ver = metadata.version("rsl-rl-lib")
     env_cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
     env_cfg.scene.num_envs = args.num_envs
-    # Smaller viewport -> much faster per-frame host copy. Frame a 3/4 view on the
-    # active (left) arm + cube (cube spawns near x=0.3).
+    if args.seed is not None:
+        env_cfg.seed = args.seed
+    # Smaller viewport -> much faster per-frame host copy. Frame a 3/4 view on the active
+    # (left) arm + cube (cube spawns at ~[0, 0.25, 0.05]; left arm base at ~y=0.46).
     env_cfg.viewer.resolution = (args.width, args.height)
-    env_cfg.viewer.eye = (1.4, -1.4, 1.1)
-    env_cfg.viewer.lookat = (0.3, 0.0, 0.2)
+    env_cfg.viewer.eye = (1.2, -0.9, 1.0)
+    env_cfg.viewer.lookat = (0.0, 0.25, 0.15)
     agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, ver)
 
@@ -65,7 +73,12 @@ def main():
 
     ckpts = sorted(
         glob.glob(os.path.join(args.log_dir, "**", "model_*.pt"), recursive=True), key=_iter_of
-    )[:: args.every]
+    )
+    if args.ckpts is not None:
+        want = set(args.ckpts)
+        ckpts = [c for c in ckpts if _iter_of(c) in want]
+    else:
+        ckpts = ckpts[:: args.every]
 
     writer = None
     n_frames = 0
@@ -73,6 +86,11 @@ def main():
         it = _iter_of(ckpt)
         runner.load(ckpt)
         policy = runner.get_inference_policy(device=agent_cfg.device)
+        # Re-seed before reset so every checkpoint faces the identical cube spawn + goal target
+        # (commands/events sample from the torch RNG at reset). Makes the hold comparison fair.
+        if args.seed is not None:
+            torch.manual_seed(args.seed)
+            np.random.seed(args.seed)
         obs, _ = wrapped.reset()
         # NOTE: torch.no_grad (NOT inference_mode) -- inference_mode marks the env's
         # state tensors as inference tensors, which breaks the next checkpoint's reset().

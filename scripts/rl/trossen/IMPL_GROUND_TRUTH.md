@@ -8,7 +8,7 @@ Source: `~/isaac-rl/IsaacLab/source` (IL), `~/isaac-rl/trossen_ai_isaac` (TR), r
 - EE bodies: `follower_left_ee_gripper_link`, `follower_right_ee_gripper_link` · arm bases: `follower_left_base_link`, `follower_right_base_link`
 - Camera mounts in USD: `cam_high_link`, `cam_low_link`, `follower_{left,right}_camera_link` (4× D405)
 - 16 articulated DOF (12 arm + 4 carriage). v1 ACTIVE arm = LEFT; right parked.
-- Carriage convention (WXAI): actuate only the LEFT carriage; right carriage is a USD mimic. UNVERIFIED for stationary_ai.usd → smoke test confirms it loads.
+- Carriage convention: actuate only the LEFT carriage. VERIFIED from stationary_ai.usd (usd-core, 2026-06-17): each RIGHT carriage joint has no drive API and carries a `physxMimicJoint:rotY` (gearing -1.0, referenceJoint = the matching LEFT carriage). So the right finger mirrors the left automatically; the "14 != 16 actuators" warning is benign.
 
 ## Key corrections to the plan (CRITICAL)
 1. PPO `obs_groups` key is **`"actor"`/`"critic"`**, not `"policy"`. `"policy"` is an env obs-group NAME (a value). → `{"actor": ["policy"], "critic": ["policy","privileged"]}` (RSL/algorithms/ppo.py).
@@ -30,11 +30,13 @@ Source: `~/isaac-rl/IsaacLab/source` (IL), `~/isaac-rl/trossen_ai_isaac` (TR), r
 ## Terminations / events / command / actions / timing
 - term: `time_out`(time_out=True); `object_dropping` `root_height_below_minimum` {minimum_height:-0.05, asset_cfg object}
 - events: `reset_scene_to_default`(reset); `reset_root_state_uniform`(reset) {pose_range x:(-0.1,0.1) y:(-0.25,0.25) z:(0,0), velocity_range {}, asset_cfg object body_names "Object"}
-- command `object_pose` UniformPoseCommandCfg resampling_time_range (5,5); WXAI ranges pos_x(0.2,0.4) pos_y(-0.15,0.15) pos_z(0.1,0.3); body_name "follower_left_ee_gripper_link" (UNVERIFIED reach → tune)
+- command `object_pose` UniformPoseCommandCfg resampling_time_range (5,5); body_name "follower_left_ee_gripper_link". RESOLVED to LEFT-arm +y workspace (NOT the WXAI +x ranges): pos_x(-0.1,0.1) pos_y(0.15,0.35) pos_z(0.08,0.25). cube reset pose_range overridden to x(-0.1,0.1) y(-0.1,0.1) z(0,0).
 - actions: arm `JointPositionActionCfg` joint_names ["follower_left_joint_[0-5]"] scale=0.5 use_default_offset=True; gripper `BinaryJointPositionActionCfg` joint_names ["follower_left_left_carriage_joint"] open=0.044 close=0.0 (0.044 is WXAI stroke, UNVERIFIED)
 - sim: decimation=2, episode_length_s=5.0, sim.dt=0.01 (inherited from LiftEnvCfg)
-- object DexCube: `{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd` scale (0.8,0.8,0.8); WXAI init pos [0.3,0,0.055] (UNVERIFIED reach → tune)
-- ee_frame sensor MUST be named `ee_frame`; source follower_left_base_link, target follower_left_ee_gripper_link
+- object DexCube: `{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd` scale (0.8,0.8,0.8); init pos RESOLVED to [0.0, 0.25, 0.05] (left-arm +y, resting on the rig tabletop slab whose top is z=0.02), mirroring Trossen's pick-place cube [0,0.25,0.06].
+- ee_frame sensor MUST be named `ee_frame`; source follower_left_base_link. GOTCHA (verified at runtime 2026-06-17): `follower_left_ee_gripper_link` is a USD rigid-body prim but NOT an enumerated articulation body (no joint into the tree), so it CANNOT be a command `body_name` nor a `robot.find_bodies` target -- only `follower_left_link_6` is available. Use link_6 as `EE_LINK` (command body + ee_frame target) and add a fixed offset `EE_TCP_OFFSET=(0.087,0,0)` (link_6 local x = the FINGER MIDPOINT = grasp point). **`ee_gripper_link` (offset 0.1561) is ~7cm PAST the fingers, NOT the grasp point** -- it aimed the reach reward 7cm short of the gripper, so it could never grasp (`diag_grasp_geom.py` 2026-06-18: TCP->finger_mid 6.96cm @ 0.1561 vs 0.11cm @ 0.087). Do NOT set body_name=ee_gripper_link (raises "Not all regular expressions are matched").
+- **Gripper widths (measured 2026-06-18, `diag_grasp_geom.py`):** OPEN finger_sep 13.6cm, CLOSED 4.83cm. The manipuland MUST be WIDER than the closed 4.83cm or the fingers close right past it without touching -- DexCube scale 0.8 (4.8cm) was TOO SMALL; use scale 0.9 (~5.4cm).
+- Scene: the stationary_ai USD has its own collision tabletop_link (slab top z=0.02) + frame; DROP the base LiftEnvCfg SeattleLabTable (`self.scene.table = None`) and set ground plane to z=0.0. Arm bases: follower_left_base_link at (-0.02, +0.4575, 0.039), follower_right at (-0.02, -0.4575, 0.039) [robot-root frame].
 
 ## TiledCamera / mdp.image (vision)
 - TiledCameraCfg(prim_path "{ENV_REGEX_NS}/Robot/cam_high_link", offset OffsetCfg(pos,rot(w,x,y,z),convention="ros"), data_types ["distance_to_camera"], spawn PinholeCameraCfg(focal_length=24.0, horizontal_aperture=20.955, clipping_range=(0.01,1e6)), width/height, update_period=0.0). Camera offset UNVERIFIED.
@@ -47,5 +49,8 @@ Source: `~/isaac-rl/IsaacLab/source` (IL), `~/isaac-rl/trossen_ai_isaac` (TR), r
 - Distill: RslRlDistillationRunnerCfg(class_name "DistillationRunner"; student/teacher RslRlMLPModelCfg; algorithm RslRlDistillationAlgorithmCfg(class_name "Distillation"; num_learning_epochs; learning_rate; gradient_length; max_grad_norm; optimizer; loss_type "mse"))
 - RslRlCNNModelCfg(extends MLP; class_name "CNNModel"; cnn_cfg CNNCfg(output_channels, kernel_size, stride=1, padding, norm, activation, max_pool=False, global_pool, flatten=True))
 
+## Resolved 2026-06-17 (usd-core read of stationary_ai.usd, GPU-free)
+carriage mimic (physxMimicJoint, gearing -1.0) · gripper stroke (left carriage limit [0, 0.044], so open=0.044/close=0.0 is full stroke) · ee frame (`follower_left_ee_gripper_link` real body, 0.1561 m ahead of link_6) · cube pos + command ranges (left-arm +y band) · table (use built-in tabletop_link, drop SeattleLabTable) · arm base transforms.
+
 ## Still UNVERIFIED (resolve during impl)
-asset path/depth · carriage mimic · gripper open stroke · camera offset · cube pos + command ranges (left-arm reach) · table reposition · CNN permute internal? · CNN channels/kernels for 80×80.
+camera offset (cam_high_link) · CNN permute internal? · CNN channels/kernels for the depth student.

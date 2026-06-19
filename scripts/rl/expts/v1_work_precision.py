@@ -29,8 +29,8 @@ import newton
 
 from scripts.bench.plotting import save_fig
 
-from .anymal import build_anymal_model
-from .backends import Backend, BackendSpec
+from ..anymal.anymal import build_anymal_model
+from ..anymal.backends import Backend, BackendSpec
 
 DT = 0.008  # outer period [s]; every fixed_dt below divides it
 T = 0.6  # rollout seconds

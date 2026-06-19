@@ -4,9 +4,13 @@ Authored from ``stationary_ai.usd`` (joint/body names dumped directly from the U
 following the single-arm ``WXAI_BASE_CFG`` convention
 (``trossen_ai_isaac .../manipulation/assets/wxai.py``):
 
-- PD gains are baked into the USD, so actuator ``stiffness``/``damping`` are ``None``.
-- Each gripper actuates only its LEFT carriage joint; the matching RIGHT carriage is
-  a USD mimic joint (same gripper hardware as the single-arm WXAI).
+- The active ``left_arm`` uses the Isaac Lab manipulation reference gains (stiffness=80, damping=4,
+  as in Franka/OpenArm lift); the USD-baked gains are ~500x stiffer and cause the hold jitter (see
+  the actuator comment below). The parked right arm + grippers keep their baked gains (``None``).
+- Each gripper actuates only its LEFT carriage joint; the matching RIGHT carriage is a USD
+  ``physxMimicJoint`` (gearing -1.0, referenceJoint = left carriage) that mirrors it
+  automatically (same gripper hardware as the single-arm WXAI). This leaves 14 actuated DOF
+  out of 16 -- the "14 != 16 actuators" warning at load is expected and benign.
 
 This module imports ``isaaclab.*`` at load time, so it can only be imported AFTER
 ``AppLauncher``/``SimulationApp`` has started (USD ``pxr`` runtime).
@@ -59,8 +63,13 @@ STATIONARY_AI_CFG = ArticulationCfg(
         },
     ),
     actuators={
+        # Isaac Lab manipulation reference gains (Franka & OpenArm lift both use arm stiffness=80,
+        # damping=4). The USD-baked gains are ~40000/340 -- ~500x too stiff, a ~30-100 Hz PD bandwidth
+        # that faithfully reproduces the policy's ~18 Hz command micro-oscillation as visible hold
+        # jitter (diagnosed in diag_jitter.py). The soft 80/4 PD (~1.5-4.5 Hz bandwidth) cannot follow
+        # that chatter, so it smooths it -- which is why the reference arms hold steadily.
         "left_arm": ImplicitActuatorCfg(
-            joint_names_expr=["follower_left_joint_[0-5]"], stiffness=None, damping=None
+            joint_names_expr=["follower_left_joint_[0-5]"], stiffness=80.0, damping=4.0
         ),
         "left_gripper": ImplicitActuatorCfg(
             joint_names_expr=["follower_left_left_carriage_joint"], stiffness=None, damping=None

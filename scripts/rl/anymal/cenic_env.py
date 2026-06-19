@@ -18,7 +18,7 @@ import warp as wp
 
 import newton
 
-from . import anymal
+from .. import anymal
 from .anymal import build_anymal_model, compute_base_frame, compute_obs, compute_reward, compute_termination
 from .backends import BackendSpec, make_backend
 from .config import EnvConfig

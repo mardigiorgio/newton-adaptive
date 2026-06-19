@@ -26,7 +26,7 @@ import newton
 import newton.solvers
 
 from scripts.bench.plotting import save_fig
-from scripts.rl.anymal import build_anymal_model
+from scripts.rl.anymal.anymal import build_anymal_model
 
 DT = 0.01
 N_STEPS = 45
