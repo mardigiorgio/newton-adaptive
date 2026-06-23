@@ -3,7 +3,7 @@
 
 """Per-kernel component breakdown benchmark.
 
-Instruments each operation in the CENIC iteration body with
+Instruments each operation in the adaptive iteration body with
 wp.synchronize() barriers to identify which kernels scale with N.
 
 Standalone:
@@ -24,12 +24,9 @@ import warp as wp
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from scripts.bench.infra import power_law_exponent
-from scripts.bench.plotting import save_fig
-from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_solver
-from newton._src.solvers.mujoco.solver_mujoco_cenic import (
-    _apply_dt_cap,
+from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
     _advance_sim_time,
+    _apply_dt_cap,
     _boundary_advance,
     _boundary_check,
     _boundary_reset,
@@ -39,15 +36,33 @@ from newton._src.solvers.mujoco.solver_mujoco_cenic import (
     _select_spatial_vector_kernel,
     _select_transform_kernel,
 )
+from scripts.bench.infra import power_law_exponent
+from scripts.bench.plotting import save_fig
+from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_solver
 
 ITER_COMPONENTS = [
     "snapshot_copies",
-    "substep1_update_mjc", "substep1_dt_copy", "substep1_mujoco", "substep1_update_newton",
-    "substep2_update_mjc", "substep2_dt_copy", "substep2_mujoco", "substep2_update_newton",
-    "substep3_update_mjc", "substep3_dt_copy", "substep3_mujoco", "substep3_update_newton",
-    "inf_norm_error", "calc_adjusted_step",
-    "select_joint_q", "select_joint_qd", "select_body_q", "select_body_qd",
-    "advance_sim_time", "apply_dt_cap", "boundary_check",
+    "substep1_update_mjc",
+    "substep1_dt_copy",
+    "substep1_mujoco",
+    "substep1_update_newton",
+    "substep2_update_mjc",
+    "substep2_dt_copy",
+    "substep2_mujoco",
+    "substep2_update_newton",
+    "substep3_update_mjc",
+    "substep3_dt_copy",
+    "substep3_mujoco",
+    "substep3_update_newton",
+    "inf_norm_error",
+    "calc_adjusted_step",
+    "select_joint_q",
+    "select_joint_qd",
+    "select_body_q",
+    "select_body_qd",
+    "advance_sim_time",
+    "apply_dt_cap",
+    "boundary_check",
 ]
 
 PRE_POST_COMPONENTS = ["pre_state_copy_in", "apply_mjc_control", "post_state_copy_out"]
@@ -66,7 +81,7 @@ PLOT_GROUPS = {
 
 
 def _measure_n(n: int, steps: int, warmup: int) -> dict:
-    """Time each CENIC sub-component for N worlds.
+    """Time each adaptive sub-component for N worlds.
 
     Phase 1: step_dt end-to-end + iteration count K.
     Phase 2: per-component manual timing with sync barriers.
@@ -101,7 +116,8 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
     for _ in range(steps):
         effective_dt_max = min(solver._dt_max, DT_OUTER)
         wp.launch(
-            _apply_dt_cap, dim=nw,
+            _apply_dt_cap,
+            dim=nw,
             inputs=[solver._ideal_dt, solver._dt_min, effective_dt_max, solver._dt, solver._dt_half],
             device=dev,
         )
@@ -144,11 +160,14 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
         t = t_new
 
         # 3 substeps
-        for idx, (src_state, dst_state, dt_arr) in enumerate([
-            (solver._state_cur, solver._scratch_full, solver._dt),
-            (solver._state_cur, solver._scratch_mid, solver._dt_half),
-            (solver._scratch_mid, solver._scratch_double, solver._dt_half),
-        ], start=1):
+        for idx, (src_state, dst_state, dt_arr) in enumerate(
+            [
+                (solver._state_cur, solver._scratch_full, solver._dt),
+                (solver._state_cur, solver._scratch_mid, solver._dt_half),
+                (solver._scratch_mid, solver._scratch_double, solver._dt_half),
+            ],
+            start=1,
+        ):
             solver._update_mjc_data(solver.mjw_data, model, src_state)
             wp.synchronize()
             t_new = time.perf_counter()
@@ -176,12 +195,16 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         # Error control
         wp.launch(
-            _inf_norm_state_error_kernel, dim=nw,
+            _inf_norm_state_error_kernel,
+            dim=nw,
             inputs=[
-                solver._scratch_full.joint_q, solver._scratch_double.joint_q,
-                solver._q_weights, solver._coords_per_world,
+                solver._scratch_full.joint_q,
+                solver._scratch_double.joint_q,
+                solver._q_weights,
+                solver._coords_per_world,
             ],
-            outputs=[solver._last_error], device=dev,
+            outputs=[solver._last_error],
+            device=dev,
         )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -189,7 +212,8 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
         t = t_new
 
         wp.launch(
-            _calc_adjusted_step, dim=nw,
+            _calc_adjusted_step,
+            dim=nw,
             inputs=[solver._last_error, solver._dt, solver._ideal_dt, solver._accepted, solver._tol, solver._dt_min],
             device=dev,
         )
@@ -200,9 +224,16 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         # State selection
         wp.launch(
-            _select_float_kernel, dim=model.joint_coord_count,
-            inputs=[solver._scratch_double.joint_q, solver._state_saved.joint_q, solver._accepted, solver._coords_per_world],
-            outputs=[solver._state_cur.joint_q], device=dev,
+            _select_float_kernel,
+            dim=model.joint_coord_count,
+            inputs=[
+                solver._scratch_double.joint_q,
+                solver._state_saved.joint_q,
+                solver._accepted,
+                solver._coords_per_world,
+            ],
+            outputs=[solver._state_cur.joint_q],
+            device=dev,
         )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -210,9 +241,16 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
         t = t_new
 
         wp.launch(
-            _select_float_kernel, dim=model.joint_dof_count,
-            inputs=[solver._scratch_double.joint_qd, solver._state_saved.joint_qd, solver._accepted, solver._dofs_per_world],
-            outputs=[solver._state_cur.joint_qd], device=dev,
+            _select_float_kernel,
+            dim=model.joint_dof_count,
+            inputs=[
+                solver._scratch_double.joint_qd,
+                solver._state_saved.joint_qd,
+                solver._accepted,
+                solver._dofs_per_world,
+            ],
+            outputs=[solver._state_cur.joint_qd],
+            device=dev,
         )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -221,9 +259,16 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         if solver._state_cur.body_q is not None:
             wp.launch(
-                _select_transform_kernel, dim=model.body_count,
-                inputs=[solver._scratch_double.body_q, solver._state_saved.body_q, solver._accepted, solver._bodies_per_world],
-                outputs=[solver._state_cur.body_q], device=dev,
+                _select_transform_kernel,
+                dim=model.body_count,
+                inputs=[
+                    solver._scratch_double.body_q,
+                    solver._state_saved.body_q,
+                    solver._accepted,
+                    solver._bodies_per_world,
+                ],
+                outputs=[solver._state_cur.body_q],
+                device=dev,
             )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -232,9 +277,16 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         if solver._state_cur.body_qd is not None:
             wp.launch(
-                _select_spatial_vector_kernel, dim=model.body_count,
-                inputs=[solver._scratch_double.body_qd, solver._state_saved.body_qd, solver._accepted, solver._bodies_per_world],
-                outputs=[solver._state_cur.body_qd], device=dev,
+                _select_spatial_vector_kernel,
+                dim=model.body_count,
+                inputs=[
+                    solver._scratch_double.body_qd,
+                    solver._state_saved.body_qd,
+                    solver._accepted,
+                    solver._bodies_per_world,
+                ],
+                outputs=[solver._state_cur.body_qd],
+                device=dev,
             )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -243,7 +295,8 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         # Bookkeeping
         wp.launch(
-            _advance_sim_time, dim=nw,
+            _advance_sim_time,
+            dim=nw,
             inputs=[solver._sim_time, solver._dt, solver._accepted, solver._last_error, solver._accepted_error],
             device=dev,
         )
@@ -253,7 +306,8 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
         t = t_new
 
         wp.launch(
-            _apply_dt_cap, dim=nw,
+            _apply_dt_cap,
+            dim=nw,
             inputs=[solver._ideal_dt, solver._dt_min, DT_OUTER, solver._dt, solver._dt_half],
             device=dev,
         )
@@ -264,8 +318,10 @@ def _measure_n(n: int, steps: int, warmup: int) -> dict:
 
         wp.launch(_boundary_reset, dim=1, inputs=[solver._boundary_flag], device=dev)
         wp.launch(
-            _boundary_check, dim=nw,
-            inputs=[solver._sim_time, solver._next_time, solver._boundary_flag], device=dev,
+            _boundary_check,
+            dim=nw,
+            inputs=[solver._sim_time, solver._next_time, solver._boundary_flag],
+            device=dev,
         )
         wp.synchronize()
         t_new = time.perf_counter()
@@ -341,14 +397,18 @@ def plot(data: dict, out_dir: Path) -> None:
         ys = [r[key] * 1e3 for r in all_results]
         exp = power_law_exponent(ns, [r[key] for r in all_results])
         ax.plot(
-            ns, ys,
+            ns,
+            ys,
             label=f"{label} (N^{exp:.2f})",
-            color=color, linestyle=ls, linewidth=lw,
-            marker="o", markersize=3,
+            color=color,
+            linestyle=ls,
+            linewidth=lw,
+            marker="o",
+            markersize=3,
         )
     ax.set_xlabel("N worlds")
     ax.set_ylabel("Wall time [ms]")
-    ax.set_title("CENIC component scaling (log-log)")
+    ax.set_title("adaptive component scaling (log-log)")
     ax.set_yscale("log")
     ax.set_xscale("log", base=2)
     ax.legend(fontsize=7, ncol=2)

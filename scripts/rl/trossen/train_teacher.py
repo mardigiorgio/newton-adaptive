@@ -1,11 +1,11 @@
 """Stage-1 PPO teacher training for the Stationary AI cube-lift task.
 
 Self-contained (mirrors Isaac Lab's rsl_rl train.py flow + imports trossen_cube to
-register the gym id). Run inside the container:
+register the gym id). Run natively via the launcher wrapper:
 
-    scripts/rl/trossen/docker/run.sh scripts/rl/trossen/train_teacher.py --headless --num_envs 4096
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/train_teacher.py --headless --num_envs 2048
     # smoke:
-    scripts/rl/trossen/docker/run.sh scripts/rl/trossen/train_teacher.py --headless --num_envs 64 --max_iterations 3
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/train_teacher.py --headless --num_envs 64 --max_iterations 3
 """
 
 import argparse
@@ -15,29 +15,48 @@ import os
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--num_envs", type=int, default=2048,
-                    help="2048 is validated (banked teacher + GPU buffers sized for 1-2k). 4096 is "
-                         "UNVERIFIED -- contact-drop there is silent (shows as object_dropping, not an "
-                         "error); boot-smoke and watch object_dropping before trusting it.")
+parser.add_argument(
+    "--num_envs",
+    type=int,
+    default=2048,
+    help="2048 is validated (banked teacher + GPU buffers sized for 1-2k). 4096 is "
+    "UNVERIFIED -- contact-drop there is silent (shows as object_dropping, not an "
+    "error); boot-smoke and watch object_dropping before trusting it.",
+)
 parser.add_argument("--max_iterations", type=int, default=1500)
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--video", action="store_true")
 parser.add_argument("--resume_from", default=None, help="checkpoint .pt to resume from")
-parser.add_argument("--entropy_coef", type=float, default=None,
-                    help="override algorithm.entropy_coef. Use a low value (e.g. 0.001) with "
-                         "--resume_from for the precision/still-hold anneal continuation; rsl-rl has no "
-                         "built-in entropy schedule, so this is the reference-faithful fine-tune lever.")
-parser.add_argument("--run_label", default=None,
-                    help="suffix appended to experiment_name (e.g. 'jv03') so one-var-per-run jitter "
-                         "experiments each write their own log dir instead of clobbering the canonical one.")
-parser.add_argument("--joint_vel_weight", type=float, default=None,
-                    help="override the joint_vel still-hold penalty weight (stock -1e-1 terminal). Sets "
-                         "BOTH the base reward weight AND the curriculum terminal weight, so the penalty "
-                         "is active from step 0 -- a --resume_from RESETS common_step_counter, so the "
-                         "iter-~417 curriculum would otherwise leave it at the base -1e-4 for most of a "
-                         "short fine-tune.")
-parser.add_argument("--action_rate_weight", type=float, default=None,
-                    help="override the action_rate still-hold penalty weight (see --joint_vel_weight).")
+parser.add_argument(
+    "--entropy_coef",
+    type=float,
+    default=None,
+    help="override algorithm.entropy_coef. Use a low value (e.g. 0.001) with "
+    "--resume_from for the precision/still-hold anneal continuation; rsl-rl has no "
+    "built-in entropy schedule, so this is the reference-faithful fine-tune lever.",
+)
+parser.add_argument(
+    "--run_label",
+    default=None,
+    help="suffix appended to experiment_name (e.g. 'jv03') so one-var-per-run jitter "
+    "experiments each write their own log dir instead of clobbering the canonical one.",
+)
+parser.add_argument(
+    "--joint_vel_weight",
+    type=float,
+    default=None,
+    help="override the joint_vel still-hold penalty weight (stock -1e-1 terminal). Sets "
+    "BOTH the base reward weight AND the curriculum terminal weight, so the penalty "
+    "is active from step 0 -- a --resume_from RESETS common_step_counter, so the "
+    "iter-~417 curriculum would otherwise leave it at the base -1e-4 for most of a "
+    "short fine-tune.",
+)
+parser.add_argument(
+    "--action_rate_weight",
+    type=float,
+    default=None,
+    help="override the action_rate still-hold penalty weight (see --joint_vel_weight).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -45,14 +64,13 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import gymnasium as gym  # noqa: E402
-from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+import trossen_cube  # noqa: F401,E402  (registers gym ids)
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg  # noqa: E402
-
-import trossen_cube  # noqa: F401,E402  (registers gym ids)
+from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+from trossen_cube.paths import LOG_ROOT  # noqa: E402  (post-launch; default ~/Documents/code/isaac-rl/logs/trossen)
 
 TASK = "Isaac-Lift-Cube-StationaryAI-Teacher-v0"
-LOG_ROOT = os.environ.get("TROSSEN_LOG_ROOT", "/isaac/logs/trossen")
 
 
 def main():

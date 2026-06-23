@@ -20,7 +20,6 @@ import json
 from pathlib import Path
 
 import matplotlib
-import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -40,10 +39,14 @@ def _tol_label(tol: float) -> str:
 
 
 def _measure_tol_n(
-    tol: float, n: int, steps: int, warmup: int, trials: int = 1,
+    tol: float,
+    n: int,
+    steps: int,
+    warmup: int,
+    trials: int = 1,
     seed: int = SEED,
 ) -> MeasureResult:
-    """Measure CENIC on randomized ICs at one (tol, N) with best-of-`trials`."""
+    """Measure adaptive on randomized ICs at one (tol, N) with best-of-`trials`."""
 
     def build_fn(n_worlds):
         return build_model_randomized(n_worlds, seed=seed)
@@ -98,8 +101,13 @@ def run(
     for tol in tols:
         key = f"{tol:.0e}"
         curve: dict = {
-            "medians": [], "p25": [], "p75": [],
-            "k_means": [], "k_maxes": [], "k_p25s": [], "k_p75s": [],
+            "medians": [],
+            "p25": [],
+            "p75": [],
+            "k_means": [],
+            "k_maxes": [],
+            "k_p25s": [],
+            "k_p75s": [],
             "per_iter_medians": [],
         }
         print(f"\n  tol={tol:.0e}", flush=True)
@@ -130,8 +138,16 @@ def _tol_color(i: int) -> str:
 
 
 def _plot_lines_vs_n(
-    ax, ns, tols, curves, y_key, *, scale: float = 1.0, ls: str = "-",
-    fill_lo: str | None = None, fill_hi: str | None = None,
+    ax,
+    ns,
+    tols,
+    curves,
+    y_key,
+    *,
+    scale: float = 1.0,
+    ls: str = "-",
+    fill_lo: str | None = None,
+    fill_hi: str | None = None,
 ) -> None:
     """Draw one line per tol on (ax) using ``curves[tol_key][y_key]`` for y."""
     for i, tol in enumerate(tols):
@@ -155,8 +171,7 @@ def plot(data: dict, out_dir: Path) -> None:
 
     # Plot 1: Wall time per outer step vs N.
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    _plot_lines_vs_n(ax, ns, tols, curves, "medians", scale=1e3,
-                     fill_lo="p25", fill_hi="p75")
+    _plot_lines_vs_n(ax, ns, tols, curves, "medians", scale=1e3, fill_lo="p25", fill_hi="p75")
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     ax.set_xlabel("N worlds", fontsize=11)
@@ -187,11 +202,19 @@ def plot(data: dict, out_dir: Path) -> None:
         key = f"{tol:.0e}"
         c = _tol_color(i)
         curve = curves[key]
-        ax.plot(ns, curve["k_means"], color=c, marker="o", ls="-", lw=2, ms=5,
-                label=f"{_tol_label(tol)}  $K_{{mean}}$")
+        ax.plot(ns, curve["k_means"], color=c, marker="o", ls="-", lw=2, ms=5, label=f"{_tol_label(tol)}  $K_{{mean}}$")
         ax.fill_between(ns, curve["k_p25s"], curve["k_p75s"], color=c, alpha=0.10)
-        ax.plot(ns, curve["k_maxes"], color=c, marker="o", ls=":", lw=1, ms=3,
-                alpha=0.55, label=f"{_tol_label(tol)}  $K_{{max}}$")
+        ax.plot(
+            ns,
+            curve["k_maxes"],
+            color=c,
+            marker="o",
+            ls=":",
+            lw=1,
+            ms=3,
+            alpha=0.55,
+            label=f"{_tol_label(tol)}  $K_{{max}}$",
+        )
     ax.axhline(1, color="grey", ls=":", lw=1, label="K = 1 (ideal)")
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
@@ -241,10 +264,8 @@ def plot(data: dict, out_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Randomized-IC tolerance × N benchmark")
-    parser.add_argument("--ns", type=int, nargs="+",
-                        default=[1, 2, 4, 8, 16, 32, 64, 128, 256])
-    parser.add_argument("--tols", type=float, nargs="+",
-                        default=[1e-2, 1e-3, 1e-4])
+    parser.add_argument("--ns", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64, 128, 256])
+    parser.add_argument("--tols", type=float, nargs="+", default=[1e-2, 1e-3, 1e-4])
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--trials", type=int, default=1)

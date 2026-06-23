@@ -80,9 +80,7 @@ _ASSET_CATALOG: dict[str, tuple[Path, Path, float | None, float, str]] = {
     ),
 }
 
-OBJECT_MIX: tuple[tuple[str, int], ...] = (
-    ("fork", 1),
-)
+OBJECT_MIX: tuple[tuple[str, int], ...] = (("fork", 1),)
 OBJECTS_PER_WORLD = sum(count for _, count in OBJECT_MIX)
 
 # --- Drainer footprint + drop volume [m] ------------------------------------
@@ -330,7 +328,7 @@ def build_template(
     rack_margin: float = 0.005,
 ) -> newton.ModelBuilder:
     template = newton.ModelBuilder()
-    newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(template)
+    newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
     # Contact stiffness / damping.  ke/kd map to MuJoCo solref via
     # convert_solref() in newton/_src/solvers/mujoco/kernels.py:
@@ -349,8 +347,8 @@ def build_template(
     # pair must have SDFs configured.  Voxel sizes chosen per feature scale:
     # wire diameter is ~3 mm so the rack needs ~1 mm voxels; bulk objects
     # (mugs, bowls) use 3 mm to keep memory sane.
-    _RACK_VOXEL = 0.001   # 1 mm -- resolves wire cage
-    _OBJ_VOXEL = 0.003    # 3 mm -- bulk objects
+    _RACK_VOXEL = 0.001  # 1 mm -- resolves wire cage
+    _OBJ_VOXEL = 0.003  # 3 mm -- bulk objects
 
     _KH = 1e8  # hydroelastic modulus [Pa]
 
@@ -471,8 +469,8 @@ def make_solver(
     model: newton.Model,
     tol: float = TOL,
     dt_mode: str = "per_world",
-) -> newton.solvers.SolverMuJoCoCENIC:
-    return newton.solvers.SolverMuJoCoCENIC(
+) -> newton.solvers.SolverMuJoCoAdaptive:
+    return newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
         dt_inner_init=DT_OUTER,
@@ -489,7 +487,7 @@ def make_solver(
 
 
 # Inner step for the fixed-step baseline.  2 ms stays below solref
-# timeconst = 2/kd = 5 ms (kd=400), matching CENIC's dt_inner_max.
+# timeconst = 2/kd = 5 ms (kd=400), matching the adaptive solver's dt_inner_max.
 FIXED_DT_INNER = 0.01
 
 
@@ -497,7 +495,7 @@ def make_solver_fixed(model: newton.Model) -> newton.solvers.SolverMuJoCo:
     """Known-good fixed-step MuJoCo Warp solver.
 
     Same MuJoCo settings as :func:`make_solver` so only the adaptive-step
-    wrapper differs -- use this as an oracle when debugging CENIC behavior.
+    wrapper differs -- use this as an oracle when debugging adaptive behavior.
     Caller is responsible for substepping ``step(..., dt=FIXED_DT_INNER)``
     inside each ``DT_OUTER`` control period and calling
     ``pipeline.collide(state, contacts)`` before each ``step()``.
@@ -518,7 +516,9 @@ def make_solver_fixed(model: newton.Model) -> newton.solvers.SolverMuJoCo:
 def make_pipeline(model: newton.Model, solver: newton.solvers.SolverMuJoCo) -> tuple:
     """Create a CollisionPipeline and contact buffer sized to match the solver."""
     pipeline = newton.CollisionPipeline(
-        model, broad_phase="sap", rigid_contact_max=solver.mjw_data.naconmax,
+        model,
+        broad_phase="sap",
+        rigid_contact_max=solver.mjw_data.naconmax,
     )
     contacts = pipeline.contacts()
     return pipeline, contacts

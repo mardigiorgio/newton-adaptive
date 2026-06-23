@@ -24,23 +24,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import warp as wp
 
 from scripts.bench.infra import MeasureResult, measure, power_law_exponent
-from scripts.bench.plotting import SeriesData, log_log_plot, save_fig
+from scripts.bench.plotting import save_fig
 from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_fixed_solver, make_solver
 
-MODES = ["cenic_per_world", "cenic_global", "fixed"]
+MODES = ["adaptive_per_world", "adaptive_global", "fixed"]
 
 _STYLES = {
-    "cenic_per_world": {"color": "#1f77b4", "marker": "o", "ls": "-", "label": "CENIC per-world dt"},
-    "cenic_global": {"color": "#ff7f0e", "marker": "s", "ls": "-", "label": "CENIC global dt"},
+    "adaptive_per_world": {"color": "#1f77b4", "marker": "o", "ls": "-", "label": "adaptive per-world dt"},
+    "adaptive_global": {"color": "#ff7f0e", "marker": "s", "ls": "-", "label": "adaptive global dt"},
     "fixed": {"color": "#2ca02c", "marker": "D", "ls": "--", "label": "Fixed-step (dt=10 ms)"},
 }
 
 
 def _measure_mode(mode: str, n: int, steps: int, warmup: int) -> MeasureResult:
-    if mode == "cenic_per_world":
+    if mode == "adaptive_per_world":
         solver_cache = {}
 
         def step_fn(model, s0, s1, ctrl):
@@ -54,7 +53,7 @@ def _measure_mode(mode: str, n: int, steps: int, warmup: int) -> MeasureResult:
 
         return measure(build_model_randomized, step_fn, n, steps, warmup, get_k=get_k)
 
-    elif mode == "cenic_global":
+    elif mode == "adaptive_global":
         solver_cache = {}
 
         def step_fn(model, s0, s1, ctrl):
@@ -89,8 +88,13 @@ def run(ns: list[int], steps: int, warmup: int) -> dict:
 
     for mode in MODES:
         mode_data: dict = {
-            "medians": [], "p25": [], "p75": [],
-            "k_means": [], "k_maxes": [], "k_p25s": [], "k_p75s": [],
+            "medians": [],
+            "p25": [],
+            "p75": [],
+            "k_means": [],
+            "k_maxes": [],
+            "k_p25s": [],
+            "k_p75s": [],
             "per_iter_medians": [],
         }
         for n in ns:
@@ -135,22 +139,21 @@ def plot(data: dict, out_dir: Path) -> None:
         md = modes_data[mode]
         s = _style(mode)
         exp = data["exponents"].get(mode, float("nan"))
-        label = f'{s["label"]}  $N^{{{exp:.2f}}}$'
+        label = f"{s['label']}  $N^{{{exp:.2f}}}$"
         meds = [m * 1e3 for m in md["medians"]]
-        ax.plot(ns, meds, color=s["color"], marker=s["marker"], ls=s["ls"],
-                lw=2, ms=5, label=label)
+        ax.plot(ns, meds, color=s["color"], marker=s["marker"], ls=s["ls"], lw=2, ms=5, label=label)
         if md["p25"] and md["p75"]:
             ax.fill_between(
                 ns,
                 [m * 1e3 for m in md["p25"]],
                 [m * 1e3 for m in md["p75"]],
-                color=s["color"], alpha=0.10,
+                color=s["color"],
+                alpha=0.10,
             )
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Wall time per outer step [ms]", fontsize=11)
     ax.set_title(
-        f"Wall time vs N: per-world dt vs global dt vs fixed-step"
-        f"  (DT_outer={DT_OUTER * 1e3:.0f} ms)",
+        f"Wall time vs N: per-world dt vs global dt vs fixed-step  (DT_outer={DT_OUTER * 1e3:.0f} ms)",
         fontsize=11,
     )
     ax.set_xscale("log", base=2)
@@ -161,18 +164,34 @@ def plot(data: dict, out_dir: Path) -> None:
 
     # --- Plot 2: Iteration count K vs N (per_world vs global) ---
     fig, ax = plt.subplots(figsize=(10, 6))
-    for mode in ["cenic_per_world", "cenic_global"]:
+    for mode in ["adaptive_per_world", "adaptive_global"]:
         if mode not in modes_data:
             continue
         md = modes_data[mode]
         s = _style(mode)
-        ax.plot(ns, md["k_means"], color=s["color"], marker=s["marker"],
-                ls="-", lw=2, ms=5, label=f'{s["label"]}  $K_{{mean}}$')
+        ax.plot(
+            ns,
+            md["k_means"],
+            color=s["color"],
+            marker=s["marker"],
+            ls="-",
+            lw=2,
+            ms=5,
+            label=f"{s['label']}  $K_{{mean}}$",
+        )
         if md.get("k_p25s") and md.get("k_p75s"):
-            ax.fill_between(ns, md["k_p25s"], md["k_p75s"],
-                            color=s["color"], alpha=0.10)
-        ax.plot(ns, md["k_maxes"], color=s["color"], marker=s["marker"],
-                ls=":", lw=1, ms=3, alpha=0.5, label=f'{s["label"]}  $K_{{max}}$')
+            ax.fill_between(ns, md["k_p25s"], md["k_p75s"], color=s["color"], alpha=0.10)
+        ax.plot(
+            ns,
+            md["k_maxes"],
+            color=s["color"],
+            marker=s["marker"],
+            ls=":",
+            lw=1,
+            ms=3,
+            alpha=0.5,
+            label=f"{s['label']}  $K_{{max}}$",
+        )
     ax.axhline(1, color="grey", ls=":", lw=1, label="K = 1 (ideal)")
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Iterations per step_dt call", fontsize=11)
@@ -191,8 +210,7 @@ def plot(data: dict, out_dir: Path) -> None:
         md = modes_data[mode]
         s = _style(mode)
         amort = [m / n_val * 1e3 for m, n_val in zip(md["medians"], ns)]
-        ax.plot(ns, amort, color=s["color"], marker=s["marker"], ls=s["ls"],
-                lw=2, ms=5, label=s["label"])
+        ax.plot(ns, amort, color=s["color"], marker=s["marker"], ls=s["ls"], lw=2, ms=5, label=s["label"])
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Wall time per world per outer step [ms]", fontsize=11)
     ax.set_title("GPU amortization: cost per world vs N", fontsize=11)
@@ -207,27 +225,25 @@ def plot(data: dict, out_dir: Path) -> None:
 
     # Left: adaptive (per_world) vs fixed
     ax = axes[0]
-    if "cenic_per_world" in modes_data and "fixed" in modes_data:
-        pw = modes_data["cenic_per_world"]["medians"]
+    if "adaptive_per_world" in modes_data and "fixed" in modes_data:
+        pw = modes_data["adaptive_per_world"]["medians"]
         fx = modes_data["fixed"]["medians"]
         ratio = [f / p for p, f in zip(pw, fx)]
-        ax.plot(ns, ratio, color=_STYLES["cenic_per_world"]["color"],
-                marker="o", ls="-", lw=2, ms=5)
+        ax.plot(ns, ratio, color=_STYLES["adaptive_per_world"]["color"], marker="o", ls="-", lw=2, ms=5)
         ax.axhline(1, color="grey", ls=":", lw=1)
         ax.set_xlabel("N worlds", fontsize=11)
-        ax.set_ylabel("Speedup (fixed / CENIC per-world)", fontsize=11)
-        ax.set_title("Fixed-step vs CENIC per-world dt", fontsize=11)
+        ax.set_ylabel("Speedup (fixed / adaptive per-world)", fontsize=11)
+        ax.set_title("Fixed-step vs adaptive per-world dt", fontsize=11)
         ax.set_xscale("log", base=2)
         ax.grid(True, which="both", alpha=0.3)
 
     # Right: per-world vs global
     ax = axes[1]
-    if "cenic_per_world" in modes_data and "cenic_global" in modes_data:
-        pw = modes_data["cenic_per_world"]["medians"]
-        gl = modes_data["cenic_global"]["medians"]
+    if "adaptive_per_world" in modes_data and "adaptive_global" in modes_data:
+        pw = modes_data["adaptive_per_world"]["medians"]
+        gl = modes_data["adaptive_global"]["medians"]
         ratio = [g / p for p, g in zip(pw, gl)]
-        ax.plot(ns, ratio, color=_STYLES["cenic_per_world"]["color"],
-                marker="o", ls="-", lw=2, ms=5)
+        ax.plot(ns, ratio, color=_STYLES["adaptive_per_world"]["color"], marker="o", ls="-", lw=2, ms=5)
         ax.axhline(1, color="grey", ls=":", lw=1)
         ax.set_xlabel("N worlds", fontsize=11)
         ax.set_ylabel("Speedup (global / per-world)", fontsize=11)

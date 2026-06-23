@@ -55,8 +55,8 @@ def _run_in_subprocess(code: str) -> str:
     return lines[-1]
 
 
-def _measure_cenic(n: int, tol: float, dt_mode: str, sim_duration: float, trials: int) -> float:
-    """Measure CENIC wall time (ms/sim-s), median of `trials` fresh processes."""
+def _measure_adaptive(n: int, tol: float, dt_mode: str, sim_duration: float, trials: int) -> float:
+    """Measure adaptive wall time (ms/sim-s), median of `trials` fresh processes."""
     code = textwrap.dedent(f"""\
         import time, warp as wp
         from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_solver
@@ -134,14 +134,13 @@ def run(
 
     # Wall time vs tol, one curve per dt_mode.
     print(
-        f"\n[1/2] Wall time vs tol  N={n_worlds}  sim={sim_duration}s"
-        f"  trials={trials}  modes={list(modes)}",
+        f"\n[1/2] Wall time vs tol  N={n_worlds}  sim={sim_duration}s  trials={trials}  modes={list(modes)}",
         flush=True,
     )
     wall_vs_tol: dict[str, list[float]] = {m: [] for m in modes}
     for mode in modes:
         for tol in tols:
-            ms = _measure_cenic(n_worlds, tol, mode, sim_duration, trials)
+            ms = _measure_adaptive(n_worlds, tol, mode, sim_duration, trials)
             print(f"  [{mode:>9}] tol={tol:.0e}  {ms:.1f} ms/sim-s", flush=True)
             wall_vs_tol[mode].append(ms)
     data["wall_vs_tol"] = wall_vs_tol
@@ -192,8 +191,7 @@ def plot(data: dict, out_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(ts, errs, color="tab:blue", linewidth=1.2)
-    ax.axhline(trace_tol, color="tab:blue", linestyle="--", linewidth=0.8,
-               label=f"tolerance = {trace_tol:.0e}")
+    ax.axhline(trace_tol, color="tab:blue", linestyle="--", linewidth=0.8, label=f"tolerance = {trace_tol:.0e}")
     ax.set_xlabel("Simulation time [s]")
     ax.set_ylabel("Inf-norm q error (world 0)")
     ax.set_title(f"Integration error over time  (N=1, tol={trace_tol:.0e})")
@@ -206,7 +204,10 @@ def plot(data: dict, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(ts, dts_trace * 1e3, color="tab:orange", linewidth=1.2)
     ax.axhline(
-        dt_inner_min * 1e3, color="grey", linestyle=":", linewidth=1.0,
+        dt_inner_min * 1e3,
+        color="grey",
+        linestyle=":",
+        linewidth=1.0,
         label=f"dt_inner_min = {dt_inner_min * 1e3:.2f} ms",
     )
     ax.set_xlabel("Simulation time [s]")
@@ -221,10 +222,16 @@ def main():
     parser = argparse.ArgumentParser(description="Accuracy benchmark")
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--sim-duration", type=float, default=2.0)
-    parser.add_argument("--n-worlds", type=int, default=16,
-                        help="World count for the wall-time sweep; mode comparison requires N>1.")
-    parser.add_argument("--modes", nargs="+", default=list(DT_MODES), choices=list(DT_MODES),
-                        help="dt modes to sweep on the work-precision plot.")
+    parser.add_argument(
+        "--n-worlds", type=int, default=16, help="World count for the wall-time sweep; mode comparison requires N>1."
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        default=list(DT_MODES),
+        choices=list(DT_MODES),
+        help="dt modes to sweep on the work-precision plot.",
+    )
     parser.add_argument("--out-dir", type=str, default="scripts/bench/results")
     args = parser.parse_args()
 

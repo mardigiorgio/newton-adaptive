@@ -13,8 +13,6 @@ All reward/termination/event/command/timing values are inherited from ``LiftEnvC
 
 from __future__ import annotations
 
-import os
-
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -25,11 +23,12 @@ from isaaclab.sim.schemas import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-
 from isaaclab_tasks.manager_based.manipulation.lift import mdp
 from isaaclab_tasks.manager_based.manipulation.lift.lift_env_cfg import LiftEnvCfg
 
 from trossen_cube.assets import STATIONARY_AI_CFG
+
+from ...paths import STATIONARY_AI_NORAILS_USD as NORAILS_USD
 
 # Active (controlled) arm = LEFT; the right arm holds its default pose.
 ARM_JOINTS = "follower_left_joint_[0-5]"
@@ -52,14 +51,10 @@ EE_LINK = "follower_left_link_6"
 # link_6 -> finger_mid is ~0.087 along link_6's local x.
 EE_TCP_OFFSET = (0.087, 0.0, 0.0)
 BASE_LINK = "follower_left_base_link"
-# Rails removed. The rig's ``frame_link`` (perimeter rail border + camera gantry) is one collision
-# body that a lift policy exploits as a crutch -- it learns to jam the cube against the rail instead
-# of grasping cleanly. ``stationary_ai_norails.usda`` is a thin override (make_norails_usd.py) that
-# deactivates frame_link's collision and hides its visual; the arms and tabletop are untouched.
-NORAILS_USD = os.environ.get(
-    "STATIONARY_AI_NORAILS_USD",
-    "/isaac/trossen_ai_isaac/assets/robots/stationary_ai/stationary_ai_norails.usda",
-)
+# ``NORAILS_USD`` (imported above) is a thin override (make_norails_usd.py): the rig's ``frame_link``
+# (perimeter rail border + camera gantry) is one collision body a lift policy exploits as a crutch --
+# it learns to jam the cube against the rail instead of grasping cleanly. The override deactivates
+# frame_link's collision and hides its visual; the arms and tabletop are untouched.
 
 
 @configclass

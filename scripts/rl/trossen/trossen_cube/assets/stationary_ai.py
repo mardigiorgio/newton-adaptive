@@ -18,18 +18,11 @@ This module imports ``isaaclab.*`` at load time, so it can only be imported AFTE
 
 from __future__ import annotations
 
-import os
-
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
-# Execution happens inside the `isaaclab` container where the trossen repo is mounted
-# at /isaac. Override with $STATIONARY_AI_USD if the asset path differs.
-STATIONARY_AI_USD = os.environ.get(
-    "STATIONARY_AI_USD",
-    "/isaac/trossen_ai_isaac/assets/robots/stationary_ai/stationary_ai.usd",
-)
+from ..paths import STATIONARY_AI_USD  # rig USD path; override via $STATIONARY_AI_USD (see trossen_cube/paths.py)
 
 STATIONARY_AI_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -68,15 +61,11 @@ STATIONARY_AI_CFG = ArticulationCfg(
         # that faithfully reproduces the policy's ~18 Hz command micro-oscillation as visible hold
         # jitter (diagnosed in diag_jitter.py). The soft 80/4 PD (~1.5-4.5 Hz bandwidth) cannot follow
         # that chatter, so it smooths it -- which is why the reference arms hold steadily.
-        "left_arm": ImplicitActuatorCfg(
-            joint_names_expr=["follower_left_joint_[0-5]"], stiffness=80.0, damping=4.0
-        ),
+        "left_arm": ImplicitActuatorCfg(joint_names_expr=["follower_left_joint_[0-5]"], stiffness=80.0, damping=4.0),
         "left_gripper": ImplicitActuatorCfg(
             joint_names_expr=["follower_left_left_carriage_joint"], stiffness=None, damping=None
         ),
-        "right_arm": ImplicitActuatorCfg(
-            joint_names_expr=["follower_right_joint_[0-5]"], stiffness=None, damping=None
-        ),
+        "right_arm": ImplicitActuatorCfg(joint_names_expr=["follower_right_joint_[0-5]"], stiffness=None, damping=None),
         "right_gripper": ImplicitActuatorCfg(
             joint_names_expr=["follower_right_left_carriage_joint"], stiffness=None, damping=None
         ),

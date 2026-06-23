@@ -16,7 +16,11 @@ import os
 
 from pxr import Usd, UsdGeom
 
-ASSET_DIR = os.path.expanduser("~/isaac-rl/trossen_ai_isaac/assets/robots/stationary_ai")
+# Asset root mirrors trossen_cube/paths.py, replicated inline: this host-side generator runs under a
+# ``usd-core``-only interpreter without gymnasium, so it must NOT import the trossen_cube package.
+_DATA_ROOT = os.path.expanduser(os.environ.get("TROSSEN_DATA_ROOT", "~/Documents/code/isaac-rl"))
+ASSET_ROOT = os.path.expanduser(os.environ.get("TROSSEN_ASSET_ROOT", os.path.join(_DATA_ROOT, "trossen_ai_isaac")))
+ASSET_DIR = os.path.join(ASSET_ROOT, "assets", "robots", "stationary_ai")
 ORIG = os.path.join(ASSET_DIR, "stationary_ai.usd")
 OUT = os.path.join(ASSET_DIR, "stationary_ai_norails.usda")
 
@@ -42,8 +46,10 @@ def main() -> None:
     stage.GetRootLayer().Save()
     print(f"wrote {OUT}")
     print("frame_link/collisions active:", stage.GetPrimAtPath("/stationary_ai/frame_link/collisions").IsActive())
-    print("frame_link/visuals visible:",
-          UsdGeom.Imageable(stage.GetPrimAtPath("/stationary_ai/frame_link/visuals")).ComputeVisibility())
+    print(
+        "frame_link/visuals visible:",
+        UsdGeom.Imageable(stage.GetPrimAtPath("/stationary_ai/frame_link/visuals")).ComputeVisibility(),
+    )
 
 
 if __name__ == "__main__":

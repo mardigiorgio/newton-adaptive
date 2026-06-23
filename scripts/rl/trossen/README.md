@@ -3,21 +3,27 @@
 Privileged-state PPO teacher → depth-camera CNN student (distillation) that makes one
 arm of the Trossen Stationary AI bimanual rig pick a cube off the table.
 
-- Design: `docs/superpowers/specs/2026-06-16-trossen-cube-pickup-teacher-student-design.md`
-- Plan: `docs/superpowers/plans/2026-06-16-trossen-cube-pickup-teacher-student.md`
+The design and plan for this workstream are summarized in `ROADMAP.md`.
+
+See `../README.md` for the top-level Thread A / Thread B signpost.
 
 ## Environment
 
-Isaac Sim does not run natively on this Fedora host; everything runs in the Ubuntu-22.04
-podman container `isaaclab` (see `docker/Containerfile` and the `reference_isaaclab_container`
-memory). The repo is mounted at `/repo` inside the container; the package venv is `/opt/venv`.
+Runs natively on Ubuntu against a binary Isaac Sim install (under `~/Documents/code/`,
+beside this repo and the IsaacLab clone) — no container. Scripts go through the
+`run_native.sh` launcher, which calls `${ISAACLAB:-~/Documents/code/IsaacLab}/isaaclab.sh -p`.
+Filesystem roots (data, assets, logs, artifacts) come from `trossen_cube/paths.py`
+(default data root `~/Documents/code/isaac-rl`, overridable per-root via env var).
 
 ```bash
-# install this package into the container venv (editable)
-podman exec isaaclab bash -lc "/opt/venv/bin/pip install -e /repo/scripts/rl/trossen"
+# install this package into Isaac's bundled python (editable)
+~/Documents/code/IsaacLab/isaaclab.sh -p -m pip install -e scripts/rl/trossen
 
-# run any task script in the container
-scripts/rl/trossen/docker/run.sh trossen_cube/... --headless        # python in /repo
+# run any task script natively
+scripts/rl/trossen/run_native.sh scripts/rl/trossen/train_teacher.py --headless
 ```
+
+One-time bring-up: symlink the binary Isaac Sim as `IsaacLab/_isaac_sim`, then run
+`isaaclab.sh --install`. The deprecated container path is documented in `legacy/CONTAINER.md`.
 
 Always launch `AppLauncher` before importing `isaaclab.*` / `trossen_cube`.

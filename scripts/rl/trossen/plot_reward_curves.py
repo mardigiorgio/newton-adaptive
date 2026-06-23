@@ -5,7 +5,7 @@ plots each term against the iteration index. This is a time series (x = iteratio
 the repo plotting convention it uses a linear x-axis.
 
     uv run --with matplotlib scripts/rl/trossen/plot_reward_curves.py \
-        ~/isaac-rl/full_train.log -o ~/isaac-rl/reward_curves.png
+        ~/Documents/code/isaac-rl/full_train.log -o ~/Documents/code/isaac-rl/artifacts/reward_curves.png
 """
 
 from __future__ import annotations
