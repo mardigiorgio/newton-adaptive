@@ -52,7 +52,7 @@ Full phase tracker (A0–A8, B0–B5) + the two-seam architecture: [`trossen/ROA
 scripts/rl/trossen/run_native.sh scripts/rl/trossen/train_teacher.py --headless --num_envs 2048
 ```
 Bring-up + path config: [`trossen/README.md`](trossen/README.md). Roots centralized in
-`trossen/trossen_cube/paths.py` (default `~/Documents/code/isaac-rl`, `TROSSEN_*` overrides).
+`trossen/trossen_cube/paths.py` (default `~/Documents/code/isaac-data`, `TROSSEN_*` overrides).
 
 **Thread B / B0 (standalone Newton evidence)** — no Isaac:
 ```bash

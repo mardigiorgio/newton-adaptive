@@ -1,0 +1,172 @@
+diff --git a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
+index f475695f0d..392654263b 100644
+--- a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
++++ b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
+@@ -9,10 +9,11 @@ from __future__ import annotations
+ 
+ import inspect
+ import logging
++import os
+ 
+ import numpy as np
+ from newton import Contacts, Model
+-from newton.solvers import SolverMuJoCo
++from newton.solvers import SolverMuJoCo, SolverMuJoCoAdaptive
+ 
+ from isaaclab.physics import PhysicsManager
+ 
+@@ -31,20 +32,52 @@ class NewtonMJWarpManager(NewtonManager):
+     :attr:`NewtonCfg.debug_mode` is enabled.
+     """
+ 
++    _adaptive: bool = False
++    """Set by :meth:`_build_solver`: True when the active solver is :class:`SolverMuJoCoAdaptive`."""
++
++    _adaptive_frame: int = 0
++    """Frame counter for throttled adaptive dt/substep telemetry."""
++
+     @classmethod
+     def _build_solver(cls, model: Model, solver_cfg: MJWarpSolverCfg) -> None:
+-        """Construct :class:`SolverMuJoCo` and populate the base-class slots.
++        """Construct the solver (:class:`SolverMuJoCo` or, when ``solver_cfg.adaptive``,
++        :class:`SolverMuJoCoAdaptive`) and populate the base-class slots.
+ 
+-        Filters cfg fields against the solver's ``__init__`` signature so
+-        non-constructor metadata (``solver_type``, ``class_type``) and the
+-        ignored deprecated ``ls_parallel`` field are not forwarded. Sets
+-        :attr:`NewtonManager._needs_collision_pipeline` to
+-        ``True`` only when ``use_mujoco_contacts=False``.
++        Filters cfg fields against the solver's ``__init__`` signature so non-constructor metadata
++        (``solver_type``, ``class_type``, the adaptive control fields) and the deprecated ``ls_parallel``
++        field are not forwarded. Sets :attr:`NewtonManager._needs_collision_pipeline` to ``True`` only
++        when ``use_mujoco_contacts=False``.
+         """
+-        ignored = {"class_type", "solver_type", "ls_parallel"}
+-        valid = set(inspect.signature(SolverMuJoCo.__init__).parameters) - {"self", "model"} - ignored
+-        kwargs = {k: v for k, v in solver_cfg.to_dict().items() if k in valid}
+-        NewtonManager._solver = SolverMuJoCo(model, **kwargs)
++        # Adaptive is opt-in via the cfg field; NEWTON_ADAPTIVE=1 is a shell-level override for quick toggling.
++        adaptive = bool(getattr(solver_cfg, "adaptive", False)) or os.environ.get("NEWTON_ADAPTIVE") == "1"
++        ignored = {
++            "class_type", "solver_type", "ls_parallel",
++            "adaptive", "adaptive_tol", "adaptive_dt_mode", "adaptive_dt_init", "adaptive_dt_min",
++        }
++        if adaptive:
++            # SolverMuJoCoAdaptive forces use_mujoco_contacts/use_mujoco_cpu/separate_worlds itself
++            # (its own contact pipeline + step-doubling), so those must not be forwarded.
++            forced = {"use_mujoco_contacts", "use_mujoco_cpu", "separate_worlds"}
++            valid = set(inspect.signature(SolverMuJoCo.__init__).parameters) - {"self", "model"} - ignored - forced
++            kwargs = {k: v for k, v in solver_cfg.to_dict().items() if k in valid}
++            # cfg fields are the source of truth; NEWTON_ADAPTIVE_* env vars override for quick tuning.
++            _env = os.environ.get
++            NewtonManager._solver = SolverMuJoCoAdaptive(
++                model,
++                tol=float(_env("NEWTON_ADAPTIVE_TOL", getattr(solver_cfg, "adaptive_tol", 1e-3))),
++                dt_mode=str(_env("NEWTON_ADAPTIVE_DTMODE", getattr(solver_cfg, "adaptive_dt_mode", "per_world"))),
++                dt_inner_init=float(_env("NEWTON_ADAPTIVE_DT_INIT", getattr(solver_cfg, "adaptive_dt_init", 0.01))),
++                dt_inner_min=float(_env("NEWTON_ADAPTIVE_DT_MIN", getattr(solver_cfg, "adaptive_dt_min", 1e-6))),
++                **kwargs,
++            )
++            cls._adaptive = True
++            cls._adaptive_frame = 0
++            logger.info("NewtonMJWarpManager: SolverMuJoCoAdaptive (adaptive step-doubling; CUDA graph disabled)")
++        else:
++            valid = set(inspect.signature(SolverMuJoCo.__init__).parameters) - {"self", "model"} - ignored
++            kwargs = {k: v for k, v in solver_cfg.to_dict().items() if k in valid}
++            NewtonManager._solver = SolverMuJoCo(model, **kwargs)
++            cls._adaptive = False
+         NewtonManager._use_single_state = True
+         NewtonManager._needs_collision_pipeline = not solver_cfg.use_mujoco_contacts
+ 
+@@ -57,6 +90,48 @@ class NewtonMJWarpManager(NewtonManager):
+                 "use_mujoco_contacts=False or remove collision_cfg."
+             )
+ 
++    @classmethod
++    def _step_solver(cls, state_0, state_1, control, contacts, substep_dt) -> None:
++        """Run one solver substep.
++
++        Adaptive: drive :class:`SolverMuJoCoAdaptive` via ``step_dt`` (it owns its inner error-controlled
++        dt loop and its own contact pipeline, and updates ``state_0`` in place). Otherwise the stock
++        single ``solver.step`` (5-positional).
++        """
++        if cls._adaptive:
++            cls._solver.step_dt(substep_dt, state_0, state_1, control)
++        else:
++            cls._solver.step(state_0, state_1, control, contacts, substep_dt)
++
++    @classmethod
++    def _supports_cuda_graph_capture(cls) -> bool:
++        # The adaptive solver's per-frame substep count is data-dependent (host-synced boundary check),
++        # so a statically captured CUDA graph cannot represent it.
++        return not cls._adaptive
++
++    @classmethod
++    def _log_adaptive_telemetry(cls) -> None:
++        """File-based dt/substep telemetry (Kit swallows stdout), throttled to every Nth frame.
++
++        Writes per-world inner-dt spread + cumulative substeps so adaptivity is observable: ``spread > 0``
++        (per-world mode) or a changing cumulative substep count means the controller is subdividing.
++        """
++        cls._adaptive_frame += 1
++        every = int(os.environ.get("NEWTON_ADAPTIVE_LOG_EVERY", "30"))
++        if every <= 0 or cls._adaptive_frame % every != 0:
++            return
++        try:
++            dt = cls._solver.dt.numpy()
++            subs = int(cls._solver.cumulative_substeps())
++            path = os.environ.get("NEWTON_ADAPTIVE_LOG", "/tmp/newton_adaptive.log")
++            with open(path, "a") as f:
++                f.write(
++                    f"frame={cls._adaptive_frame} inner_dt[min={dt.min():.3e} max={dt.max():.3e} "
++                    f"spread={float(dt.max() - dt.min()):.3e}] cumulative_substeps={subs}\n"
++                )
++        except Exception as exc:  # telemetry must never break the sim
++            logger.debug(f"adaptive telemetry skipped: {exc}")
++
+     @classmethod
+     def _initialize_contacts(cls) -> None:
+         """Allocate contact buffers.
+@@ -81,7 +156,9 @@ class NewtonMJWarpManager(NewtonManager):
+ 
+     @classmethod
+     def _log_solver_debug(cls) -> None:
+-        """Optionally log MuJoCo solver convergence at the end of step."""
++        """Adaptive dt/substep telemetry (to a file) + optional MuJoCo convergence logging."""
++        if cls._adaptive:
++            cls._log_adaptive_telemetry()
+         cfg = PhysicsManager._cfg
+         if cfg is not None and cfg.debug_mode:  # type: ignore[union-attr]
+             data = cls._get_solver_convergence_steps()
+diff --git a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager_cfg.py b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager_cfg.py
+index 191ca90850..467095458a 100644
+--- a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager_cfg.py
++++ b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager_cfg.py
+@@ -120,6 +120,27 @@ class MJWarpSolverCfg(NewtonSolverCfg):
+     Newton default is ``1e-6``.
+     """
+ 
++    adaptive: bool = False
++    """Use the error-controlled adaptive solver :class:`~newton.solvers.SolverMuJoCoAdaptive` (step-doubling)
++    instead of the fixed-step :class:`~newton.solvers.SolverMuJoCo`.
++
++    When ``True``, the manager drives the solver via ``step_dt`` once per substep (the solver owns its inner
++    dt loop and its own contact pipeline) and CUDA-graph capture is disabled (the per-frame substep count is
++    data-dependent). The remaining MuJoCo-Warp fields above are forwarded to the underlying solver.
++    """
++
++    adaptive_tol: float = 1e-3
++    """Adaptive only: inf-norm ``joint_q`` error tolerance per world [m or rad]."""
++
++    adaptive_dt_mode: str = "per_world"
++    """Adaptive only: ``"per_world"`` (each env adapts its own dt) or ``"global"`` (shared worst-case dt)."""
++
++    adaptive_dt_init: float = 0.01
++    """Adaptive only: initial inner timestep [s]. Set below ``sim.dt`` to give the controller room to subdivide."""
++
++    adaptive_dt_min: float = 1e-6
++    """Adaptive only: minimum inner timestep [s] (must be < ``adaptive_dt_init``)."""
++
+     def __post_init__(self):
+         if self.ls_parallel:
+             warnings.warn(

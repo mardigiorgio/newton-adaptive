@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single source of truth for the Trossen testbed's filesystem roots.
 
-Native layout: everything lives under ``~/Documents/code/isaac-rl`` (beside the
+Native layout: everything lives under ``~/Documents/code/isaac-data`` (beside the
 ``newton-cenic`` repo and the Isaac Sim install), overridable per-root by env var.
 Defaults resolve with zero env exports.
 
@@ -13,7 +13,7 @@ ids), so host-only tools that lack ``gymnasium`` (e.g. :mod:`make_norails_usd`, 
 this module. See the native bring-up in ``README.md``.
 
 Env overrides:
-    TROSSEN_DATA_ROOT       parent of all three roots (default ``~/Documents/code/isaac-rl``)
+    TROSSEN_DATA_ROOT       parent of all three roots (default ``~/Documents/code/isaac-data``)
     TROSSEN_ASSET_ROOT      the ``trossen_ai_isaac`` clone (USD assets)
     TROSSEN_LOG_ROOT        training log/checkpoint root
     TROSSEN_ARTIFACT_ROOT   renders/plots/diagnostic dumps
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 
-_DATA_ROOT = os.path.expanduser(os.environ.get("TROSSEN_DATA_ROOT", "~/Documents/code/isaac-rl"))
+_DATA_ROOT = os.path.expanduser(os.environ.get("TROSSEN_DATA_ROOT", "~/Documents/code/isaac-data"))
 
 ASSET_ROOT = os.path.expanduser(os.environ.get("TROSSEN_ASSET_ROOT", os.path.join(_DATA_ROOT, "trossen_ai_isaac")))
 LOG_ROOT = os.path.expanduser(os.environ.get("TROSSEN_LOG_ROOT", os.path.join(_DATA_ROOT, "logs", "trossen")))

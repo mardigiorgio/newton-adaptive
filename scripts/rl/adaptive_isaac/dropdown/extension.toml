@@ -1,0 +1,33 @@
+# Kit extension manifest for the "Newton -- Adaptive" physics dropdown row.
+#
+# Load as a Kit ext by pointing Kit at the parent of this package, e.g.:
+#   --ext-folder ~/Documents/code/newton-adaptive/scripts/rl/adaptive_isaac
+#   --enable     adaptive_isaac.dropdown
+# (Kit derives the ext name from the package directory; adjust to your layout.)
+#
+# NOTE: the VERIFIED FACTS record that --ext-folder did NOT take precedence under
+# IsaacLab's launcher for the newton_stage overlay. The dropdown row does not need
+# to override a wheel file (it registers a NEW backend, not patch an existing one),
+# so the ext-folder path may work here even though it failed for the overlay.
+# If it does not, use the run hook (run_hook.install()) instead. See README.md.
+
+[package]
+version = "0.1.0"
+title = "Newton -- Adaptive physics dropdown"
+description = "Registers a 'Newton -- Adaptive' row in the Isaac Sim physics backend dropdown."
+category = "Physics"
+keywords = ["newton", "adaptive", "physics", "mujoco"]
+
+[dependencies]
+# Must start AFTER the stock Newton backend so its impl modules exist and the
+# overlay is in place; also after the variant-switcher and physics core.
+"isaacsim.physics.newton" = {}
+"omni.physics" = {}
+"omni.physics.isaacsimready" = {}
+
+[[python.module]]
+name = "adaptive_isaac.dropdown"
+
+[settings]
+# Default state of the per-stage adaptive-solver carb flag the overlay reads.
+exts."isaacsim.physics.newton".adaptive_solver = false

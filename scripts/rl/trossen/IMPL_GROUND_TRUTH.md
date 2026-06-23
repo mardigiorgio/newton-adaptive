@@ -1,6 +1,6 @@
 # Implementation ground truth (pinned from on-disk Isaac Lab + trossen + the USD)
 
-Source: Isaac Lab `isaaclab_*` packages bundled into Isaac Sim's python3.11 (IL; run via `isaaclab.sh`), `~/Documents/code/isaac-rl/trossen_ai_isaac` (TR), `rsl-rl-lib` 5.x in the same bundled python (RSL), `stationary_ai.usd` joint dump (USD). All filesystem paths resolve through `trossen_cube/paths.py` (default data root `~/Documents/code/isaac-rl`; env overrides `TROSSEN_*_ROOT`, `STATIONARY_AI_USD`, `STATIONARY_AI_NORAILS_USD`). Last updated 2026-06-21. Use these EXACT values; items marked UNVERIFIED need a check.
+Source: Isaac Lab `isaaclab_*` packages bundled into Isaac Sim's python3.11 (IL; run via `isaaclab.sh`), `~/Documents/code/isaac-data/trossen_ai_isaac` (TR), `rsl-rl-lib` 5.x in the same bundled python (RSL), `stationary_ai.usd` joint dump (USD). All filesystem paths resolve through `trossen_cube/paths.py` (default data root `~/Documents/code/isaac-data`; env overrides `TROSSEN_*_ROOT`, `STATIONARY_AI_USD`, `STATIONARY_AI_NORAILS_USD`). Last updated 2026-06-21. Use these EXACT values; items marked UNVERIFIED need a check.
 
 > `grasp_rewards.py` and `stillness_reward.py` are NOT on the working tree (recoverable from git history only). The only surviving grasp diagnostic is `archive/diag_grasp_geom.py`.
 

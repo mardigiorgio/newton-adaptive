@@ -13,7 +13,7 @@ Runs natively on Ubuntu against a binary Isaac Sim install (under `~/Documents/c
 beside this repo and the IsaacLab clone) — no container. Scripts go through the
 `run_native.sh` launcher, which calls `${ISAACLAB:-~/Documents/code/IsaacLab}/isaaclab.sh -p`.
 Filesystem roots (data, assets, logs, artifacts) come from `trossen_cube/paths.py`
-(default data root `~/Documents/code/isaac-rl`, overridable per-root via env var).
+(default data root `~/Documents/code/isaac-data`, overridable per-root via env var).
 
 ```bash
 # install this package into Isaac's bundled python (editable)

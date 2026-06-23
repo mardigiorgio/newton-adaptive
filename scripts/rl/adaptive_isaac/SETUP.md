@@ -38,8 +38,8 @@ fork, 2026-06-21. Copy-pasteable. Read the **Reframings** first — they correct
 
 ```bash
 # 0. Isolate Thread B. Fork worktree on a new branch (Thread A keeps newton-cenic untouched).
-git -C ~/Documents/code/newton-cenic worktree add \
-    ~/Documents/code/newton-cenic-adaptive-int -b mardigiorgio/adaptive-isaac-integration 183fa2e4
+git -C ~/Documents/code/newton-adaptive worktree add \
+    ~/Documents/code/newton-adaptive-adaptive-int -b mardigiorgio/adaptive-isaac-integration 183fa2e4
 
 # 1. Isaac Lab on develop. (~/Documents/code/IsaacLab is a fresh clone on main@2.3.2; nothing live uses
 #    main, so switch in place. If you want to KEEP a 2.3.2 reference, use a worktree instead — see Isolation.)
@@ -64,7 +64,7 @@ uv pip install -U torch==2.10.0 torchvision==0.25.0 --index-url https://download
 
 # 6. THE OVERRIDE — install the fork worktree editable into the SAME venv, AFTER step 5 (order is
 #    load-bearing: editable-after-install wins). Dist name "newton" matches the pin, so it swaps in place.
-uv pip install -e "$HOME/Documents/code/newton-cenic-adaptive-int[sim]"
+uv pip install -e "$HOME/Documents/code/newton-adaptive-adaptive-int[sim]"
 ```
 
 Verify the env:
@@ -78,7 +78,7 @@ python -c "import isaaclab, isaaclab_newton; print('isaaclab ok')"
 **Persist the override** (so a future `./isaaclab.sh -i` doesn't re-clobber it): in
 `~/Documents/code/IsaacLab/source/isaaclab_newton/pyproject.toml`, replace the
 `newton[sim] @ git+https://github.com/newton-physics/newton.git@811968b...` line with
-`newton[sim] @ file:///home/mdigiorgio/Documents/code/newton-cenic-adaptive-int`. Commit on the local
+`newton[sim] @ file:///home/mdigiorgio/Documents/code/newton-adaptive-adaptive-int`. Commit on the local
 `develop` branch only — **do not push**. (Or just re-run Step 6 after any reinstall.)
 
 ## Part 2 — Integration edit map (where the adaptive-solver work goes)
@@ -135,7 +135,7 @@ So the adaptive work is three coordinated edits:
 ## Isolation from Thread A
 
 - **Fork:** worktree (`newton-cenic-adaptive-int`, branch `adaptive-isaac-integration`) — Thread A's
-  `newton-cenic` checkout is never the live package. **Never** `uv pip install -e ~/Documents/code/newton-cenic`
+  `newton-cenic` checkout is never the live package. **Never** `uv pip install -e ~/Documents/code/newton-adaptive`
   (the Thread-A tree) into `env_isaaclab`.
 - **Isaac Lab:** Step 1 switches `~/Documents/code/IsaacLab` to `develop` **in place**. Confirmed nothing
   live depends on its `main`@2.3.2 (Thread A historically used the container's IsaacLab, not this clone). If
