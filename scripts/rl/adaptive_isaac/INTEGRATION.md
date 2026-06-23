@@ -24,11 +24,22 @@ Re-apply on a fresh IsaacLab clone: `git -C ~/Documents/code/IsaacLab apply scri
 (in the monorepo these edits live on the IsaacLab fork branch).
 
 ## Selecting adaptive
+`_build_solver` builds `SolverMuJoCoAdaptive` when **any** of these is set (checked in this order):
 - **Config-driven** (the platform path): `NewtonCfg(solver_cfg=MJWarpSolverCfg(adaptive=True, adaptive_dt_init=0.005, …))`.
   The Trossen `newton_adaptive` preset (`cube_lift_env_cfg.py`) does exactly this.
-- **Env toggle** (any task, no cfg edit): `NEWTON_ADAPTIVE=1` (read by `_build_solver`); tune with
-  `NEWTON_ADAPTIVE_DT_INIT`, `NEWTON_ADAPTIVE_DTMODE` (`per_world`|`global`), `NEWTON_ADAPTIVE_TOL`,
-  `NEWTON_ADAPTIVE_LOG_EVERY`.
+- **Env toggle** (any task, no cfg edit): `NEWTON_ADAPTIVE=1`; tune with `NEWTON_ADAPTIVE_DT_INIT`,
+  `NEWTON_ADAPTIVE_DTMODE` (`per_world`|`global`), `NEWTON_ADAPTIVE_TOL`, `NEWTON_ADAPTIVE_LOG_EVERY`.
+- **GUI toggle** (carb setting `/isaaclab/newton/adaptive`): a checkbox in the editor. Flip it, then
+  **Stop → Play** (the toggle applies at solver-build time — switching the integrator rebuilds the solver;
+  a live mid-sim swap is intentionally avoided). Confirm via `/tmp/newton_adaptive.log` (spread > 0 +
+  many substeps = on). Two ways to get the checkbox:
+  - **Autorun (default):** the Kit extension `IsaacLab/source/newton_adaptive_ui/` is listed in
+    `apps/isaaclab.python.kit` `[dependencies]` (`"newton_adaptive_ui" = {order = 1001}`), so a
+    **Newton Integrator** window appears automatically in every Isaac Lab **GUI** session. It is *not* in
+    the headless kits (`isaaclab.python.headless*.kit` define their own deps), so headless training never
+    loads the UI. The rendering GUI variant inherits it via its `"isaaclab.python"` dependency.
+  - **No-install fallback:** paste [`gui_toggle.py`](gui_toggle.py) into the Script Editor (Window >
+    Script Editor > Run) — same window, same carb setting, for a stock IsaacLab clone without the extension.
 
 ## Proof — Trossen cube-lift (16 envs, `train_teacher.py --max_iterations 2`)
 
@@ -51,9 +62,12 @@ tail /tmp/newton_adaptive.log   # spread>0 and substeps/frame >> 3 == adapting
 # Stock Newton (baseline) for comparison: NEWTON_MJWARP=1 instead.
 ```
 
-## Status of the GUI dropdown / wheel overlay (superseded for Isaac Lab)
+## GUI control: a checkbox, not the engine dropdown
+Adaptive is a **solver mode** of the Newton backend, not a separate physics engine, so the right GUI affordance
+is a **toggle** (`gui_toggle.py`, above), not a new entry in the `omni.physics` engine dropdown. The dropdown
+lists engines (PhysX / Newton); the checkbox flips the active Newton solver between fixed-step and adaptive.
+
 `overlay/` (the wheel `isaacsim.physics.newton` patch) and `dropdown/` were authored against the Isaac Sim
-**standalone** path and are **superseded for Isaac Lab** by the `isaaclab_newton` edits above (Isaac Lab never
-steps the wheel). They are kept for the standalone-Isaac-Sim GUI path. Remaining work for the "Newton — Adaptive"
-**GUI dropdown**: re-point its selection to set `MJWarpSolverCfg.adaptive=True` (the cfg flag that actually
-engages adaptive) and verify interactively in the editor — the headless/training path is complete and proven.
+**standalone** path and are **superseded for Isaac Lab** (Isaac Lab never steps the wheel — it builds the solver
+in `isaaclab_newton`, which is what the checkbox + the three selection paths above drive). Kept only for the
+standalone-Isaac-Sim GUI path.
