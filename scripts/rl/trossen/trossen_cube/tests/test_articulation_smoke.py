@@ -4,9 +4,8 @@ Validates the greenfield articulation loads and the carriage-mimic assumption ho
 (no error about driving a mimic / unactuated joints). Writes its result to a JSON
 file because Kit swallows stdout once the app launches.
 
-Run inside the container:
-    podman exec isaaclab bash -lc \
-      "cd /repo && /opt/venv/bin/python scripts/rl/trossen/trossen_cube/tests/test_articulation_smoke.py"
+Run natively:
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/trossen_cube/tests/test_articulation_smoke.py
 """
 
 import json
@@ -17,13 +16,14 @@ from isaaclab.app import AppLauncher
 
 app = AppLauncher(headless=True).app
 
-import torch  # noqa: E402
 import isaaclab.sim as sim_utils  # noqa: E402
+import torch  # noqa: E402
 from isaaclab.assets import Articulation  # noqa: E402
 
 from trossen_cube.assets import STATIONARY_AI_CFG  # noqa: E402
+from trossen_cube.paths import ARTIFACT_ROOT  # noqa: E402
 
-OUT = os.environ.get("SMOKE_OUT", "/isaac/articulation_smoke.json")
+OUT = os.environ.get("SMOKE_OUT") or os.path.join(ARTIFACT_ROOT, "articulation_smoke.json")
 
 res: dict = {}
 try:
@@ -40,7 +40,7 @@ try:
         robot.update(0.01)
     res["finite_after_steps"] = bool(torch.isfinite(robot.data.joint_pos).all())
     res["ok"] = res["num_joints"] == 16 and res["finite_after_steps"]
-except Exception as e:  # noqa: BLE001
+except Exception as e:
     res = {"ok": False, "err": repr(e), "tb": traceback.format_exc()[-1000:]}
 
 with open(OUT, "w") as f:

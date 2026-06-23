@@ -3,10 +3,9 @@
 Rolls out each saved checkpoint in the PLAY env (single env, single app session),
 overlays the iteration number, and writes ONE mp4 showing the policy improving.
 
-Run in the container (rendering needs --enable_cameras):
-    podman exec isaaclab bash -lc "cd /repo && /opt/venv/bin/python \
-      scripts/rl/trossen/render_timelapse.py --headless --enable_cameras \
-      --steps 120 --out /isaac/teacher_timelapse.mp4"
+Run natively (rendering needs --enable_cameras):
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/render_timelapse.py \
+      --headless --enable_cameras --steps 120
 """
 
 import argparse
@@ -19,19 +18,28 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=120, help="rollout steps per checkpoint")
 parser.add_argument("--every", type=int, default=1, help="use every Nth checkpoint")
-parser.add_argument("--ckpts", type=int, nargs="+", default=None,
-                    help="render only these exact checkpoint iters (e.g. --ckpts 1499 3498); overrides --every")
+parser.add_argument(
+    "--ckpts",
+    type=int,
+    nargs="+",
+    default=None,
+    help="render only these exact checkpoint iters (e.g. --ckpts 1499 3498); overrides --every",
+)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--fps", type=int, default=30)
 parser.add_argument("--width", type=int, default=640)
 parser.add_argument("--height", type=int, default=360)
-parser.add_argument("--out", default="/isaac/teacher_timelapse.mp4")
-parser.add_argument("--log_dir", default="/isaac/logs/trossen/stationary_ai_lift_teacher")
+parser.add_argument("--out", default=None, help="output mp4 (default: <ARTIFACT_ROOT>/teacher_timelapse.mp4)")
+parser.add_argument("--log_dir", default=None, help="checkpoint dir (default: <LOG_ROOT>/stationary_ai_lift_teacher)")
 parser.add_argument("--task", default="Isaac-Lift-Cube-StationaryAI-Teacher-Play-v0")
-parser.add_argument("--seed", type=int, default=None,
-                    help="fix the cube spawn + goal target so different checkpoints/runs are compared on "
-                         "the SAME target (fair still-hold A/B -- otherwise an easy low goal looks stiller "
-                         "for free). Re-seeded right before each checkpoint's reset.")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="fix the cube spawn + goal target so different checkpoints/runs are compared on "
+    "the SAME target (fair still-hold A/B -- otherwise an easy low goal looks stiller "
+    "for free). Re-seeded right before each checkpoint's reset.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -39,14 +47,17 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import cv2  # noqa: E402
+import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import gymnasium as gym  # noqa: E402
-from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+import trossen_cube  # noqa: F401,E402  (registers gym ids)
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg  # noqa: E402
+from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+from trossen_cube.paths import ARTIFACT_ROOT, LOG_ROOT  # noqa: E402
 
-import trossen_cube  # noqa: F401,E402  (registers gym ids)
+args.out = args.out or os.path.join(ARTIFACT_ROOT, "teacher_timelapse.mp4")
+args.log_dir = args.log_dir or os.path.join(LOG_ROOT, "stationary_ai_lift_teacher")
 
 
 def _iter_of(path: str) -> int:
@@ -71,9 +82,7 @@ def main():
     wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(wrapped, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
 
-    ckpts = sorted(
-        glob.glob(os.path.join(args.log_dir, "**", "model_*.pt"), recursive=True), key=_iter_of
-    )
+    ckpts = sorted(glob.glob(os.path.join(args.log_dir, "**", "model_*.pt"), recursive=True), key=_iter_of)
     if args.ckpts is not None:
         want = set(args.ckpts)
         ckpts = [c for c in ckpts if _iter_of(c) in want]
@@ -101,8 +110,9 @@ def main():
                 if frame is None:
                     continue
                 bgr = cv2.cvtColor(np.asarray(frame, dtype=np.uint8), cv2.COLOR_RGB2BGR)
-                cv2.putText(bgr, f"teacher  iter {it}", (24, 44), cv2.FONT_HERSHEY_SIMPLEX,
-                            1.1, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    bgr, f"teacher  iter {it}", (24, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 2, cv2.LINE_AA
+                )
                 if writer is None:
                     h, w = bgr.shape[:2]
                     writer = cv2.VideoWriter(args.out, cv2.VideoWriter_fourcc(*"mp4v"), args.fps, (w, h))

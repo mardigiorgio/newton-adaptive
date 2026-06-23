@@ -29,7 +29,7 @@ Z_BOXES = 1.25
 def build_template() -> newton.ModelBuilder:
     """Single-world template: 9 spheres + 9 tilted boxes."""
     template = newton.ModelBuilder()
-    newton.solvers.SolverMuJoCoCENIC.register_custom_attributes(template)
+    newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(template)
 
     cfg_obj = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=200, mu=0.3, margin=0.005)
 
@@ -135,7 +135,6 @@ def build_model_perturbed(n_worlds: int, epsilon: float = 1e-4) -> newton.Model:
 
 def _random_unit_quaternion(rng) -> tuple[float, float, float, float]:
     """Sample a uniform random rotation quaternion (Shoemake's method)."""
-    import numpy as np
 
     u1, u2, u3 = rng.random(), rng.random(), rng.random()
     s1 = math.sqrt(1.0 - u1)
@@ -202,8 +201,8 @@ def make_solver(
     model: newton.Model,
     tol: float = TOL,
     dt_mode: str = "per_world",
-) -> newton.solvers.SolverMuJoCoCENIC:
-    """CENIC solver with canonical contact-demo parameters.
+) -> newton.solvers.SolverMuJoCoAdaptive:
+    """Adaptive solver with canonical contact-demo parameters.
 
     Args:
         model: The model to simulate.
@@ -212,7 +211,7 @@ def make_solver(
             every world to share a single dt driven by the worst-case error,
             used as a baseline for measuring the value of per-world adaptivity.
     """
-    return newton.solvers.SolverMuJoCoCENIC(
+    return newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
         dt_inner_init=DT_OUTER,
@@ -227,5 +226,8 @@ def make_solver(
 def make_fixed_solver(model: newton.Model) -> newton.solvers.SolverMuJoCo:
     """Fixed-step SolverMuJoCo with matching contact parameters."""
     return newton.solvers.SolverMuJoCo(
-        model, separate_worlds=True, nconmax=128, njmax=640,
+        model,
+        separate_worlds=True,
+        nconmax=128,
+        njmax=640,
     )

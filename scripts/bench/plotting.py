@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
-import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -33,7 +32,7 @@ class PlotStyle:
 
 # Consistent style registry for stepping modes.
 STYLES: dict[str, PlotStyle] = {
-    "cenic": PlotStyle("#1f77b4", "o", "-", "CENIC adaptive"),
+    "adaptive": PlotStyle("#1f77b4", "o", "-", "adaptive"),
     "fixed": PlotStyle("#ff7f0e", "D", "-", "Fixed-step (dt=10 ms)"),
     "single_iter": PlotStyle("#d62728", "s", "--", "Single iteration"),
     "identical": PlotStyle("#2ca02c", "^", "-", "Identical ICs"),
@@ -66,11 +65,16 @@ def log_log_plot(
             continue
         exp = power_law_exponent(ns, sd.medians)
         exponents[mode] = exp
-        label = f'{style.label}  $N^{{{exp:.2f}}}$' if show_exponents else style.label
+        label = f"{style.label}  $N^{{{exp:.2f}}}$" if show_exponents else style.label
         ax.plot(
-            ns, sd.medians,
-            color=style.color, marker=style.marker, ls=style.linestyle,
-            lw=2, ms=5, label=label,
+            ns,
+            sd.medians,
+            color=style.color,
+            marker=style.marker,
+            ls=style.linestyle,
+            lw=2,
+            ms=5,
+            label=label,
         )
         if show_iqr and sd.p25 is not None and sd.p75 is not None:
             ax.fill_between(ns, sd.p25, sd.p75, color=style.color, alpha=0.10)

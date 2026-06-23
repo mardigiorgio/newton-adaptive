@@ -58,7 +58,7 @@ SLIDES = [
     (
         "Open-loop: the implementation behaves as expected",
         "<p>Open-loop work-precision on a single stiff impact (no policy, contact already engaged so "
-        "collision cadence is not a factor). Left: CENIC reaches ~1.3&nbsp;mm accuracy in ~228 solver "
+        "collision cadence is not a factor). Left: the adaptive solver reaches ~1.3&nbsp;mm accuracy in ~228 solver "
         "steps where fixed-step needs ~800 &mdash; <b>~3.5x less compute at equal accuracy</b>. Right: the "
         "inner dt collapses at the impact and relaxes back. The port reproduces the expected behavior.</p>",
         "v1_single_drop.png",
@@ -84,7 +84,7 @@ SLIDES = [
         "<li>Implementation validated on the open-loop unit test; <code>S</code> aligned to &sect;V-E.</li>"
         "</ul>",
         None,
-        "Honest close. The headline is the methodological correction, not a 'CENIC works' claim.",
+        "Honest close. The headline is the methodological correction, not an 'adaptive solver works' claim.",
     ),
 ]
 
@@ -110,7 +110,9 @@ def build() -> str:
     .missing{color:#b00;padding:40px;text-align:center}
     @media print{body{background:#fff}.slide{box-shadow:none;page-break-after:always;margin:0;border-radius:0;min-height:96vh}}
     """
-    parts = [f"<!doctype html><html><head><meta charset='utf-8'><title>CENIC in Newton</title><style>{css}</style></head><body>"]
+    parts = [
+        f"<!doctype html><html><head><meta charset='utf-8'><title>CENIC in Newton</title><style>{css}</style></head><body>"
+    ]
     n = len(SLIDES)
     for i, (title, body, fig, notes) in enumerate(SLIDES, 1):
         cls = "slide title" if i == 1 else "slide"

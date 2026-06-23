@@ -10,10 +10,8 @@ camera views to PNG so you can eyeball -- in seconds -- the geometry that reward
   - at the default pose the left arm can plausibly reach the cube
 
 No trained checkpoint needed -- this inspects the env itself. Rendering needs --enable_cameras.
-Run in the container:
-    podman exec isaaclab bash -lc "cd /repo && /opt/venv/bin/python \
-      scripts/rl/trossen/inspect_scene.py --headless --enable_cameras --out_dir /isaac/scene_check"
-Then view the PNGs off-device (or re-encode any mp4s with libx264 in the container).
+Run natively:
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/inspect_scene.py --headless --enable_cameras
 """
 
 import argparse
@@ -26,7 +24,7 @@ parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--settle", type=int, default=30, help="zero-action steps to let the cube settle")
 parser.add_argument("--width", type=int, default=1280)
 parser.add_argument("--height", type=int, default=720)
-parser.add_argument("--out_dir", default="/isaac/scene_check")
+parser.add_argument("--out_dir", default=None, help="PNG output dir (default: <ARTIFACT_ROOT>/scene_check)")
 parser.add_argument("--task", default="Isaac-Lift-Cube-StationaryAI-Teacher-Play-v0")
 parser.add_argument("--no_marker", action="store_true", help="hide the ee_frame debug marker")
 AppLauncher.add_app_launcher_args(parser)
@@ -36,12 +34,14 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import cv2  # noqa: E402
+import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import gymnasium as gym  # noqa: E402
-from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
-
 import trossen_cube  # noqa: F401,E402  (registers gym ids)
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+from trossen_cube.paths import ARTIFACT_ROOT  # noqa: E402
+
+args.out_dir = args.out_dir or os.path.join(ARTIFACT_ROOT, "scene_check")
 
 # Fixed viewpoints framing the LEFT arm (base ~y=0.46) + cube (~[0, 0.25, 0.05]) + tabletop.
 # (eye, lookat) in robot-root/world meters; labels become the PNG filenames.

@@ -15,12 +15,12 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.infra import MeasureResult
-from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_solver
-from newton._src.solvers.mujoco.solver_mujoco_cenic import (
+from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
     _apply_dt_cap,
     _boundary_advance,
 )
+from scripts.bench.infra import MeasureResult
+from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_solver
 
 
 def measure_single_iter(n: int, steps: int, warmup: int) -> MeasureResult:
@@ -41,9 +41,9 @@ def measure_single_iter(n: int, steps: int, warmup: int) -> MeasureResult:
     effective_dt_max = min(solver._dt_max, DT_OUTER)
 
     wp.launch(
-        _apply_dt_cap, dim=nw,
-        inputs=[solver._ideal_dt, solver._dt_min, effective_dt_max,
-                solver._dt, solver._dt_half],
+        _apply_dt_cap,
+        dim=nw,
+        inputs=[solver._ideal_dt, solver._dt_min, effective_dt_max, solver._dt, solver._dt_half],
         device=dev,
     )
     wp.copy(solver._state_cur.joint_q, s0.joint_q)
@@ -55,8 +55,10 @@ def measure_single_iter(n: int, steps: int, warmup: int) -> MeasureResult:
     solver._apply_mjc_control(model, s0, ctrl, solver.mjw_data)
     solver._enable_rne_postconstraint(solver._state_cur)
     wp.launch(
-        _boundary_advance, dim=nw,
-        inputs=[solver._next_time, DT_OUTER], device=dev,
+        _boundary_advance,
+        dim=nw,
+        inputs=[solver._next_time, DT_OUTER],
+        device=dev,
     )
     solver._iteration_count_buf.fill_(0)
     solver._boundary_flag.fill_(1)

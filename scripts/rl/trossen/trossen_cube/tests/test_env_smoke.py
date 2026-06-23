@@ -1,8 +1,7 @@
 """Build the teacher env, reset, step, assert the policy + privileged obs groups.
 
-Writes its result to JSON (Kit swallows stdout). Run inside the container:
-    podman exec isaaclab bash -lc \
-      "cd /repo && /opt/venv/bin/python scripts/rl/trossen/trossen_cube/tests/test_env_smoke.py"
+Writes its result to JSON (Kit swallows stdout). Run natively:
+    scripts/rl/trossen/run_native.sh scripts/rl/trossen/trossen_cube/tests/test_env_smoke.py
 """
 
 import argparse
@@ -17,13 +16,14 @@ AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 app = AppLauncher(args).app
 
-import torch  # noqa: E402
 import gymnasium as gym  # noqa: E402
+import torch  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 
 import trossen_cube  # noqa: F401,E402  (registers gym ids)
+from trossen_cube.paths import ARTIFACT_ROOT  # noqa: E402
 
-OUT = os.environ.get("ENV_SMOKE_OUT", "/isaac/env_smoke.json")
+OUT = os.environ.get("ENV_SMOKE_OUT") or os.path.join(ARTIFACT_ROOT, "env_smoke.json")
 TASK = "Isaac-Lift-Cube-StationaryAI-Teacher-v0"
 
 res: dict = {}
@@ -45,7 +45,7 @@ try:
     res["rew_finite"] = rew_finite
     res["ok"] = "policy" in groups and "privileged" in groups and rew_finite
     env.close()
-except Exception as e:  # noqa: BLE001
+except Exception as e:
     res = {"ok": False, "err": repr(e), "tb": traceback.format_exc()[-1500:]}
 
 with open(OUT, "w") as f:

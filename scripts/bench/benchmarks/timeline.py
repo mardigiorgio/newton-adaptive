@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib
-import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -38,19 +37,21 @@ from scripts.scenes.contact_objects import (
 @dataclass
 class SubstepRecord:
     """One inner iteration's snapshot for one world."""
+
     world: int
     iteration: int  # iteration index within this outer step
-    dt: float       # timestep used for this attempt
-    sim_time: float # sim_time after this iteration
+    dt: float  # timestep used for this attempt
+    sim_time: float  # sim_time after this iteration
     accepted: bool  # whether the step was accepted
 
 
 @dataclass
 class OuterStepRecord:
     """All inner iterations for one outer step."""
+
     outer_step: int
     t_start: float  # sim_time at start of this outer step
-    t_end: float    # t_start + DT_OUTER
+    t_end: float  # t_start + DT_OUTER
     substeps: list[SubstepRecord] = field(default_factory=list)
 
 
@@ -92,7 +93,7 @@ def _collect_timeline(
         effective_dt_max = min(solver._dt_max, DT_OUTER)
 
         # --- Begin step_dt preamble ---
-        from newton._src.solvers.mujoco.solver_mujoco_cenic import (
+        from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
             _apply_dt_cap,
             _boundary_advance,
         )
@@ -100,8 +101,7 @@ def _collect_timeline(
         wp.launch(
             _apply_dt_cap,
             dim=n,
-            inputs=[solver._ideal_dt, solver._dt_min, effective_dt_max,
-                    solver._dt, solver._dt_half],
+            inputs=[solver._ideal_dt, solver._dt_min, effective_dt_max, solver._dt, solver._dt_half],
             device=device,
         )
 
@@ -115,8 +115,7 @@ def _collect_timeline(
         solver._apply_mjc_control(solver.model, s0, ctrl, solver.mjw_data)
         solver._enable_rne_postconstraint(solver._state_cur)
 
-        wp.launch(_boundary_advance, dim=n,
-                  inputs=[solver._next_time, DT_OUTER], device=device)
+        wp.launch(_boundary_advance, dim=n, inputs=[solver._next_time, DT_OUTER], device=device)
 
         solver._iteration_count_buf.fill_(0)
         solver._boundary_flag.fill_(1)
@@ -140,13 +139,15 @@ def _collect_timeline(
             boundary_done = solver._boundary_flag.numpy()[0] == 0
 
             for w in range(n_worlds):
-                rec.substeps.append(SubstepRecord(
-                    world=w,
-                    iteration=iteration,
-                    dt=float(dt_np[w]),
-                    sim_time=float(sim_time_np[w]),
-                    accepted=bool(accepted_np[w]),
-                ))
+                rec.substeps.append(
+                    SubstepRecord(
+                        world=w,
+                        iteration=iteration,
+                        dt=float(dt_np[w]),
+                        sim_time=float(sim_time_np[w]),
+                        accepted=bool(accepted_np[w]),
+                    )
+                )
 
             iteration += 1
             if boundary_done:
@@ -238,8 +239,11 @@ def plot(data: dict, out_dir: Path) -> None:
             for s in by_world[w_idx]:
                 # Small tick at each accepted substep boundary.
                 ax.plot(
-                    [s["sim_time"], s["sim_time"]], [y - 0.3, y + 0.3],
-                    color="black", linewidth=0.8, zorder=4,
+                    [s["sim_time"], s["sim_time"]],
+                    [y - 0.3, y + 0.3],
+                    color="black",
+                    linewidth=0.8,
+                    zorder=4,
                 )
 
     ax.set_yticks(y_positions)
@@ -260,9 +264,9 @@ def main():
     parser.add_argument("--n-worlds", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--outer-steps", type=int, default=5)
-    parser.add_argument("--ic-mode", type=str, default="randomized",
-                        choices=list(IC_BUILDERS.keys()),
-                        help="Initial condition mode")
+    parser.add_argument(
+        "--ic-mode", type=str, default="randomized", choices=list(IC_BUILDERS.keys()), help="Initial condition mode"
+    )
     parser.add_argument("--out-dir", type=str, default="scripts/bench/results")
     args = parser.parse_args()
 
