@@ -15,7 +15,7 @@ no longer required.
 - `docker/run.sh` — `podman exec`-based launcher (the predecessor of `run_native.sh`). It mounted
   the repo at `/repo` and `~/isaac-rl` at `/isaac`, with the venv at `/opt/venv`. Those paths are
   the reason older docstrings referenced `/isaac` and `/repo`; they are gone in the native layout
-  (paths now come from `trossen_cube/paths.py`, default root `~/Documents/code/isaac-rl`).
+  (paths now come from `trossen_cube/paths.py`, default root `~/Documents/code/isaac-data`).
 
 ## If you ever need the container again
 Rebuild from `docker/Containerfile`, then inside it: `pip install -e /repo/scripts/rl/trossen`.

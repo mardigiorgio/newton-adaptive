@@ -13,6 +13,8 @@ All reward/termination/event/command/timing values are inherited from ``LiftEnvC
 
 from __future__ import annotations
 
+import os
+
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -23,8 +25,18 @@ from isaaclab.sim.schemas import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab_tasks.manager_based.manipulation.lift import mdp
-from isaaclab_tasks.manager_based.manipulation.lift.lift_env_cfg import LiftEnvCfg
+
+# Physics backends. PhysX stays the default; Newton (MJWarp / adaptive) is selectable.
+# These are configclasses, lazy-exported from their physics subpackages.
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
+from isaaclab_physx.physics import PhysxCfg
+
+# core.lift is the home of LiftEnvCfg + lift mdp in isaaclab_tasks 8.x. The legacy
+# isaaclab_tasks.manager_based.manipulation.lift path was removed and would ImportError
+# at module load on this checkout (before any backend choice is even reached).
+from isaaclab_tasks.core.lift import mdp
+from isaaclab_tasks.core.lift.lift_env_cfg import LiftEnvCfg
+from isaaclab_tasks.utils import PresetCfg
 
 from trossen_cube.assets import STATIONARY_AI_CFG
 
@@ -86,6 +98,78 @@ class ObservationsCfg:
     privileged: PrivilegedCfg = PrivilegedCfg()
 
 
+# The bimanual rig (2 arms + grippers + frame + tabletop, self-collisions on) is contact-dense.
+# Cartpole's njmax=5/nconmax=3 are far too small here; start large and let the LEAD tune up if the
+# cube tunnels the tabletop. njmax = max constraints/world, nconmax = max contact points/world.
+_NEWTON_NJMAX = 400
+_NEWTON_NCONMAX = 200
+
+
+@configclass
+class TrossenCubeLiftPhysicsCfg(PresetCfg):
+    """Selectable physics backends for the Trossen cube-lift scene.
+
+    ``default`` (PhysX) is used by every non-typed launch path (e.g. ``parse_env_cfg`` in
+    ``train_teacher.py``, which collapses presets to ``.default``). The ``newton_*`` fields
+    are reachable via the typed ``physics=NAME`` selector on the hydra/dropdown path, and via
+    the env-var fallback wired in ``__post_init__`` for the ``parse_env_cfg`` path.
+    """
+
+    # PhysX (default). Carries the GPU contact-buffer caps that previously lived as the (now
+    # dead) self.sim.physx.gpu_* lines, plus the base LiftEnvCfg's bounce/friction tuning.
+    default: PhysxCfg = PhysxCfg(
+        bounce_threshold_velocity=0.01,
+        friction_correlation_distance=0.00625,
+        gpu_max_rigid_patch_count=2**20,
+        gpu_total_aggregate_pairs_capacity=2**23,
+        gpu_found_lost_aggregate_pairs_capacity=2**26,
+    )
+    # Explicit "physx" alias so physics=physx resolves identically to the default.
+    physx: PhysxCfg = PhysxCfg(
+        bounce_threshold_velocity=0.01,
+        friction_correlation_distance=0.00625,
+        gpu_max_rigid_patch_count=2**20,
+        gpu_total_aggregate_pairs_capacity=2**23,
+        gpu_found_lost_aggregate_pairs_capacity=2**26,
+    )
+    # Newton / MuJoCo-Warp (stock). class_type is auto-derived from solver_cfg.class_type --
+    # never set NewtonCfg.class_type manually (NewtonCfg.__post_init__ raises TypeError).
+    newton_mjwarp: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=_NEWTON_NJMAX,
+            nconmax=_NEWTON_NCONMAX,
+            cone="pyramidal",
+            impratio=1,
+            integrator="implicitfast",
+        ),
+        num_substeps=1,
+        debug_mode=False,
+        use_cuda_graph=True,
+    )
+    # Newton / adaptive. Same Newton backend (NewtonMJWarpManager); the ADAPTIVE SOLVER MODE is
+    # selected by ``MJWarpSolverCfg.adaptive=True`` -- _build_solver then constructs
+    # ``SolverMuJoCoAdaptive`` and drives it via ``step_dt`` once per substep. CUDA graph is OFF (the
+    # adaptive substep count is data-dependent and cannot be graph-captured). ``adaptive_dt_init`` is
+    # set below ``sim.dt`` so the error controller has room to subdivide on stiff grasp/impact contact.
+    newton_adaptive: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=_NEWTON_NJMAX,
+            nconmax=_NEWTON_NCONMAX,
+            cone="pyramidal",
+            impratio=1,
+            integrator="implicitfast",
+            adaptive=True,
+            adaptive_tol=1e-3,
+            adaptive_dt_mode="per_world",
+            adaptive_dt_init=0.005,
+            adaptive_dt_min=1e-6,
+        ),
+        num_substeps=1,
+        debug_mode=False,
+        use_cuda_graph=False,
+    )
+
+
 @configclass
 class StationaryAiCubeLiftEnvCfg(LiftEnvCfg):
     observations: ObservationsCfg = ObservationsCfg()
@@ -93,14 +177,25 @@ class StationaryAiCubeLiftEnvCfg(LiftEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # The bimanual rig (2 arms + grippers + frame + tabletop, self-collisions on) at high env
-        # counts overflows the default GPU contact buffers -> PhysX silently drops contacts -> the
-        # cube tunnels through the tabletop and ~all episodes end via object_dropping. Raise the
-        # GPU collision-buffer capacities so contacts survive at 1-2k envs. (Default patch count
-        # 5*2**15=163840 < the ~256k this scene needs.)
-        self.sim.physx.gpu_max_rigid_patch_count = 2**20
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**23
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**26
+        # Physics backend selection. The base LiftEnvCfg.__post_init__ (run by super() above)
+        # hard-pins self.sim.physics = PhysxCfg(...), so we MUST overwrite it here to make Newton
+        # reachable at all. We install a PresetCfg whose `default` is PhysX (carrying the GPU
+        # contact-buffer caps the bimanual rig needs -- the old self.sim.physx.gpu_* lines are dead
+        # on this SimulationCfg and would AttributeError). The typed `physics=NAME` selector (hydra
+        # / GUI dropdown path) resolves to the matching field; non-typed launches collapse to
+        # `.default` (PhysX), so PhysX stays the conservative default and the existing path is intact.
+        physics_preset = TrossenCubeLiftPhysicsCfg()
+        self.sim.physics = physics_preset
+
+        # Env-var fallback for the train_teacher.py / parse_env_cfg launch path, which always
+        # collapses presets to .default and never sees physics=NAME. Assign the chosen variant
+        # DIRECTLY (not the preset) so it survives resolve_presets(). NEWTON_ADAPTIVE selects the
+        # Newton backend AND signals the wheel overlay (NewtonStage._get_solver) to build the
+        # adaptive solver; NEWTON / NEWTON_MJWARP selects stock MuJoCo-Warp. PhysX otherwise.
+        if os.environ.get("NEWTON_ADAPTIVE") == "1":
+            self.sim.physics = physics_preset.newton_adaptive
+        elif os.environ.get("NEWTON") == "1" or os.environ.get("NEWTON_MJWARP") == "1":
+            self.sim.physics = physics_preset.newton_mjwarp
 
         # robot (no-rails override -- see NORAILS_USD)
         self.scene.robot = STATIONARY_AI_CFG.replace(

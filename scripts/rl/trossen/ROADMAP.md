@@ -173,7 +173,7 @@ against a binary Isaac Sim install.
   `${ISAACLAB:-~/Documents/code/IsaacLab}/isaaclab.sh -p`. One-time: symlink the binary Isaac Sim as
   `IsaacLab/_isaac_sim`, then `isaaclab.sh --install`; editable-install this package with
   `isaaclab.sh -p -m pip install -e scripts/rl/trossen`. Filesystem roots come from `trossen_cube/paths.py`
-  (default data root `~/Documents/code/isaac-rl`, per-root env overrides). The old podman container path is
+  (default data root `~/Documents/code/isaac-data`, per-root env overrides). The old podman container path is
   archived in `legacy/CONTAINER.md`.
 - ☑ **A1 — Greenfield Stationary AI articulation (16 DOF).** `trossen_cube/assets/stationary_ai.py`.
   Left+right arms `follower_{l,r}_joint_[0-5]`; each gripper actuates only its LEFT carriage (right

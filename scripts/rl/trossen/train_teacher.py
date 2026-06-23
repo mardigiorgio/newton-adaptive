@@ -11,6 +11,7 @@ register the gym id). Run natively via the launcher wrapper:
 import argparse
 import importlib.metadata as metadata
 import os
+import sys
 
 from isaaclab.app import AppLauncher
 
@@ -68,7 +69,7 @@ import trossen_cube  # noqa: F401,E402  (registers gym ids)
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
-from trossen_cube.paths import LOG_ROOT  # noqa: E402  (post-launch; default ~/Documents/code/isaac-rl/logs/trossen)
+from trossen_cube.paths import LOG_ROOT  # noqa: E402  (post-launch; default ~/Documents/code/isaac-data/logs/trossen)
 
 TASK = "Isaac-Lift-Cube-StationaryAI-Teacher-v0"
 
@@ -76,6 +77,26 @@ TASK = "Isaac-Lift-Cube-StationaryAI-Teacher-v0"
 def main():
     env_cfg = parse_env_cfg(TASK, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+
+    # Adaptive Newton solver-mode selection (config-driven, env-var bridge).
+    # The wheel Newton backend (the path that actually runs Trossen) ignores Isaac
+    # Lab's NewtonCfg, so the only bridge from a cfg choice to the wheel's
+    # _get_solver is a process env var. resolve() honours an explicit
+    # NEWTON_ADAPTIVE=1 (manual override) and otherwise reads an `adaptive` flag
+    # off env_cfg.sim.physics(.solver_cfg). Must run before the solver is built
+    # (i.e. before gym.make's first reset). adaptive_isaac lives one dir up
+    # (scripts/rl/) -- not auto-importable from this script's dir -- so add it.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from adaptive_isaac import selection  # noqa: PLC0415 (path insert must precede import)
+
+    if selection.resolve(env_cfg):
+        print(
+            f"[adaptive] Newton adaptive solver mode SELECTED "
+            f"(dt_mode={os.environ.get(selection.ENV_DT_MODE)}, "
+            f"tol={os.environ.get(selection.ENV_TOL)}). The Newton backend must "
+            f"also be active (env.sim.physics = NewtonCfg) for this to take effect.",
+            flush=True,
+        )
 
     # Still-hold (jitter) lever: strengthen a motion penalty (one var per run). Override the base
     # reward weight AND the curriculum terminal weight together so the penalty bites immediately --

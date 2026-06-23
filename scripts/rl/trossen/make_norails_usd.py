@@ -18,7 +18,7 @@ from pxr import Usd, UsdGeom
 
 # Asset root mirrors trossen_cube/paths.py, replicated inline: this host-side generator runs under a
 # ``usd-core``-only interpreter without gymnasium, so it must NOT import the trossen_cube package.
-_DATA_ROOT = os.path.expanduser(os.environ.get("TROSSEN_DATA_ROOT", "~/Documents/code/isaac-rl"))
+_DATA_ROOT = os.path.expanduser(os.environ.get("TROSSEN_DATA_ROOT", "~/Documents/code/isaac-data"))
 ASSET_ROOT = os.path.expanduser(os.environ.get("TROSSEN_ASSET_ROOT", os.path.join(_DATA_ROOT, "trossen_ai_isaac")))
 ASSET_DIR = os.path.join(ASSET_ROOT, "assets", "robots", "stationary_ai")
 ORIG = os.path.join(ASSET_DIR, "stationary_ai.usd")

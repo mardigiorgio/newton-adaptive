@@ -1,0 +1,189 @@
+--- /tmp/newton_stage.wheel.bak	2026-06-22 21:47:38.882996927 -0500
++++ scripts/rl/adaptive_isaac/overlay/newton_stage.py	2026-06-22 23:00:37.109768638 -0500
+@@ -17,6 +17,34 @@
+ 
+ from __future__ import annotations
+ 
++import os as _ovl_os  # [ADAPTIVE OVERLAY] env gating + file-based instrumentation
++
++# [ADAPTIVE OVERLAY] Kit swallows stdout, so all overlay markers go to a file the LEAD can tail.
++# Default /tmp/newton_adaptive.log; override with $NEWTON_ADAPTIVE_LOG. Every helper is wrapped in a
++# broad try/except so instrumentation can never take down the sim (it is diagnostics, not logic).
++_ADAPTIVE_LOG_PATH = _ovl_os.environ.get("NEWTON_ADAPTIVE_LOG", "/tmp/newton_adaptive.log")
++
++
++def _ovl_log(msg: str) -> None:
++    """Append a single timestamped line to the adaptive overlay log file. Never raises."""
++    try:
++        import time as _ovl_time
++
++        with open(_ADAPTIVE_LOG_PATH, "a") as _fh:
++            _fh.write(f"[{_ovl_time.time():.3f}] [ADAPTIVE OVERLAY] {msg}\n")
++    except Exception:
++        pass
++
++
++def _ovl_truthy(val) -> bool:
++    """Interpret a config value or env string as a boolean flag."""
++    if isinstance(val, str):
++        return val.strip().lower() in ("1", "true", "yes", "on")
++    return bool(val)
++
++
++_ovl_log(f"newton_stage.py loaded from OVERLAY (NEWTON_ADAPTIVE={_ovl_os.environ.get('NEWTON_ADAPTIVE')})")
++
+ import carb
+ import newton
+ import omni.timeline
+@@ -135,9 +163,64 @@
+         solver_type = solver_dict.pop("solver_type")
+         # Remove simulation-level parameters that are not solver parameters
+         solver_dict.pop("num_substeps", None)
++
++        # [ADAPTIVE OVERLAY] Config-driven adaptive selection. Pop the adaptive control fields out of
++        # solver_dict UNCONDITIONALLY (in both the adaptive and stock paths) so a patched
++        # MuJoCoSolverConfig carrying these fields never forwards them as unexpected kwargs to
++        # SolverMuJoCo/SolverMuJoCoAdaptive. pop(..., None) makes a stock (unpatched) solver_config.py
++        # work unchanged -- the keys are simply absent and we fall back to env vars / defaults.
++        _cfg_adaptive = solver_dict.pop("adaptive", None)
++        _cfg_tol = solver_dict.pop("adaptive_tol", None)
++        _cfg_dt_mode = solver_dict.pop("adaptive_dt_mode", None)
++        _cfg_dt_init = solver_dict.pop("adaptive_dt_init", None)
++        _cfg_dt_min = solver_dict.pop("adaptive_dt_min", None)
++
+         if solver_type == "xpbd":
+             return newton.solvers.SolverXPBD(model, **solver_dict)
+         elif solver_type == "mujoco":
++            # Adaptive is enabled when the config field requests it OR (fallback per locked design) the
++            # NEWTON_ADAPTIVE env var is set. The config field takes precedence when present.
++            _env_adaptive = _ovl_os.environ.get("NEWTON_ADAPTIVE") == "1"
++            _use_adaptive = _ovl_truthy(_cfg_adaptive) if _cfg_adaptive is not None else _env_adaptive
++            if _use_adaptive:
++                # [ADAPTIVE OVERLAY] error-controlled step-doubling solver; it owns its own contact
++                # pipeline + inner dt loop, so drop kwargs it sets itself to avoid duplicate keywords.
++                for _k in ("use_mujoco_contacts", "use_mujoco_cpu", "separate_worlds"):
++                    solver_dict.pop(_k, None)
++
++                # Resolve adaptive controls: config field first, then env var, then default. dt_mode
++                # defaults to 'per_world' so each env adapts its own dt -> per-env divergence is what
++                # the LEAD's "dt actually varies" check looks for.
++                _tol = float(_cfg_tol) if _cfg_tol is not None else float(
++                    _ovl_os.environ.get("NEWTON_ADAPTIVE_TOL", "1e-3")
++                )
++                _dt_mode = (
++                    str(_cfg_dt_mode)
++                    if _cfg_dt_mode is not None
++                    else _ovl_os.environ.get("NEWTON_ADAPTIVE_DTMODE", "per_world")
++                )
++                _dt_init = float(_cfg_dt_init) if _cfg_dt_init is not None else float(
++                    _ovl_os.environ.get("NEWTON_ADAPTIVE_DTINIT", "0.01")
++                )
++                _dt_min = float(_cfg_dt_min) if _cfg_dt_min is not None else float(
++                    _ovl_os.environ.get("NEWTON_ADAPTIVE_DTMIN", "1e-6")
++                )
++
++                _ovl_log(
++                    "_get_solver -> SolverMuJoCoAdaptive "
++                    f"(source={'config' if _cfg_adaptive is not None else 'env'}, "
++                    f"tol={_tol}, dt_mode={_dt_mode}, dt_inner_init={_dt_init}, dt_inner_min={_dt_min})"
++                )
++                solver = newton.solvers.SolverMuJoCoAdaptive(
++                    model,
++                    tol=_tol,
++                    dt_mode=_dt_mode,
++                    dt_inner_init=_dt_init,
++                    dt_inner_min=_dt_min,
++                    **solver_dict,
++                )
++                _ovl_log("SolverMuJoCoAdaptive constructed OK")
++                return solver
+             return newton.solvers.SolverMuJoCo(model, **solver_dict)
+         else:
+             raise ValueError(f"Invalid solver type: {solver_type}")
+@@ -459,6 +542,9 @@
+         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0, None)
+ 
+         self.solver = self._get_solver(self.model, self.cfg.solver_cfg)
++        if hasattr(self.solver, "step_dt"):
++            # [ADAPTIVE OVERLAY] data-dependent substep count is incompatible with a static CUDA graph.
++            self.cfg.use_cuda_graph = False
+ 
+         self.initial_body_q = self.state_0.body_q.numpy().copy()
+         self.initial_body_qd = self.state_0.body_qd.numpy().copy()
+@@ -511,6 +597,22 @@
+         if not hasattr(self, "solver") or self.solver is None:  # type: ignore[has-type]
+             return
+ 
++        if hasattr(self.solver, "step_dt"):
++            # [ADAPTIVE OVERLAY] the adaptive solver advances the full frame dt via its own
++            # error-controlled inner loop (and its own contact pipeline); one call replaces the
++            # fixed num_substeps loop. step_dt returns (state_0, state_1) and swaps internally.
++            self.state_0, self.state_1 = self.solver.step_dt(step_dt, self.state_0, self.state_1, self.control)
++            self.state_0.clear_forces()
++            self.q_ik = self.model.joint_q
++            self.qd_ik = self.model.joint_qd
++            # [ADAPTIVE OVERLAY] periodic telemetry so the LEAD can SEE dt vary. Gated to every ~30
++            # frames so the .numpy() host-syncs stay out of the hot path (this branch runs once per
++            # frame, not per substep). Each line records cumulative substeps and the per-world dt
++            # spread: if dt min != max across worlds (or changes frame-to-frame), the solver is
++            # genuinely adapting; a flat constant dt means it fell back to fixed stepping.
++            self._ovl_log_adaptive_telemetry(step_dt)
++            return
++
+         state_0_dict = None
+         state_1_dict = None
+         state_temp_dict = None
+@@ -551,3 +653,53 @@
+ 
+         self.q_ik = self.model.joint_q
+         self.qd_ik = self.model.joint_qd
++
++    def _ovl_log_adaptive_telemetry(self, step_dt: float) -> None:
++        """[ADAPTIVE OVERLAY] Append per-frame adaptive telemetry to $NEWTON_ADAPTIVE_LOG.
++
++        Fires every ``NEWTON_ADAPTIVE_LOG_EVERY`` frames (default 30) and is fully guarded so a bad
++        read can never break the sim. The host-syncing ``.numpy()`` reads are intentionally rare
++        (once per N frames, never per substep) to stay out of the physics hot path.
++
++        Args:
++            step_dt: The outer frame dt passed to ``step_dt`` this frame [s].
++        """
++        try:
++            every = int(_ovl_os.environ.get("NEWTON_ADAPTIVE_LOG_EVERY", "30"))
++        except Exception:
++            every = 30
++        if every <= 0:
++            return
++        frame = getattr(self, "simulation_step_count", 0)
++        if frame % every != 0:
++            return
++
++        try:
++            solver = self.solver
++            # Per-world current dt [s] -- the headline "is it adapting?" signal. Across worlds in
++            # per_world mode these diverge once accept/reject decisions differ; frame-to-frame they
++            # move as contact density changes. A flat min==max that never changes => not adapting.
++            dt_arr = solver.dt.numpy()
++            dt_min = float(dt_arr.min())
++            dt_max = float(dt_arr.max())
++
++            # cumulative_substeps() = iterations*3; the per-frame delta is how much MuJoCo work this
++            # frame's adaptive loop actually did. More substeps in a frame => the controller shrank dt.
++            cum = solver.cumulative_substeps()
++            prev = getattr(self, "_ovl_prev_cum_substeps", 0)
++            delta = cum - prev
++            self._ovl_prev_cum_substeps = cum
++
++            # Boundary-loop iterations for the most recent step_dt (one int32, on device).
++            try:
++                iters = int(solver.iteration_count.numpy()[0])
++            except Exception:
++                iters = -1
++
++            _ovl_log(
++                f"frame={frame} outer_dt={step_dt:.6f} "
++                f"inner_dt[min={dt_min:.3e} max={dt_max:.3e} spread={dt_max - dt_min:.3e}] "
++                f"iters_last={iters} substeps_frame={delta} substeps_cum={cum}"
++            )
++        except Exception as _e:  # diagnostics must never crash the sim
++            _ovl_log(f"telemetry read failed: {_e!r}")
