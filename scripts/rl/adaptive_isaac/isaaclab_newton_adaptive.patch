@@ -1,5 +1,18 @@
+diff --git a/apps/isaaclab.python.kit b/apps/isaaclab.python.kit
+index d9dbfd942a..bad7a4109b 100644
+--- a/apps/isaaclab.python.kit
++++ b/apps/isaaclab.python.kit
+@@ -108,6 +108,8 @@ keywords = ["experience", "app", "usd"]
+ "isaaclab_tasks" = {order = 1000}
+ "isaaclab_mimic" = {order = 1000}
+ "isaaclab_rl" = {order = 1000}
++# Auto-loading GUI toggle for the Newton adaptive integrator (source/newton_adaptive_ui).
++"newton_adaptive_ui" = {order = 1001}
+ 
+ [settings]
+ exts."omni.kit.material.library".ui_show_list = [
 diff --git a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
-index f475695f0d..392654263b 100644
+index f475695f0d..32994d41db 100644
 --- a/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
 +++ b/source/isaaclab_newton/isaaclab_newton/physics/mjwarp_manager.py
 @@ -9,10 +9,11 @@ from __future__ import annotations
@@ -15,7 +28,7 @@ index f475695f0d..392654263b 100644
  
  from isaaclab.physics import PhysicsManager
  
-@@ -31,20 +32,52 @@ class NewtonMJWarpManager(NewtonManager):
+@@ -31,20 +32,61 @@ class NewtonMJWarpManager(NewtonManager):
      :attr:`NewtonCfg.debug_mode` is enabled.
      """
  
@@ -47,6 +60,15 @@ index f475695f0d..392654263b 100644
 -        NewtonManager._solver = SolverMuJoCo(model, **kwargs)
 +        # Adaptive is opt-in via the cfg field; NEWTON_ADAPTIVE=1 is a shell-level override for quick toggling.
 +        adaptive = bool(getattr(solver_cfg, "adaptive", False)) or os.environ.get("NEWTON_ADAPTIVE") == "1"
++        # GUI toggle: the Adaptive-timestepping checkbox sets this carb setting; reading it at solver-build
++        # time means flipping it + Stop/Play (which rebuilds the solver) switches the integrator interactively.
++        if not adaptive:
++            try:
++                import carb
++
++                adaptive = bool(carb.settings.get_settings().get_as_bool("/isaaclab/newton/adaptive"))
++            except Exception:
++                pass
 +        ignored = {
 +            "class_type", "solver_type", "ls_parallel",
 +            "adaptive", "adaptive_tol", "adaptive_dt_mode", "adaptive_dt_init", "adaptive_dt_min",
@@ -78,7 +100,7 @@ index f475695f0d..392654263b 100644
          NewtonManager._use_single_state = True
          NewtonManager._needs_collision_pipeline = not solver_cfg.use_mujoco_contacts
  
-@@ -57,6 +90,48 @@ class NewtonMJWarpManager(NewtonManager):
+@@ -57,6 +99,48 @@ class NewtonMJWarpManager(NewtonManager):
                  "use_mujoco_contacts=False or remove collision_cfg."
              )
  
@@ -127,7 +149,7 @@ index f475695f0d..392654263b 100644
      @classmethod
      def _initialize_contacts(cls) -> None:
          """Allocate contact buffers.
-@@ -81,7 +156,9 @@ class NewtonMJWarpManager(NewtonManager):
+@@ -81,7 +165,9 @@ class NewtonMJWarpManager(NewtonManager):
  
      @classmethod
      def _log_solver_debug(cls) -> None:
