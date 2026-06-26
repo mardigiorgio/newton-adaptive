@@ -413,6 +413,8 @@ from ._src.solvers import (
     SolverKamino,
     SolverMuJoCo,
     SolverMuJoCoAdaptive,
+    SolverSAP,
+    SolverSAPAdaptive,
     SolverSemiImplicit,
     SolverStyle3D,
     SolverVBD,
@@ -423,6 +425,22 @@ from ._src.solvers import (
 # solver flags
 from ._src.solvers.flags import SolverNotifyFlags
 
+# SAP Newton<->Sap converters (re-exported so callers can do
+# ``from newton.solvers import sap_model_from_newton`` -- newton.solvers is a module,
+# not a package, so ``newton.solvers.sap`` is not an importable path).
+try:
+    from ._src.solvers.sap import (
+        sap_contacts_from_newton,
+        sap_control_from_newton,
+        sap_model_from_newton,
+        sap_state_from_newton,
+    )
+except Exception:  # noqa: BLE001  (sap_warp optional; guarded in _src.solvers too)
+    sap_contacts_from_newton = None
+    sap_control_from_newton = None
+    sap_model_from_newton = None
+    sap_state_from_newton = None
+
 __all__ = [
     "SolverBase",
     "SolverFeatherstone",
@@ -431,9 +449,15 @@ __all__ = [
     "SolverMuJoCo",
     "SolverMuJoCoAdaptive",
     "SolverNotifyFlags",
+    "SolverSAP",
+    "SolverSAPAdaptive",
     "SolverSemiImplicit",
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "sap_contacts_from_newton",
+    "sap_control_from_newton",
+    "sap_model_from_newton",
+    "sap_state_from_newton",
     "style3d",
 ]
