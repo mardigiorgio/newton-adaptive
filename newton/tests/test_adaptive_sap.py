@@ -63,7 +63,8 @@ def test_constructs():
     _, _, _, _, solver = _fresh(device, tol=1e-3)
     assert solver.diverged is not None
     assert solver.dt is not None
-    assert solver.tiling == "even"
+    assert solver.tiling == "adaptive"
+    assert solver.mode == "adaptive"
 
 
 def test_step_dt_reaches_boundary():
@@ -104,6 +105,53 @@ def test_tighter_tol_more_substeps():
     loose = run(1e-2)
     tight = run(1e-6)
     assert tight >= loose, f"tighter tol used fewer substeps: tight={tight} < loose={loose}"
+
+
+def test_invalid_mode_raises():
+    device = wp.get_device(DEV)
+    try:
+        _fresh(device, mode="bogus")
+    except ValueError:
+        return
+    raise AssertionError("mode='bogus' should raise ValueError")
+
+
+def test_fixed_mode_reaches_boundary_finite():
+    # fixed: constant dt, error control off; still marches to the boundary and stays finite.
+    device = wp.get_device(DEV)
+    _, s0, s1, control, solver = _fresh(device, mode="fixed", dt_inner_init=DT_OUTER / 4)
+    assert solver.mode == "fixed"
+    solver.step_dt(DT_OUTER, s0, s1, control)
+    st = solver.sim_time.numpy()
+    q = s0.joint_q.numpy()
+    assert np.all(np.isfinite(q)), "fixed mode produced non-finite joint_q"
+    assert np.allclose(st, DT_OUTER, rtol=1e-4, atol=1e-7), f"fixed sim_time={st} != {DT_OUTER}"
+
+
+def test_fixed_mode_work_constant_per_frame():
+    # fixed dt does NOT adapt: the per-frame work (accepted substeps) is identical frame to frame.
+    device = wp.get_device(DEV)
+    _, s0, s1, control, solver = _fresh(device, mode="fixed", dt_inner_init=DT_OUTER / 4)
+    solver.reset_compute_counter()
+    solver.step_dt(DT_OUTER, s0, s1, control)
+    w1 = int(solver.substeps.numpy().sum())
+    solver.step_dt(DT_OUTER, s0, s1, control)
+    w2 = int(solver.substeps.numpy().sum())
+    assert w1 > 0, "fixed mode did no work"
+    assert w2 == w1, f"fixed mode work changed across frames: {w1} then {w2}"
+
+
+def test_feedforward_mode_reaches_boundary_finite():
+    # feedforward: dt held within a frame, refined for the next; marches to boundary, stays finite.
+    device = wp.get_device(DEV)
+    _, s0, s1, control, solver = _fresh(device, mode="feedforward", dt_inner_init=DT_OUTER, tol=1e-4)
+    assert solver.mode == "feedforward"
+    for _ in range(3):
+        solver.step_dt(DT_OUTER, s0, s1, control)
+    st = solver.sim_time.numpy()
+    q = s0.joint_q.numpy()
+    assert np.all(np.isfinite(q)), "feedforward mode produced non-finite joint_q"
+    assert np.allclose(st, DT_OUTER, rtol=1e-4, atol=1e-7), f"feedforward sim_time={st} != {DT_OUTER}"
 
 
 if __name__ == "__main__":

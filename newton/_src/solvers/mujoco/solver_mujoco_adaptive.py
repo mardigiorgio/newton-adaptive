@@ -1,8 +1,9 @@
 """Adaptive (error-controlled step-doubling) MuJoCo solver.
 
 Per-world adaptive time-stepping via step doubling.  The boundary loop
-issues direct ``wp.launch()`` calls each iteration; no CUDA-graph capture.
-Step controller follows Drake's CalcAdjustedStepSize.
+captures the fixed iteration body on CUDA when possible and reads one
+4-byte boundary flag per ragged iteration. Step controller follows Drake's
+CalcAdjustedStepSize.
 
 Note: true CENIC = this adaptive controller + convex ICF contact; the ICF
 contact model is not yet built, so this is the adaptive (pseudo-CENIC) solver.
@@ -56,10 +57,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     """Adaptive-step MuJoCo solver for high-accuracy dataset generation.
 
     Uses step doubling (3 MuJoCo evals per attempt) to estimate per-world
-    integration error and adapt the timestep on the GPU.  The boundary loop
-    launches kernels directly via ``wp.launch()`` each iteration, checking
-    a 4-byte flag via ``.numpy()`` to detect when all worlds have reached
-    the target time.
+    integration error and adapt the timestep on the GPU.  The ragged boundary
+    loop replays one captured iteration body on CUDA when possible, checking a
+    4-byte flag via ``.numpy()`` to detect when all worlds have reached the
+    target time.
 
     Timesteps are managed internally by the error controller.  Set the
     initial value via ``dt_inner_init`` and query current values via
@@ -111,11 +112,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 landing) or ``"even"`` (Fix 4: choose the substep COUNT N from the carried
                 ideal_dt, then tile each control interval with a uniform inner dt = dt_outer/N
                 so substeps are uniform and the landing is clean; N still adapts across steps).
-            max_substeps: Hard upper bound on the even-tiling substep count N per control
-                interval (``"even"`` mode only). Bounds worst-case work when a world's ideal_dt
-                collapses to the dt_min floor (uncapped N = ceil(dt_outer/dt_min) ~ 1e4 would make
-                the per-world fixed loop launch ~1e4 kernels/frame and effectively hang). Default
-                256 is far above the N needed for normal motion (~1-60) so it only bounds runaway.
+            max_substeps: Hard upper bound on inner adaptive attempts per control interval. For
+                ``"ragged"``, the loop stops after this many iterations and exposes any lag through
+                ``sim_time``; for ``"even"``, it caps the chosen tiling count N. Bounds worst-case
+                work when a world's ideal_dt collapses to the dt_min floor.
             **kwargs: Forwarded to :class:`SolverMuJoCo`.
         """
         if dt_mode not in ("per_world", "global"):
@@ -207,19 +207,43 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         )
         self._contacts_start = self._pipeline.contacts()
 
-    def _run_substep(
+        # ---- solver-internal CUDA-graph capture ----
+        # Even tiling captures the fixed-N loop keyed by n_max. Ragged tiling captures one adaptive
+        # iteration body keyed by effective dt_max and still reads the 4-byte boundary flag between
+        # iterations. Gated by NEWTON_MJ_ADAPTIVE_GRAPH (default on) + CUDA device; capture is
+        # warmed on the first frame.
+        import os as _os
+
+        try:
+            _is_cuda = bool(wp.get_device(device).is_cuda)
+        except Exception:
+            _is_cuda = False
+        self._graph_enabled = (
+            _is_cuda
+            and _os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
+        )
+        self._graph_cache: dict = {}
+        self._graph_warmed = False
+        self._ragged_graph_cache: dict = {}
+        self._ragged_graph_warmed = False
+
+    def substep(
         self,
         state_in: State,
         state_out: State,
+        control: Control | None,
+        contacts: Contacts | None,
         dt_array: wp.array,
     ) -> None:
-        """Run one MuJoCo step: sync state_in, set timestep, step, write state_out.
+        """ONE inner MuJoCo physics step (= CENIC ``ComputeNextContinuousState``): sync state_in,
+        set timestep, step, write state_out. Already NON-conditional (no ``wp.capture_*``), so it
+        records as a flat launch stream and is safe inside :meth:`step`'s single-level capture.
 
-        Contacts must already be written to ``mjw_data`` before calling this
-        (via :meth:`_convert_contacts_to_mjwarp`).  Converting once per
-        iteration and reusing across the three step-doubling substeps ensures
-        the error estimate only reflects integration error, not contact-set
-        discrepancy from differing body transforms.
+        ``control`` / ``contacts`` are accepted for the unified Newton substep signature but are
+        UNUSED: control is pre-applied to ``mjw_data`` once per boundary and contacts are converted
+        once per iteration (reused across the three step-doubling substeps so the error estimate
+        reflects integration error only, not a contact-set discrepancy from differing transforms).
+        ``dt_array`` is the per-world timestep ``wp.array``.
         """
         self._update_mjc_data(self.mjw_data, self.model, state_in)
         wp.copy(self.mjw_model.opt.timestep, dt_array)
@@ -259,9 +283,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         if not self.mjw_model.opt.run_collision_detection:
             self._convert_contacts_to_mjwarp(self.model, self._state_cur, self._contacts_start)
 
-        self._run_substep(self._state_cur, self._scratch_full, self._dt)
-        self._run_substep(self._state_cur, self._scratch_mid, self._dt_half)
-        self._run_substep(self._scratch_mid, self._scratch_double, self._dt_half)
+        self.substep(self._state_cur, self._scratch_full, None, None, self._dt)
+        self.substep(self._state_cur, self._scratch_mid, None, None, self._dt_half)
+        self.substep(self._scratch_mid, self._scratch_double, None, None, self._dt_half)
 
         wp.launch(
             _inf_norm_state_error_kernel,
@@ -379,9 +403,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._convert_contacts_to_mjwarp(self.model, self._state_cur, self._contacts_start)
 
         # 3 MuJoCo evals: full dt, half dt, half dt.
-        self._run_substep(self._state_cur, self._scratch_full, self._dt)
-        self._run_substep(self._state_cur, self._scratch_mid, self._dt_half)
-        self._run_substep(self._scratch_mid, self._scratch_double, self._dt_half)
+        self.substep(self._state_cur, self._scratch_full, None, None, self._dt)
+        self.substep(self._state_cur, self._scratch_mid, None, None, self._dt_half)
+        self.substep(self._scratch_mid, self._scratch_double, None, None, self._dt_half)
 
         wp.launch(
             _inf_norm_state_error_kernel,
@@ -494,18 +518,20 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         )
 
     @event_scope
-    @override
-    def step(
+    def _step_once(
         self,
         state_in: State,
         state_out: State,
         control: Control,
         contacts: Contacts,
     ) -> State:
-        """Advance each world by one adaptive step.
+        """Advance each world by one adaptive step (test/diagnostic helper, NOT the boundary call).
 
         Single-iteration path: one 3-eval attempt, controller update, select.
-        Does not loop to a boundary — use :meth:`step_dt` for that.
+        Does not loop to a boundary — use :meth:`step` for that.
+
+        Renamed from the old single-attempt ``step()`` so the boundary call (formerly
+        ``step_dt``) can take the canonical ``step()`` name without clashing.
 
         Args:
             state_in: Input state.
@@ -529,9 +555,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         if not self.mjw_model.opt.run_collision_detection:
             self._convert_contacts_to_mjwarp(self.model, state_in, self._contacts_start)
 
-        self._run_substep(state_in, self._scratch_full, self._dt)
-        self._run_substep(state_in, self._scratch_mid, self._dt_half)
-        self._run_substep(self._scratch_mid, self._scratch_double, self._dt_half)
+        self.substep(state_in, self._scratch_full, None, None, self._dt)
+        self.substep(state_in, self._scratch_mid, None, None, self._dt_half)
+        self.substep(self._scratch_mid, self._scratch_double, None, None, self._dt_half)
 
         wp.launch(
             _inf_norm_state_error_kernel,
@@ -611,31 +637,33 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     @event_scope
     @override
-    def step_dt(
+    def step(
         self,
-        dt_outer: float,
-        state_0: State,
-        state_1: State,
+        state_in: State,
+        state_out: State,
         control: Control,
+        contacts: Contacts | None = None,
+        dt: float | None = None,
         apply_forces=None,
     ) -> tuple[State, State]:
-        """Advance all worlds by exactly ``dt_outer`` seconds of simulation time.
+        """Advance every world by exactly ``dt`` (= ``dt_outer``) seconds of sim time (= CENIC
+        ``DoStep`` + the N-substep march): the boundary call.
 
-        Loops the 3-eval step-doubling attempt, controller, and state-select
-        via direct ``wp.launch()`` calls until every world's ``sim_time``
-        reaches the boundary.  A single ``.numpy()`` read-back (4 bytes) per
-        iteration checks the boundary flag for termination.
+        Newton solver signature ``(state_in, state_out, control, contacts, dt)``. ``state_in`` is
+        read and written in place; ``state_out`` is returned unchanged (scratch). ``contacts`` is
+        accepted for signature uniformity but UNUSED -- contacts are detected ONCE per boundary
+        internally and reused across all step-doubling substeps.
 
-        Args:
-            dt_outer: Outer control/render period [s].
-            state_0: Current state (input/output).
-            state_1: Scratch state (unused; returned unchanged).
-            control: Control inputs (applied once, persists across substeps).
-            apply_forces: Optional ``fn(state)`` for external forces.
-
-        Returns:
-            ``(state_0, state_1)`` with ``state_0`` updated.
+        Even+global tiling: choose N once, tile each control interval with uniform inner
+        dt=dt_outer/N via a fixed-count loop (graph-capturable). Ragged tiling: adaptive boundary
+        loop with a graph-captured iteration body when available and a 4-byte ``.numpy()``
+        read-back per iteration.
         """
+        if dt is None:
+            raise ValueError("SolverMuJoCoAdaptive.step requires dt (the outer boundary period).")
+        state_0 = state_in
+        state_1 = state_out
+        dt_outer = float(dt)
         device = self.model.device
         n = self.model.world_count
 
@@ -700,11 +728,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             else:
                 n_max = int(self._N.numpy().max())  # loop bound; per-world short worlds no-op
             # Fixed-count loop: no per-iteration host sync (FPS win over the boundary flag).
-            for _ in range(n_max):
-                self._run_even_iteration_body()
+            # The even+global body sequence is STATIC per n_max, so it is captured once per n_max
+            # and replayed (single-level capture; the n_max host-read above stays OUTSIDE it). The
+            # MuJoCo substep is already non-conditional, so no nested conditional subgraphs.
+            self._run_substep_loop(max(int(n_max), 1))
         else:
-            while True:
-                self._run_iteration_body(effective_dt_max)
+            for _ in range(self._max_substeps):
+                self._run_ragged_iteration(effective_dt_max)
                 if self._boundary_flag.numpy()[0] == 0:
                     break
 
@@ -716,6 +746,97 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             wp.copy(state_0.body_qd, self._state_cur.body_qd)
 
         return state_0, state_1
+
+    # --------------------------------------------------------------- step_dt (alias)
+    def step_dt(
+        self,
+        dt_outer: float,
+        state_0: State,
+        state_1: State,
+        control: Control,
+        apply_forces=None,
+    ) -> tuple[State, State]:
+        """Backward-compatible alias for :meth:`step` (old ``(dt, s0, s1, control)`` order).
+
+        ``step`` is the canonical boundary call (Newton ``(state_in, state_out, control,
+        contacts, dt)`` signature); this thin wrapper preserves the legacy call sites/tests.
+        """
+        return self.step(state_0, state_1, control, None, dt_outer, apply_forces=apply_forces)
+
+    # ------------------------------------------------------- fixed-N substep loop
+    def _ragged_iteration_graph(self, effective_dt_max: float):
+        if not self._graph_enabled:
+            return None
+
+        # First eager iteration gives MuJoCo/Warp a chance to lazily initialize
+        # allocations outside capture.
+        if not self._ragged_graph_warmed:
+            self._ragged_graph_warmed = True
+            return None
+
+        key = round(float(effective_dt_max), 12)
+        graph = self._ragged_graph_cache.get(key)
+        if graph is None:
+            try:
+                with wp.ScopedCapture() as cap:
+                    self._run_iteration_body(effective_dt_max)
+                graph = cap.graph
+                self._ragged_graph_cache[key] = graph
+            except Exception:
+                self._graph_enabled = False
+                self._ragged_graph_cache.clear()
+                return None
+        return graph
+
+    def _run_ragged_iteration(self, effective_dt_max: float) -> None:
+        graph = self._ragged_iteration_graph(effective_dt_max)
+        if graph is None:
+            self._run_iteration_body(effective_dt_max)
+            return
+
+        try:
+            wp.capture_launch(graph)
+        except Exception:
+            self._graph_enabled = False
+            self._ragged_graph_cache.clear()
+            self._run_iteration_body(effective_dt_max)
+
+    def _run_substep_loop(self, n_max: int) -> None:
+        """Execute the n_max even+global substeps. When graph capture is enabled and warm, capture
+        the fixed-N body sequence once per n_max and replay it with ``wp.capture_launch``; otherwise
+        run eagerly.
+
+        Single-level capture: the MuJoCo substep is already NON-conditional (mujoco_warp opens no
+        nested conditional captures), and the only host sync (n_max) is read OUTSIDE this loop in
+        :meth:`step`, so the whole n_max-body sequence records as a flat graph. Gated by
+        ``NEWTON_MJ_ADAPTIVE_GRAPH`` (default on) + CUDA; capture/launch failures fall back to
+        eager and disable capture (so a run never crashes on a graph error)."""
+        if not (self._graph_enabled and self._graph_warmed):
+            for _ in range(n_max):
+                self._run_even_iteration_body()
+            self._graph_warmed = True
+            return
+
+        graph = self._graph_cache.get(int(n_max))
+        if graph is None:
+            try:
+                with wp.ScopedCapture() as cap:
+                    for _ in range(n_max):
+                        self._run_even_iteration_body()
+                graph = cap.graph
+                self._graph_cache[int(n_max)] = graph
+            except Exception:
+                self._graph_enabled = False
+                for _ in range(n_max):
+                    self._run_even_iteration_body()
+                return
+        try:
+            wp.capture_launch(graph)
+        except Exception:
+            self._graph_cache.pop(int(n_max), None)
+            self._graph_enabled = False
+            for _ in range(n_max):
+                self._run_even_iteration_body()
 
     @property
     def diverged(self) -> wp.array:
