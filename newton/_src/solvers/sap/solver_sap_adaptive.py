@@ -20,7 +20,7 @@ stops the instant every world has reached its boundary)::
     for _ in range(max_substeps):                  # max_substeps is a SAFETY cap, not the work
         clamp_dt_to_boundary(dt, sim_time, next_time)   # done worlds -> dt=0; never overshoot
         substep(state_cur -> full,   dt)                # one inner SAP step at the per-world dt
-        substep(state_cur -> mid,    dt/2)              # (feedforward/adaptive only: step-doubling)
+        substep(state_cur -> mid,    dt/2)              # (adaptive only: step-doubling)
         substep(mid       -> double, dt/2)
         err = infnorm(full, double)                     # per-world local error estimate
         adapt_dt(err, ...):                             # ALL per-thread, in-kernel (data branches):
@@ -41,12 +41,11 @@ cannot pollute the step-doubling error estimate. The substep body -- including t
 is the intended use of conditional graph nodes (the old >=1024-env SIGABRT was from capturing
 3N of them in the old per-N loop), validated clean to 4096 envs.
 
-Three modes (one machine; mode only changes how ``dt`` evolves, set per solver):
+Two modes (one machine; mode only changes how ``dt`` evolves, set per solver) -- these are
+the only two compared:
 
   * ``"fixed"``      -- constant dt, error control off; commits the single full step
     (the baseline being beaten on accuracy). Skips the doubling it does not use.
-  * ``"feedforward"`` -- dt set once per frame from the carried controller estimate
-    (built from last frame's error), held constant within the frame; always accepts.
   * ``"adaptive"``   -- dt grows on accept / shrinks on reject WITHIN the frame from
     the step-doubling error, targeting local error <= tol per step per world.
 
@@ -74,9 +73,7 @@ from sim.sap_runtime import (  # noqa: E402
 
 # ---- step-evolution mode codes (passed to _adapt_dt as a uniform kernel arg) ----
 _MODE_FIXED = wp.constant(0)
-_MODE_FEEDFORWARD = wp.constant(1)
-_MODE_ADAPTIVE = wp.constant(2)
-_MODE_CODES = {"fixed": 0, "feedforward": 1, "adaptive": 2}
+_MODE_CODES = {"fixed": 0, "adaptive": 1}
 
 # ---- Drake CalcAdjustedStepSize constants (err_order=2 for step doubling) ----
 _DRAKE_SAFETY = wp.constant(wp.float32(0.9))
@@ -121,9 +118,9 @@ def _seed_dt(
 ):
     """Seed this frame's per-world working dt.
 
-    ``fixed`` mode pins dt to the (clamped) constant ``dt_fixed``; ``feedforward`` and
-    ``adaptive`` seed from the carried controller estimate ``ideal_dt`` (which holds the
-    Drake step sized from the last accepted error). ``ideal_dt`` is preserved unclamped
+    ``fixed`` mode pins dt to the (clamped) constant ``dt_fixed``; ``adaptive`` seeds from
+    the carried controller estimate ``ideal_dt`` (which holds the Drake step sized from the
+    last accepted error). ``ideal_dt`` is preserved unclamped
     so a world parked at ``dt_max`` can still recover a large step next frame.
     """
     i = wp.tid()
@@ -286,25 +283,6 @@ def _adapt_dt(
         accepted_error[w] = e
         substeps_frame[w] = substeps_frame[w] + 1
         wp.atomic_add(cum_accepted, 0, 1)
-        return
-
-    # ---------- FEEDFORWARD: dt frozen in-frame; refine ideal_dt for next frame ----------
-    if mode == _MODE_FEEDFORWARD:
-        if is_div:
-            accept[w] = False
-            sim_time[w] = next_time[w]
-            diverged[w] = True
-            ideal_dt[w] = dt_min
-            return
-        accept[w] = True
-        sim_time[w] = sim_time[w] + step
-        accepted_error[w] = e
-        substeps_frame[w] = substeps_frame[w] + 1
-        wp.atomic_add(cum_accepted, 0, 1)
-        new_ideal = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
-        if new_ideal > _DRAKE_HYSTERESIS_LOW * step and new_ideal < _DRAKE_HYSTERESIS_HIGH * step:
-            new_ideal = step
-        ideal_dt[w] = wp.clamp(new_ideal, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
         return
 
     # ---------- ADAPTIVE: within-frame grow on accept / shrink+retry on reject ----------
@@ -584,8 +562,8 @@ class SolverSAPAdaptive:
         )
 
         # fixed mode commits the single full step (an honest fixed-dt baseline) and skips
-        # the doubling it does not need; feedforward/adaptive commit the doubled (more
-        # accurate) state and feed the step-doubling error to the controller.
+        # the doubling it does not need; adaptive commits the doubled (more accurate) state
+        # and feeds the step-doubling error to the controller.
         self._do_doubling = self._mode != "fixed"
         self._commit_src = self._scratch_full if self._mode == "fixed" else self._scratch_double
         self._err_lhs = self._scratch_full

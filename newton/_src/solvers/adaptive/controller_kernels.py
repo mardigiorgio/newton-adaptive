@@ -69,22 +69,6 @@ def _select_even_dt(
 
 
 @wp.kernel
-def _set_uniform_even_dt(
-    n_shared: int,
-    dt_outer: float,
-    N_out: wp.array(dtype=wp.int32),
-    dt_out: wp.array(dtype=wp.float32),
-    dt_half_out: wp.array(dtype=wp.float32),
-):
-    """Global even mode: overwrite every world with the shared worst-case N = max_i N_i."""
-    i = wp.tid()
-    N_out[i] = n_shared
-    step = dt_outer / wp.float32(n_shared)
-    dt_out[i] = step
-    dt_half_out[i] = step * wp.float32(0.5)
-
-
-@wp.kernel
 def _inf_norm_state_error_kernel(
     joint_q_full: wp.array(dtype=wp.float32),
     joint_q_double: wp.array(dtype=wp.float32),
@@ -455,23 +439,6 @@ def _status_sentinel_reset(out: wp.array(dtype=wp.float32)):
     out[3] = float(0.0)
     out[4] = float(1.0e38)
     out[5] = float(0.0)
-
-
-@wp.kernel
-def _reset_error_scalar(out: wp.array(dtype=wp.float32)):
-    out[0] = wp.float32(0.0)
-
-
-@wp.kernel
-def _reduce_max_error(src: wp.array(dtype=wp.float32), out: wp.array(dtype=wp.float32)):
-    i = wp.tid()
-    wp.atomic_max(out, 0, src[i])
-
-
-@wp.kernel
-def _broadcast_error(scalar: wp.array(dtype=wp.float32), dst: wp.array(dtype=wp.float32)):
-    i = wp.tid()
-    dst[i] = scalar[0]
 
 
 @wp.kernel
