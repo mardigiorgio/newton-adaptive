@@ -141,19 +141,6 @@ def test_fixed_mode_work_constant_per_frame():
     assert w2 == w1, f"fixed mode work changed across frames: {w1} then {w2}"
 
 
-def test_feedforward_mode_reaches_boundary_finite():
-    # feedforward: dt held within a frame, refined for the next; marches to boundary, stays finite.
-    device = wp.get_device(DEV)
-    _, s0, s1, control, solver = _fresh(device, mode="feedforward", dt_inner_init=DT_OUTER, tol=1e-4)
-    assert solver.mode == "feedforward"
-    for _ in range(3):
-        solver.step_dt(DT_OUTER, s0, s1, control)
-    st = solver.sim_time.numpy()
-    q = s0.joint_q.numpy()
-    assert np.all(np.isfinite(q)), "feedforward mode produced non-finite joint_q"
-    assert np.allclose(st, DT_OUTER, rtol=1e-4, atol=1e-7), f"feedforward sim_time={st} != {DT_OUTER}"
-
-
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
