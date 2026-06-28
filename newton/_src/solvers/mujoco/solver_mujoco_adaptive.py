@@ -49,8 +49,6 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-import newton
-
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ...utils.benchmark import event_scope
@@ -148,12 +146,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             )
         if tiling != "ragged":
             raise ValueError(
-                f"tiling must be 'ragged' (the only supported mode; 'even' tiling was removed), "
-                f"got {tiling!r}"
+                f"tiling must be 'ragged' (the only supported mode; 'even' tiling was removed), got {tiling!r}"
             )
         if int(max_substeps) < 1:
             raise ValueError(f"max_substeps must be >= 1, got {max_substeps!r}")
-        super().__init__(model, separate_worlds=True, use_mujoco_cpu=False, use_mujoco_contacts=False, **kwargs)
+        # Contacts come from MuJoCo's native collision pipeline (run_collision_detection=True);
+        # each step-doubling substep re-collides via mujoco_warp, so MuJoCo sizes its own contact
+        # buffers and there is no separate Newton collision pass to feed in.
+        super().__init__(model, separate_worlds=True, use_mujoco_cpu=False, use_mujoco_contacts=True, **kwargs)
 
         world_count = model.world_count
         device = model.device
@@ -231,13 +231,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=device,
         )
 
-        self._pipeline = newton.CollisionPipeline(
-            model,
-            broad_phase="sap",
-            rigid_contact_max=self.mjw_data.naconmax,
-        )
-        self._contacts_start = self._pipeline.contacts()
-
         # ---- solver-internal CUDA-graph capture ----
         # Ragged tiling captures one adaptive iteration body keyed by effective dt_max and still
         # reads the 4-byte boundary flag between iterations. Gated by NEWTON_MJ_ADAPTIVE_GRAPH
@@ -248,10 +241,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             _is_cuda = bool(wp.get_device(device).is_cuda)
         except Exception:
             _is_cuda = False
-        self._graph_enabled = (
-            _is_cuda
-            and _os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
-        )
+        self._graph_enabled = _is_cuda and _os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
         self._ragged_graph_cache: dict = {}
         self._ragged_graph_warmed = False
 
@@ -271,9 +261,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         records as a flat launch stream and is safe inside :meth:`step`'s single-level capture.
 
         ``control`` / ``contacts`` are accepted for the unified Newton substep signature but are
-        UNUSED: control is pre-applied to ``mjw_data`` once per boundary and contacts are converted
-        once per iteration (reused across the three step-doubling substeps so the error estimate
-        reflects integration error only, not a contact-set discrepancy from differing transforms).
+        UNUSED: control is pre-applied to ``mjw_data`` once per boundary, and MuJoCo runs its own
+        collision detection inside each ``_mujoco_warp_step`` (``use_mujoco_contacts=True``).
         ``dt_array`` is the per-world timestep ``wp.array``.
         """
         self._update_mjc_data(self.mjw_data, self.model, state_in)
@@ -392,12 +381,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Snapshot for rollback on rejection.
         self._copy_state(self._state_saved, self._state_cur)
 
-        # Convert contacts ONCE from state_cur so all 3 evals see identical MuJoCo contacts
-        # (else the third eval, starting from scratch_mid's transforms, would corrupt the
-        # integration-error estimate with a contact-set discrepancy).
-        if not self.mjw_model.opt.run_collision_detection:
-            self._convert_contacts_to_mjwarp(self.model, self._state_cur, self._contacts_start)
-
         # --- adaptive core: step double, estimate error, run the controller ---
         self._step_double(self._state_cur)
         self._estimate_error()
@@ -474,7 +457,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             state_in: Input state.
             state_out: Output state (written in place).
             control: Control inputs.
-            contacts: Unused. Contacts are generated internally via :class:`CollisionPipeline`.
+            contacts: Unused. MuJoCo runs its own collision detection each substep.
 
         Returns:
             state_out
@@ -486,11 +469,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._diverged.fill_(False)
         self._apply_mjc_control(model, state_in, control, self.mjw_data)
         self._enable_rne_postconstraint(state_out)
-
-        self._pipeline.collide(state_in, self._contacts_start)
-
-        if not self.mjw_model.opt.run_collision_detection:
-            self._convert_contacts_to_mjwarp(self.model, state_in, self._contacts_start)
 
         self._step_double(state_in)
         self._estimate_error()
@@ -548,8 +526,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
         Newton solver signature ``(state_in, state_out, control, contacts, dt)``. ``state_in`` is
         read and written in place; ``state_out`` is returned unchanged (scratch). ``contacts`` is
-        accepted for signature uniformity but UNUSED -- contacts are detected ONCE per boundary
-        internally and reused across all step-doubling substeps.
+        accepted for signature uniformity but UNUSED -- MuJoCo runs its own collision detection
+        inside each step-doubling substep (``use_mujoco_contacts=True``).
 
         Ragged tiling: adaptive boundary loop with a graph-captured iteration body when available
         and a 4-byte ``.numpy()`` boundary-flag read-back per iteration.
@@ -592,12 +570,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Latch reset per outer step: _diverged reflects worlds that hit the floor non-finite
         # during THIS step; the env reads it afterward to reset them.
         self._diverged.fill_(False)
-
-        # Detect contacts once per boundary. Body-frame contact points are converted to
-        # world-frame inside the iteration body using the current state transforms, so they
-        # track body motion across iterations.
-        if not self.mjw_model.opt.run_collision_detection:
-            self._pipeline.collide(self._state_cur, self._contacts_start)
 
         self._march_ragged(effective_dt_max)
 
@@ -784,17 +756,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     def accepted(self) -> wp.array:
         """Per-world accept flags from the most recent step, shape ``[world_count]``, bool, on device."""
         return self._accepted
-
-    @property
-    def contacts(self) -> Contacts:
-        """Contacts from the most recent :meth:`step_dt` boundary.
-
-        Populated once per outer step by the solver's internal
-        :class:`~newton.CollisionPipeline` and reused across all inner
-        iterations.  Pass to ``viewer.log_contacts`` for rendering without
-        duplicating the collision pass.
-        """
-        return self._contacts_start
 
     def get_status_summary(self) -> dict[str, float]:
         """Reduce per-world arrays to a 6-scalar summary via one GPU transfer."""
