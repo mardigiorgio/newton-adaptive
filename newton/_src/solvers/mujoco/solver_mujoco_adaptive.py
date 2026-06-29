@@ -35,10 +35,9 @@ The per-world dt tiles the control interval via the ``"ragged"`` adaptive bounda
 sketched above, with a clamped-remainder landing (:meth:`_run_iteration_body`).
 
 The ONLY host sync in the ragged step path is the single 4-byte boundary-flag read per
-iteration (~3 iters/frame). The controller
-kernels (Drake step sizing, the inf-norm error metric, the masked select, the time
-rebase/clamp) live in the shared :mod:`..adaptive.controller_kernels` and are re-imported
-below so this file's tests resolve them unchanged.
+iteration (~3 iters/frame). The controller kernels (Drake step sizing, the inf-norm error
+metric, the masked select, the time rebase/clamp) are defined inline below, so this solver
+is self-contained: open this one file to see all of its logic.
 
 Note: true CENIC = this adaptive controller + convex ICF contact; the ICF contact model
 is not yet built, so this is the adaptive (pseudo-CENIC) MuJoCo solver.
@@ -46,37 +45,374 @@ is not yet built, so this is the adaptive (pseudo-CENIC) MuJoCo solver.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import warp as wp
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ...utils.benchmark import event_scope
-from ..adaptive.controller_kernels import (  # noqa: F401  (re-exported for tests + reuse)
-    _DRAKE_HYSTERESIS_HIGH,
-    _DRAKE_HYSTERESIS_LOW,
-    _DRAKE_MAX_GROW,
-    _DRAKE_MIN_SHRINK,
-    _DRAKE_SAFETY,
-    _advance_sim_time,
-    _apply_dt_cap,
-    _boundary_advance,
-    _boundary_check,
-    _boundary_reset,
-    _calc_adjusted_step,
-    _clamp_dt_to_boundary,
-    _finish_diverged_worlds,
-    _inf_norm_state_error_kernel,
-    _iter_count_increment,
-    _rebase_time,
-    _reset_worlds,
-    _select_float_kernel,
-    _select_spatial_vector_kernel,
-    _select_transform_kernel,
-    _status_sentinel_reset,
-    _status_summary_kernel,
-)
 from .solver_mujoco import SolverMuJoCo
+
+
+# =====================================================================
+# Adaptive step-doubling controller kernels (inlined so this solver is
+# self-contained: open this file to see all of its logic).
+# =====================================================================
+@wp.kernel
+def _apply_dt_cap(
+    ideal_dt: wp.array(dtype=wp.float32),
+    dt_min: float,
+    dt_max: float,
+    dt: wp.array(dtype=wp.float32),
+    dt_half: wp.array(dtype=wp.float32),
+):
+    """Clamp ideal_dt to [dt_min, dt_max], preserving ideal_dt for controller recovery."""
+    i = wp.tid()
+    actual = wp.clamp(ideal_dt[i], dt_min, dt_max)
+    dt[i] = actual
+    dt_half[i] = actual * wp.float32(0.5)
+
+
+@wp.kernel
+def _inf_norm_state_error_kernel(
+    joint_q_full: wp.array(dtype=wp.float32),
+    joint_q_double: wp.array(dtype=wp.float32),
+    state_scale: wp.array2d(dtype=wp.float32),
+    coords_per_world: int,
+    error_out: wp.array(dtype=wp.float32),
+):
+    """Adaptive-controller accuracy metric (Kurtz & Castro, Sec. V-E)::
+
+        e^{n+1} = || S (q^{n+1} - q̂^{n+1}) ||_∞
+
+    Position-only inf-norm of the difference between the doubled half-step ``q`` and the
+    full step ``q̂``, scaled by the diagonal ``S`` that "maps each component to a
+    dimensionless unit." Velocity and contact impulses are excluded from the controller,
+    exactly as the paper specifies. The paper gives no formula for ``S`` and mandates NO
+    mass weighting, clipping, or normalization ("S can be estimated from knowledge of
+    coordinate types or specified by expert users"); here ``S = identity`` per PI
+    directive. Diverged sims get error = 1e10.
+    """
+    world = wp.tid()
+    q_start = world * coords_per_world
+
+    max_err = float(0.0)
+    for i in range(coords_per_world):
+        d = wp.abs(joint_q_double[q_start + i] - joint_q_full[q_start + i])
+        max_err = wp.max(max_err, state_scale[world, i] * d)
+
+    if wp.isnan(max_err) or wp.isinf(max_err):
+        max_err = float(1.0e10)
+
+    error_out[world] = max_err
+
+
+# Drake CalcAdjustedStepSize constants (err_order=2 for step doubling).
+_DRAKE_SAFETY = wp.constant(wp.float32(0.9))
+_DRAKE_MIN_SHRINK = wp.constant(wp.float32(0.1))
+_DRAKE_MAX_GROW = wp.constant(wp.float32(5.0))
+_DRAKE_HYSTERESIS_HIGH = wp.constant(wp.float32(1.2))
+_DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
+
+
+@wp.kernel
+def _calc_adjusted_step(
+    err: wp.array(dtype=wp.float32),
+    dt: wp.array(dtype=wp.float32),
+    ideal_dt: wp.array(dtype=wp.float32),
+    accepted: wp.array(dtype=wp.bool),
+    commit: wp.array(dtype=wp.bool),
+    diverged: wp.array(dtype=wp.bool),
+    tol: float,
+    dt_min: float,
+    divergence_threshold: float,
+):
+    """Per-world Drake CalcAdjustedStepSize for step doubling (err_order=2).
+
+    Writes three decisions per world:
+      * ``accepted`` -- advance ``sim_time`` (progress; avoids a boundary-loop hang).
+      * ``commit``   -- write the doubled state. ``False`` => hold the last good state
+        (used to refuse a non-finite step instead of poisoning the batch with NaN).
+      * ``diverged`` -- latch: the world hit the ``dt_min`` floor still non-finite, so it
+        cannot be salvaged by subdivision; the env should reset it.
+
+    The error kernel emits a large sentinel (``1e10``) for NaN/inf states, so
+    ``e >= divergence_threshold`` (or a literal NaN/inf) means "diverged".
+    dt_max clamping is deferred to _apply_dt_cap so ideal_dt is preserved.
+    """
+    world = wp.tid()
+    e = err[world]
+    step = dt[world]
+
+    is_diverged = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
+
+    # Boundary-stalled worlds (dt clamped to 0): no-op step; accept+commit the
+    # (unchanged) state without touching ideal_dt so the next interval inherits a
+    # good dt instead of ramping from dt_min.
+    if step <= wp.float32(0.0):
+        accepted[world] = True
+        commit[world] = True
+        return
+
+    # At the floor we cannot subdivide any further.
+    if step <= dt_min * wp.float32(1.001):
+        if is_diverged:
+            # Refuse to write the NaN/garbage state: advance time so the boundary
+            # loop terminates, but HOLD the last good state and flag the world so
+            # the env resets it. This is the fix for NaN propagation out of the solver.
+            accepted[world] = True
+            commit[world] = False
+            diverged[world] = True
+            ideal_dt[world] = dt_min
+            return
+        if e > tol:
+            # Finite but can't meet tol at the floor: accept progress and commit.
+            accepted[world] = True
+            commit[world] = True
+            ideal_dt[world] = dt_min
+            return
+        # e <= tol at the floor: fall through to the normal accept path.
+
+    # Above the floor and diverged: reject and shrink hard for a smaller retry.
+    if is_diverged:
+        accepted[world] = False
+        commit[world] = False
+        ideal_dt[world] = _DRAKE_MIN_SHRINK * step
+        return
+
+    new_step = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
+
+    # Symmetric deadband (paper Alg 1): keep dt unchanged when new_step lands
+    # in [k_Low * dt, k_High * dt]. Prevents dt thrash from small error spikes
+    # (lower edge) and suppresses tiny grows (upper edge).
+    if new_step > _DRAKE_HYSTERESIS_LOW * step and new_step < _DRAKE_HYSTERESIS_HIGH * step:
+        new_step = step
+
+    new_step = wp.clamp(new_step, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
+
+    acc = e <= tol or new_step >= step
+    accepted[world] = acc
+    commit[world] = acc
+    ideal_dt[world] = new_step
+
+
+@wp.kernel
+def _advance_sim_time(
+    sim_time: wp.array(dtype=wp.float32),
+    dt: wp.array(dtype=wp.float32),
+    accepted: wp.array(dtype=wp.bool),
+    error: wp.array(dtype=wp.float32),
+    accepted_error: wp.array(dtype=wp.float32),
+):
+    """Advance sim_time[i] by dt[i] and snapshot error for accepted worlds only."""
+    i = wp.tid()
+    if accepted[i]:
+        sim_time[i] = sim_time[i] + dt[i]
+        accepted_error[i] = error[i]
+
+
+@wp.kernel
+def _finish_diverged_worlds(
+    sim_time: wp.array(dtype=wp.float32),
+    next_time: wp.array(dtype=wp.float32),
+    diverged: wp.array(dtype=wp.bool),
+):
+    """Jump diverged worlds straight to their boundary target.
+
+    A world flagged diverged at the floor holds its last good state; stepping it
+    again would just re-diverge, so finish its outer interval in one shot. This
+    keeps the boundary loop from grinding ``remaining / dt_min`` extra iterations
+    on a world that cannot make progress.
+    """
+    i = wp.tid()
+    if diverged[i]:
+        sim_time[i] = next_time[i]
+
+
+@wp.kernel
+def _reset_worlds(
+    mask: wp.array(dtype=wp.bool),
+    dt_init: float,
+    ideal_dt: wp.array(dtype=wp.float32),
+    dt: wp.array(dtype=wp.float32),
+    dt_half: wp.array(dtype=wp.float32),
+    sim_time: wp.array(dtype=wp.float32),
+    next_time: wp.array(dtype=wp.float32),
+    diverged: wp.array(dtype=wp.bool),
+    accepted: wp.array(dtype=wp.bool),
+):
+    """Restore the step-doubling controller's persistent per-world state to
+    construction defaults for worlds flagged in ``mask``; leave others untouched.
+
+    Fix C (per-world controller reset on env/episode reset). sim_time and next_time
+    are reset TOGETHER to 0 so the world restarts a clean boundary interval (the next
+    step_dt advances next_time by dt_outer from 0); this also drops the float32
+    unbounded-growth of a long-lived world."""
+    i = wp.tid()
+    if mask[i]:
+        ideal_dt[i] = dt_init
+        dt[i] = dt_init
+        dt_half[i] = dt_init * wp.float32(0.5)
+        sim_time[i] = wp.float32(0.0)
+        next_time[i] = wp.float32(0.0)
+        diverged[i] = False
+        accepted[i] = False
+
+
+@wp.kernel
+def _select_float_kernel(
+    candidate: wp.array(dtype=wp.float32),
+    fallback: wp.array(dtype=wp.float32),
+    accepted: wp.array(dtype=wp.bool),
+    stride: int,
+    out: wp.array(dtype=wp.float32),
+):
+    """Select candidate for accepted worlds, fallback for rejected worlds."""
+    i = wp.tid()
+    world = i // stride
+    if accepted[world]:
+        out[i] = candidate[i]
+    else:
+        out[i] = fallback[i]
+
+
+@wp.kernel
+def _select_transform_kernel(
+    candidate: wp.array(dtype=wp.transform),
+    fallback: wp.array(dtype=wp.transform),
+    accepted: wp.array(dtype=wp.bool),
+    stride: int,
+    out: wp.array(dtype=wp.transform),
+):
+    """Select body pose from accepted or fallback state."""
+    i = wp.tid()
+    world = i // stride
+    if accepted[world]:
+        out[i] = candidate[i]
+    else:
+        out[i] = fallback[i]
+
+
+@wp.kernel
+def _select_spatial_vector_kernel(
+    candidate: wp.array(dtype=wp.spatial_vector),
+    fallback: wp.array(dtype=wp.spatial_vector),
+    accepted: wp.array(dtype=wp.bool),
+    stride: int,
+    out: wp.array(dtype=wp.spatial_vector),
+):
+    """Select body velocity from accepted or fallback state."""
+    i = wp.tid()
+    world = i // stride
+    if accepted[world]:
+        out[i] = candidate[i]
+    else:
+        out[i] = fallback[i]
+
+
+@wp.kernel
+def _boundary_reset(flag: wp.array(dtype=wp.int32)):
+    """Set flag[0] = 0 (assume all worlds reached the boundary)."""
+    flag[0] = 0
+
+
+@wp.kernel
+def _boundary_check(
+    sim_time: wp.array(dtype=wp.float32),
+    target: wp.array(dtype=wp.float32),
+    flag: wp.array(dtype=wp.int32),
+):
+    """Set flag to 1 if any world has not yet reached target."""
+    i = wp.tid()
+    if sim_time[i] < target[i]:
+        wp.atomic_max(flag, 0, 1)
+
+
+@wp.kernel
+def _boundary_advance(arr: wp.array(dtype=wp.float32), delta: float):
+    """Increment arr[i] by delta."""
+    i = wp.tid()
+    arr[i] = arr[i] + delta
+
+
+@wp.kernel
+def _rebase_time(
+    sim_time: wp.array(dtype=wp.float32),
+    next_time: wp.array(dtype=wp.float32),
+):
+    """Rebase both per-world clocks by subtracting each world's boundary baseline.
+
+    Fix B (float32 time-rebase). ``_sim_time`` and ``_next_time`` are never reset and
+    grow unbounded across a training run; the landing remainder ``next_time - sim_time``
+    then loses float32 precision as magnitude grows, causing dt jitter that worsens over
+    time. Subtracting the per-world baseline ``next_time[i]`` (NOT zeroing) keeps both
+    clocks small while preserving the remainder bit-exactly: ``next_time`` -> 0 and
+    ``sim_time`` -> the (>= 0) residual overshoot, which is carried forward instead of
+    dropped. Called once at the top of ``step_dt`` before ``_boundary_advance``.
+    """
+    i = wp.tid()
+    base = next_time[i]
+    sim_time[i] = sim_time[i] - base
+    next_time[i] = next_time[i] - base
+
+
+@wp.kernel
+def _clamp_dt_to_boundary(
+    dt: wp.array(dtype=wp.float32),
+    dt_half: wp.array(dtype=wp.float32),
+    sim_time: wp.array(dtype=wp.float32),
+    next_time: wp.array(dtype=wp.float32),
+):
+    """Clamp dt so worlds don't overshoot their boundary target.
+
+    Worlds already at or past the boundary get dt=0 (no-op step).
+    """
+    i = wp.tid()
+    remaining = next_time[i] - sim_time[i]
+    if remaining <= wp.float32(0.0):
+        dt[i] = wp.float32(0.0)
+        dt_half[i] = wp.float32(0.0)
+    elif dt[i] > remaining:
+        dt[i] = remaining
+        dt_half[i] = remaining * wp.float32(0.5)
+
+
+@wp.kernel
+def _iter_count_increment(count: wp.array(dtype=wp.int32)):
+    """Increment iteration counter (dim=1, single thread)."""
+    count[0] = count[0] + 1
+
+
+@wp.kernel
+def _status_sentinel_reset(out: wp.array(dtype=wp.float32)):
+    """Reset 6-element summary buffer: [min_sim_time, max_sim_time, max_error, accept_count, min_dt, max_dt]."""
+    out[0] = float(1.0e38)
+    out[1] = float(0.0)
+    out[2] = float(0.0)
+    out[3] = float(0.0)
+    out[4] = float(1.0e38)
+    out[5] = float(0.0)
+
+
+@wp.kernel
+def _status_summary_kernel(
+    sim_time: wp.array(dtype=wp.float32),
+    last_error: wp.array(dtype=wp.float32),
+    dt: wp.array(dtype=wp.float32),
+    accepted: wp.array(dtype=wp.bool),
+    out: wp.array(dtype=wp.float32),
+):
+    """Reduce per-world arrays to 6 summary scalars via atomics."""
+    i = wp.tid()
+    wp.atomic_min(out, 0, sim_time[i])
+    wp.atomic_max(out, 1, sim_time[i])
+    wp.atomic_max(out, 2, last_error[i])
+    if accepted[i]:
+        wp.atomic_add(out, 3, wp.float32(1.0))
+    wp.atomic_min(out, 4, dt[i])
+    wp.atomic_max(out, 5, dt[i])
 
 
 class SolverMuJoCoAdaptive(SolverMuJoCo):
@@ -235,13 +571,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Ragged tiling captures one adaptive iteration body keyed by effective dt_max and still
         # reads the 4-byte boundary flag between iterations. Gated by NEWTON_MJ_ADAPTIVE_GRAPH
         # (default on) + CUDA device; capture is warmed on the first frame.
-        import os as _os
-
         try:
             _is_cuda = bool(wp.get_device(device).is_cuda)
         except Exception:
             _is_cuda = False
-        self._graph_enabled = _is_cuda and _os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
+        self._graph_enabled = _is_cuda and os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
         self._ragged_graph_cache: dict = {}
         self._ragged_graph_warmed = False
 
@@ -433,79 +767,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             inputs=[self._sim_time, self._next_time, self._boundary_flag],
             device=dev,
         )
-
-    # =====================================================================
-    # Diagnostic single-attempt step (NOT the boundary call)
-    # =====================================================================
-    @event_scope
-    def _step_once(
-        self,
-        state_in: State,
-        state_out: State,
-        control: Control,
-        contacts: Contacts,
-    ) -> State:
-        """Advance each world by one adaptive attempt (test/diagnostic helper, NOT the boundary call).
-
-        Single-iteration path: one 3-eval attempt, controller update, select. Does not loop to a
-        boundary -- use :meth:`step` for a real march.
-
-        Renamed from the old single-attempt ``step()`` so the boundary call (formerly
-        ``step_dt``) can take the canonical ``step()`` name without clashing.
-
-        Args:
-            state_in: Input state.
-            state_out: Output state (written in place).
-            control: Control inputs.
-            contacts: Unused. MuJoCo runs its own collision detection each substep.
-
-        Returns:
-            state_out
-        """
-        model = self.model
-        device = model.device
-        n = model.world_count
-
-        self._diverged.fill_(False)
-        self._apply_mjc_control(model, state_in, control, self.mjw_data)
-        self._enable_rne_postconstraint(state_out)
-
-        self._step_double(state_in)
-        self._estimate_error()
-        wp.launch(
-            _calc_adjusted_step,
-            dim=n,
-            inputs=[
-                self._last_error,
-                self._dt,
-                self._ideal_dt,
-                self._accepted,
-                self._commit,
-                self._diverged,
-                self._tol,
-                self._dt_min,
-                self._divergence_threshold,
-            ],
-            device=device,
-        )
-        wp.launch(
-            _apply_dt_cap,
-            dim=n,
-            inputs=[self._ideal_dt, self._dt_min, self._dt_max, self._dt, self._dt_half],
-            device=device,
-        )
-
-        self._select_committed_state(self._scratch_double, state_in, state_out)
-
-        wp.launch(
-            _advance_sim_time,
-            dim=n,
-            inputs=[self._sim_time, self._dt, self._accepted, self._last_error, self._accepted_error],
-            device=device,
-        )
-
-        self._step += 1
-        return state_out
 
     # =====================================================================
     # The boundary call: march every world to dt_outer
