@@ -592,6 +592,13 @@ class SolverMuJoCo(SolverBase):
         if len(path_targets) == 0:
             return []
 
+        # Pre-registration pass: USD parsing invokes this before builder.joint_label is
+        # populated, so every lookup below would fail (and previously emitted one warning
+        # per tendon joint per world -- a wall of spurious "references unknown joint
+        # path" noise at startup). Resolution re-runs once labels exist; return silently.
+        if not builder.joint_label:
+            return []
+
         indices_attr = prim.GetAttribute("mjc:path:indices")
         authored_indices = indices_attr.Get() if indices_attr else None
         indices = list(authored_indices) if authored_indices is not None and len(authored_indices) > 0 else None
@@ -2973,6 +2980,11 @@ class SolverMuJoCo(SolverBase):
         actlimited_arr = (
             mujoco_attrs.actuator_actlimited.numpy() if hasattr(mujoco_attrs, "actuator_actlimited") else None
         )
+        # Unresolved actuator targets are collected and reported ONCE after the loop:
+        # with N cloned worlds, every clone actuator prim targets a path absent from the
+        # template-world label registry, so per-actuator warnings scale x(N-1) and bury
+        # genuine template-world failures in thousands of benign lines.
+        unresolved_actuator_targets: list[str] = []
         for mujoco_act_idx in range(mujoco_actuator_count):
             # Skip JOINT_TARGET actuators - they're already added via joint_target_mode path
             if ctrl_source_arr is not None:
@@ -3035,10 +3047,7 @@ class SolverMuJoCo(SolverBase):
                         flush=True,
                     )
                 # [END INVESTIGATION LOGGER]
-                warnings.warn(
-                    f"MuJoCo actuator {mujoco_act_idx} has unresolved target '{target_label}'. Skipping actuator.",
-                    stacklevel=2,
-                )
+                unresolved_actuator_targets.append(target_label)
                 continue
 
             if trntype == int(SolverMuJoCo.TrnType.JOINT):
@@ -3210,6 +3219,15 @@ class SolverMuJoCo(SolverBase):
             mjc_actuator_to_target_q_axis_idx_list.append(-1)
             mjc_actuator_to_newton_ball_jnt_list.append(-1)
             actuator_count += 1
+
+        if unresolved_actuator_targets:
+            examples = ", ".join(repr(t) for t in unresolved_actuator_targets[:3])
+            warnings.warn(
+                f"{len(unresolved_actuator_targets)} MuJoCo actuator(s) had unresolved targets and were "
+                f"skipped (expected for world-clone prims absent from the template registry; first: "
+                f"{examples}). Set NEWTON_DEBUG_RESOLVE=1 for per-actuator details.",
+                stacklevel=2,
+            )
 
         return actuator_count
 
