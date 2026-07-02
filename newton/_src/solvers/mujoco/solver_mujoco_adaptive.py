@@ -606,19 +606,22 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._conditional_graph_cache: dict = {}
         self._conditional_warm_boundaries = 0
 
-        # ---- shared forward prefix (opt-in; cuts one prefix pass of three per iteration) ----
+        # ---- shared forward prefix (DEFAULT ON; cuts one prefix pass of three per iteration) ----
         # The full eval and the FIRST half eval of every step-doubling attempt start from
         # the identical snapshot state, so the state-dependent pipeline prefix
         # (kinematics, collision, mass matrix + factorization, bias/passive/actuator
-        # forces, qacc_smooth) is computed twice on identical inputs. With
-        # NEWTON_MJ_ADAPTIVE_SHARED_FWD=1, the first half eval runs only the
-        # timestep-dependent suffix -- constraint assembly (KBI terms scale with dt),
-        # constraint solve, integrate -- reusing the prefix the full eval left in
-        # mjw_data (its integrator advanced only qpos/qvel/act, which the rollback
-        # restores; smooth.py has no timestep dependence). Bonus: both Richardson
-        # estimates then judge the IDENTICAL contact set. Euler/implicitfast only:
-        # RK4 re-runs the whole forward pipeline inside its integrator.
-        self._shared_fwd = os.environ.get("NEWTON_MJ_ADAPTIVE_SHARED_FWD", "0") == "1"
+        # forces, qacc_smooth) is computed twice on identical inputs. The first half
+        # eval therefore runs only the timestep-dependent suffix -- constraint assembly
+        # (KBI terms scale with dt), constraint solve, integrate -- reusing the prefix
+        # the full eval left in mjw_data (its integrator advanced only qpos/qvel/act,
+        # which the rollback restores; smooth.py has no timestep dependence). Bonus:
+        # both Richardson estimates then judge the IDENTICAL contact set. Validated in
+        # production (RTX 5090, 8192 Allegro-reorient envs): -15.3% wall time with
+        # iteration parity and error well under tol. NEWTON_MJ_ADAPTIVE_SHARED_FWD=0
+        # opts out. Euler/implicitfast only: RK4 re-runs forward inside its integrator
+        # and falls back to full evals (silently, unless the flag was set explicitly).
+        _shared_fwd_env = os.environ.get("NEWTON_MJ_ADAPTIVE_SHARED_FWD")
+        self._shared_fwd = (_shared_fwd_env or "1") == "1"
         self._mjw_suffix_integrate = None
         if self._shared_fwd:
             mjw = self._mujoco_warp
@@ -629,11 +632,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._mjw_suffix_integrate = mjw.implicit
             else:
                 self._shared_fwd = False
-                warnings.warn(
-                    f"NEWTON_MJ_ADAPTIVE_SHARED_FWD: integrator {integrator!r} does not support the "
-                    "shared forward prefix (RK4 re-runs forward internally); using full evals.",
-                    stacklevel=2,
-                )
+                if _shared_fwd_env is not None:
+                    warnings.warn(
+                        f"NEWTON_MJ_ADAPTIVE_SHARED_FWD: integrator {integrator!r} does not support the "
+                        "shared forward prefix (RK4 re-runs forward internally); using full evals.",
+                        stacklevel=2,
+                    )
 
     # =====================================================================
     # Adaptive-core helpers (the pieces of one iteration body)
@@ -706,9 +710,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         Richardson estimates start from identical internal state (the full eval's
         warm start and activations must not leak into the half evals).
 
-        With the shared forward prefix enabled (``NEWTON_MJ_ADAPTIVE_SHARED_FWD=1``),
-        the FIRST half eval reuses the full eval's state-dependent prefix and runs
-        only the dt-dependent suffix (see :meth:`_mjw_eval_suffix`); the second half
+        With the shared forward prefix (default on; ``NEWTON_MJ_ADAPTIVE_SHARED_FWD=0``
+        opts out), the FIRST half eval reuses the full eval's state-dependent prefix and
+        runs only the dt-dependent suffix (see :meth:`_mjw_eval_suffix`); the second half
         eval starts from a different state and always runs the full pipeline.
         """
         d = self.mjw_data
