@@ -602,6 +602,35 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._conditional_graph_cache: dict = {}
         self._conditional_warm_boundaries = 0
 
+        # ---- shared forward prefix (opt-in; cuts one prefix pass of three per iteration) ----
+        # The full eval and the FIRST half eval of every step-doubling attempt start from
+        # the identical snapshot state, so the state-dependent pipeline prefix
+        # (kinematics, collision, mass matrix + factorization, bias/passive/actuator
+        # forces, qacc_smooth) is computed twice on identical inputs. With
+        # NEWTON_MJ_ADAPTIVE_SHARED_FWD=1, the first half eval runs only the
+        # timestep-dependent suffix -- constraint assembly (KBI terms scale with dt),
+        # constraint solve, integrate -- reusing the prefix the full eval left in
+        # mjw_data (its integrator advanced only qpos/qvel/act, which the rollback
+        # restores; smooth.py has no timestep dependence). Bonus: both Richardson
+        # estimates then judge the IDENTICAL contact set. Euler/implicitfast only:
+        # RK4 re-runs the whole forward pipeline inside its integrator.
+        self._shared_fwd = os.environ.get("NEWTON_MJ_ADAPTIVE_SHARED_FWD", "0") == "1"
+        self._mjw_suffix_integrate = None
+        if self._shared_fwd:
+            mjw = self._mujoco_warp
+            integrator = self.mjw_model.opt.integrator
+            if integrator == mjw.IntegratorType.EULER:
+                self._mjw_suffix_integrate = mjw.euler
+            elif integrator == mjw.IntegratorType.IMPLICITFAST:
+                self._mjw_suffix_integrate = mjw.implicit
+            else:
+                self._shared_fwd = False
+                warnings.warn(
+                    f"NEWTON_MJ_ADAPTIVE_SHARED_FWD: integrator {integrator!r} does not support the "
+                    "shared forward prefix (RK4 re-runs forward internally); using full evals.",
+                    stacklevel=2,
+                )
+
     # =====================================================================
     # Adaptive-core helpers (the pieces of one iteration body)
     # =====================================================================
@@ -633,6 +662,36 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             else:
                 self._mujoco_warp_step()
 
+    def _mjw_eval_suffix(self, dt_array: wp.array) -> None:
+        """Reduced eval for the FIRST half step of the Richardson pair (shared forward
+        prefix): only the timestep-dependent stages run at ``dt_array`` -- constraint
+        assembly (``make_constraint``: KBI/regularizer terms scale with dt), the
+        constraint solve, and integration.
+
+        Every state-dependent prefix output in ``mjw_data`` -- kinematics, contacts,
+        mass matrix + factorization, bias/passive/actuator forces, ``qacc_smooth``,
+        actuator moments -- was computed by the immediately preceding FULL eval from
+        the SAME snapshot state and is still valid: that eval's integrator advanced
+        only qpos/qvel/act (which the caller restores from the snapshot first), never
+        the derived quantities. ``make_constraint`` reassembles efc from those stored
+        contacts/kinematics and the restored qpos, so the constraint set matches the
+        full eval's exactly. Sensors are skipped (nothing consumes mid-attempt sensor
+        values; the final committed eval computes them).
+        """
+        mjw = self._mujoco_warp
+        m, d = self.mjw_model, self.mjw_data
+        wp.copy(m.opt.timestep, dt_array)
+        with wp.ScopedDevice(self.model.device):
+            if self._alloc_cache is not None:
+                with self._alloc_cache.scope():
+                    mjw.make_constraint(m, d)
+                    mjw.solve(m, d)
+                    self._mjw_suffix_integrate(m, d)
+            else:
+                mjw.make_constraint(m, d)
+                mjw.solve(m, d)
+                self._mjw_suffix_integrate(m, d)
+
     def _step_double(self) -> None:
         """Step doubling -- the 3 MuJoCo evals, entirely in qpos/qvel space: snapshot,
         one full step at ``dt`` (result saved to ``_qpos_full``), restore, then two half
@@ -642,6 +701,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         The snapshot/restore includes ``qacc_warmstart`` and ``act`` so the two
         Richardson estimates start from identical internal state (the full eval's
         warm start and activations must not leak into the half evals).
+
+        With the shared forward prefix enabled (``NEWTON_MJ_ADAPTIVE_SHARED_FWD=1``),
+        the FIRST half eval reuses the full eval's state-dependent prefix and runs
+        only the dt-dependent suffix (see :meth:`_mjw_eval_suffix`); the second half
+        eval starts from a different state and always runs the full pipeline.
         """
         d = self.mjw_data
         wp.copy(self._qpos_saved, d.qpos)
@@ -656,7 +720,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         wp.copy(d.qacc_warmstart, self._warmstart_saved)
         if self._na > 0:
             wp.copy(d.act, self._act_saved)
-        self._mjw_eval(self._dt_half)
+        if self._shared_fwd:
+            self._mjw_eval_suffix(self._dt_half)
+        else:
+            self._mjw_eval(self._dt_half)
         self._mjw_eval(self._dt_half)
 
     def _estimate_error(self) -> None:
