@@ -616,7 +616,36 @@ class SolverMuJoCo(SolverBase):
             joint_path = str(path_targets[path_idx_int])
             try:
                 joint_idx = builder.joint_label.index(joint_path)
+                # [INVESTIGATION LOGGER — additive only, no logic change; gated by NEWTON_DEBUG_RESOLVE]
+                if os.environ.get("NEWTON_DEBUG_RESOLVE") and not getattr(SolverMuJoCo, "_dbg_tendon_ok", False):
+                    SolverMuJoCo._dbg_tendon_ok = True
+                    print(
+                        "[RESOLVE-DEBUG][tendon] SUCCESS exact-string lookup\n"
+                        f"  lookup_joint_path = {joint_path!r}\n"
+                        f"  joint_label_count = {len(builder.joint_label)}",
+                        flush=True,
+                    )
+                # [END INVESTIGATION LOGGER]
             except ValueError:
+                # [INVESTIGATION LOGGER — additive only, no logic change; gated by NEWTON_DEBUG_RESOLVE]
+                _n = getattr(SolverMuJoCo, "_dbg_tendon_fail_n", 0)
+                if os.environ.get("NEWTON_DEBUG_RESOLVE") and _n < 4:
+                    SolverMuJoCo._dbg_tendon_fail_n = _n + 1
+                    import traceback as _tb  # noqa: PLC0415
+
+                    _caller = _tb.extract_stack(limit=2)[0]
+                    _leaf = joint_path.rsplit("/", 1)[-1]
+                    _cands = [_l for _l in builder.joint_label if _l.rsplit("/", 1)[-1] == _leaf]
+                    print(
+                        f"[RESOLVE-DEBUG][tendon] FAILED #{_n} via solver_mujoco.py:{_caller.lineno}\n"
+                        f"  tendon_prim       = {prim.GetPath()}\n"
+                        f"  lookup_joint_path = {joint_path!r}\n"
+                        f"  joint_label_count = {len(builder.joint_label)}\n"
+                        f"  same-leaf '{_leaf}' candidates [{len(_cands)}]: {_cands[:8]}\n"
+                        f"  joint_label[:4]   = {builder.joint_label[:4]}",
+                        flush=True,
+                    )
+                # [END INVESTIGATION LOGGER]
                 warnings.warn(
                     f"MjcTendon {prim.GetPath()} references unknown joint path {joint_path}. Skipping.",
                     stacklevel=2,
@@ -2882,6 +2911,19 @@ class SolverMuJoCo(SolverBase):
         joint_dof_label_arr = getattr(mujoco_attrs, "joint_dof_label", None)
         tendon_label_arr = getattr(mujoco_attrs, "tendon_label", None)
 
+        # Dedup guard: when a joint is already driven by a JOINT_TARGET (PD) actuator built from
+        # joint_target_ke/kd (e.g. Isaac Lab control), a USD-native CTRL_DIRECT actuator on the
+        # same joint is left undriven (``control.mujoco.ctrl`` stays 0). Being an affine position
+        # actuator, it then acts as a spring-to-zero that fights the PD controller and
+        # under-actuates the joint. Skip such a redundant native joint actuator.
+        joint_target_mode_arr = None
+        _jt_mode_attr = getattr(model, "joint_target_mode", None)
+        if _jt_mode_attr is not None:
+            try:
+                joint_target_mode_arr = _jt_mode_attr.numpy()
+            except Exception:
+                joint_target_mode_arr = None
+
         # Build reverse lookup from shape label (prim path) to site name
         # so we can resolve actuator target labels that reference sites.
         site_label_to_name: dict[str, str] = {}
@@ -2968,6 +3010,31 @@ class SolverMuJoCo(SolverBase):
                     trntype = resolved_type
                     target_idx = resolved_idx
             if target_idx < 0:
+                # [INVESTIGATION LOGGER — additive only, no logic change; gated by NEWTON_DEBUG_RESOLVE]
+                if os.environ.get("NEWTON_DEBUG_RESOLVE") and not getattr(SolverMuJoCo, "_dbg_actuator_done", False):
+                    SolverMuJoCo._dbg_actuator_done = True
+                    _jlbl = joint_dof_label_arr if isinstance(joint_dof_label_arr, list) else []
+                    _leaf = target_label.rsplit("/", 1)[-1] if target_label else ""
+                    _cands = [_l for _l in _jlbl if _l.rsplit("/", 1)[-1] == _leaf]
+                    _aw = None
+                    if actuator_world_arr is not None:
+                        try:
+                            _aw = int(actuator_world_arr[mujoco_act_idx])
+                        except Exception:
+                            _aw = "ERR"
+                    print(
+                        "[RESOLVE-DEBUG][actuator] FAILED target resolution (resolve_target_from_label)\n"
+                        f"  mujoco_act_idx       = {mujoco_act_idx}\n"
+                        f"  target_label         = {target_label!r}\n"
+                        f"  template_world       = {template_world}\n"
+                        f"  actuator_world[idx]  = {_aw}   (actuator_world_arr is None: {actuator_world_arr is None})\n"
+                        f"  joint_dof_label_count= {len(_jlbl)}\n"
+                        f"  same-leaf '{_leaf}' candidates [{len(_cands)}]: {_cands[:8]}\n"
+                        f"  joint_dof_label[:6]  = {_jlbl[:6]}\n"
+                        f"  joint_dof_label[-4:] = {_jlbl[-4:]}",
+                        flush=True,
+                    )
+                # [END INVESTIGATION LOGGER]
                 warnings.warn(
                     f"MuJoCo actuator {mujoco_act_idx} has unresolved target '{target_label}'. Skipping actuator.",
                     stacklevel=2,
@@ -2983,6 +3050,16 @@ class SolverMuJoCo(SolverBase):
                 if dof_idx < 0 or dof_idx >= dofs_per_world:
                     if wp.config.log_level <= wp.LOG_DEBUG:
                         print(f"Warning: MuJoCo actuator {mujoco_act_idx} has invalid DOF target {dof_idx}")
+                    continue
+                # Skip this native actuator if the DOF is already driven by a JOINT_TARGET (PD)
+                # actuator (otherwise it would be an undriven spring-to-zero fighting the PD drive).
+                # Opt-out (NEWTON_KEEP_DUPLICATE_ACTUATORS=1) restores the old behavior for A/B.
+                if (
+                    os.environ.get("NEWTON_KEEP_DUPLICATE_ACTUATORS") != "1"
+                    and joint_target_mode_arr is not None
+                    and dof_idx < len(joint_target_mode_arr)
+                    and int(joint_target_mode_arr[dof_idx]) != int(JointTargetMode.NONE)
+                ):
                     continue
                 mjc_joint_idx = dof_to_mjc_joint[dof_idx]
                 if mjc_joint_idx < 0 or mjc_joint_idx >= len(mjc_joint_names):
@@ -6042,6 +6119,63 @@ class SolverMuJoCo(SolverBase):
             self.mjc_actuator_to_newton_ball_jnt = None
 
         self.mj_model = spec.compile()
+        # [INVESTIGATION LOGGER — additive only, no logic change; gated by NEWTON_DEBUG_RESOLVE]
+        if os.environ.get("NEWTON_DEBUG_RESOLVE"):
+            _m = self.mj_model
+            print(
+                "[RESOLVE-DEBUG][final-model] compiled MuJoCo template model counts\n"
+                f"  njnt(joints)   = {_m.njnt}\n"
+                f"  nv(dofs)       = {_m.nv}\n"
+                f"  nu(actuators)  = {_m.nu}\n"
+                f"  ntendon        = {_m.ntendon}\n"
+                f"  neq(equality)  = {_m.neq}\n"
+                f"  nbody          = {_m.nbody}",
+                flush=True,
+            )
+            try:
+                _anames = [mujoco.mj_id2name(_m, mujoco.mjtObj.mjOBJ_ACTUATOR, _i) for _i in range(_m.nu)]
+                _tnames = [mujoco.mj_id2name(_m, mujoco.mjtObj.mjOBJ_TENDON, _i) for _i in range(_m.ntendon)]
+                _dups = len(_anames) - len(set(_anames))
+                _trnids = [int(_m.actuator_trnid[_i, 0]) for _i in range(_m.nu)]
+                _jnames = [mujoco.mj_id2name(_m, mujoco.mjtObj.mjOBJ_JOINT, _j) for _j in _trnids]
+                from collections import Counter as _C  # noqa: PLC0415
+
+                _per_joint = _C(_trnids)
+                print(
+                    f"  tendon_names   ({len(_tnames)}): {_tnames}\n"
+                    f"  actuator target joint-id list: {_trnids}\n"
+                    f"  actuator target joint-names:   {_jnames}\n"
+                    f"  unique target joints = {len(set(_trnids))} (nu={_m.nu}); max actuators-on-one-joint = {max(_per_joint.values())}\n"
+                    f"  per-target-joint actuator counts: {dict(_per_joint)}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"  [name dump failed: {_e!r}]", flush=True)
+            # DECISIVE: do the 4 fixed tendons actually couple joints, or are they empty?
+            try:
+                for _ti in range(_m.ntendon):
+                    _adr = int(_m.tendon_adr[_ti])
+                    _num = int(_m.tendon_num[_ti])
+                    _wobj = [int(_m.wrap_objid[_adr + _k]) for _k in range(_num)]
+                    _wprm = [float(_m.wrap_prm[_adr + _k]) for _k in range(_num)]
+                    _wjn = [mujoco.mj_id2name(_m, mujoco.mjtObj.mjOBJ_JOINT, _j) for _j in _wobj]
+                    _tn = mujoco.mj_id2name(_m, mujoco.mjtObj.mjOBJ_TENDON, _ti)
+                    print(
+                        f"  tendon[{_ti}] {_tn}: num_wrap={_num} coupled_joints={_wjn} coefs={_wprm}",
+                        flush=True,
+                    )
+            except Exception as _e:
+                print(f"  [tendon wrap dump failed: {_e!r}]", flush=True)
+            _xml_out = os.environ.get("NEWTON_DEBUG_MJCF")
+            if _xml_out:
+                try:
+                    _xml = spec.to_xml()
+                    with open(_xml_out, "w") as _f:
+                        _f.write(_xml)
+                    print(f"  [MJCF written to {_xml_out} ({len(_xml)} bytes)]", flush=True)
+                except Exception as _e:
+                    print(f"  [MJCF export failed: {_e!r}]", flush=True)
+        # [END INVESTIGATION LOGGER]
         self.mj_data = mujoco.MjData(self.mj_model)
 
         # Build MuJoCo qpos/qvel start index arrays for coordinate conversion kernels.
