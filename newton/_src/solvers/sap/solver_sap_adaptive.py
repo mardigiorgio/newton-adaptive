@@ -59,17 +59,17 @@ import os
 
 import numpy as np
 import warp as wp
-
-import newton
-
-# sys.path is configured by the package __init__ before this module is imported.
-from sim.solver_sap import SolverSAP  # noqa: E402
-from sim.sap_runtime import (  # noqa: E402
+from sim.sap_runtime import (
     sap_contacts_from_newton,
     sap_control_from_newton,
     sap_model_from_newton,
     sap_state_from_newton,
 )
+
+# sys.path is configured by the package __init__ before this module is imported.
+from sim.solver_sap import SolverSAP
+
+import newton
 
 # ---- step-evolution mode codes (passed to _adapt_dt as a uniform kernel arg) ----
 _MODE_FIXED = wp.constant(0)
@@ -88,8 +88,8 @@ _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
 # ============================================================================
 @wp.kernel
 def _open_frame(
-    sim_time: wp.array(dtype=wp.float32),
-    next_time: wp.array(dtype=wp.float32),
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
     dt_outer: float,
 ):
     """Rebase the per-world clocks (Fix B) and set the new boundary to ``dt_outer``.
@@ -109,12 +109,12 @@ def _open_frame(
 @wp.kernel
 def _seed_dt(
     mode: int,
-    ideal_dt: wp.array(dtype=wp.float32),
+    ideal_dt: wp.array[wp.float32],
     dt_fixed: float,
     dt_min: float,
     dt_max: float,
-    dt: wp.array(dtype=wp.float32),
-    dt_half: wp.array(dtype=wp.float32),
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
 ):
     """Seed this frame's per-world working dt.
 
@@ -134,10 +134,10 @@ def _seed_dt(
 
 @wp.kernel
 def _clamp_dt_to_boundary(
-    dt: wp.array(dtype=wp.float32),
-    dt_half: wp.array(dtype=wp.float32),
-    sim_time: wp.array(dtype=wp.float32),
-    next_time: wp.array(dtype=wp.float32),
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
 ):
     """Clamp dt so no world oversteps its boundary; worlds at/past it get dt=0 (no-op)."""
     i = wp.tid()
@@ -152,31 +152,38 @@ def _clamp_dt_to_boundary(
 
 @wp.kernel
 def _inf_norm_state_error_kernel(
-    joint_q_full: wp.array(dtype=wp.float32),
-    joint_q_double: wp.array(dtype=wp.float32),
-    state_scale: wp.array2d(dtype=wp.float32),
+    joint_q_full: wp.array[wp.float32],
+    joint_q_double: wp.array[wp.float32],
+    state_scale: wp.array2d[wp.float32],
     coords_per_world: int,
-    error_out: wp.array(dtype=wp.float32),
+    error_out: wp.array[wp.float32],
 ):
     """Per-world step-doubling accuracy metric (Kurtz & Castro, Sec. V-E)::
 
         e = || S (q_double - q_full) ||_inf
 
     Position-only inf-norm of the doubled-half-step vs. full-step ``q``, scaled by the
-    diagonal ``S`` (here identity). NaN/inf collapse to a large sentinel so the
-    controller treats them as divergence. In ``fixed`` mode this is called with
-    ``joint_q_full == joint_q_double`` so ``e == 0`` for finite states (always accept)
-    and ``NaN`` propagates for non-finite ones (the fixed-mode NaN guard).
+    diagonal ``S`` (here identity). NaN is flagged PER COMPONENT: ``wp.max`` is fmaxf
+    on CUDA, which returns the non-NaN operand, so a NaN difference would otherwise be
+    silently dropped from the running max and a non-finite world would report error 0
+    and be committed (the same bug was found and fixed in SolverMuJoCoAdaptive's error
+    kernel). NaN/inf collapse to a large sentinel so the controller treats them as
+    divergence -- including in ``fixed`` mode, where ``joint_q_full == joint_q_double``
+    gives ``e == 0`` for finite states (always accept) and the sentinel for NaN ones.
     """
     world = wp.tid()
     q_start = world * coords_per_world
 
     max_err = float(0.0)
+    has_nan = int(0)
     for i in range(coords_per_world):
         d = wp.abs(joint_q_double[q_start + i] - joint_q_full[q_start + i])
-        max_err = wp.max(max_err, state_scale[world, i] * d)
+        if wp.isnan(d):
+            has_nan = 1
+        else:
+            max_err = wp.max(max_err, state_scale[world, i] * d)
 
-    if wp.isnan(max_err) or wp.isinf(max_err):
+    if has_nan != 0 or wp.isnan(max_err) or wp.isinf(max_err):
         max_err = float(1.0e10)
 
     error_out[world] = max_err
@@ -184,9 +191,9 @@ def _inf_norm_state_error_kernel(
 
 @wp.kernel
 def _average_velocity_guess_f64(
-    a: wp.array(dtype=wp.float64),
-    b: wp.array(dtype=wp.float64),
-    out: wp.array(dtype=wp.float64),
+    a: wp.array[wp.float64],
+    b: wp.array[wp.float64],
+    out: wp.array[wp.float64],
 ):
     i = wp.tid()
     out[i] = wp.float64(0.5) * (a[i] + b[i])
@@ -194,29 +201,29 @@ def _average_velocity_guess_f64(
 
 @wp.kernel
 def _average_velocity_guess_f32(
-    a: wp.array(dtype=wp.float32),
-    b: wp.array(dtype=wp.float32),
-    out: wp.array(dtype=wp.float32),
+    a: wp.array[wp.float32],
+    b: wp.array[wp.float32],
+    out: wp.array[wp.float32],
 ):
     i = wp.tid()
     out[i] = wp.float32(0.5) * (a[i] + b[i])
 
 
 @wp.kernel
-def _set_scalar_i32(value: wp.array(dtype=int), new_value: int):
+def _set_scalar_i32(value: wp.array[int], new_value: int):
     value[0] = new_value
 
 
 @wp.kernel
-def _reset_solve_convergence(ok: wp.array(dtype=int)):
+def _reset_solve_convergence(ok: wp.array[int]):
     i = wp.tid()
     ok[i] = 1
 
 
 @wp.kernel
 def _accumulate_solve_convergence(
-    converged_env: wp.array(dtype=int),
-    ok: wp.array(dtype=int),
+    converged_env: wp.array[int],
+    ok: wp.array[int],
 ):
     i = wp.tid()
     if converged_env[i] == 0:
@@ -225,8 +232,8 @@ def _accumulate_solve_convergence(
 
 @wp.kernel
 def _apply_solve_convergence_to_error(
-    ok: wp.array(dtype=int),
-    err: wp.array(dtype=wp.float32),
+    ok: wp.array[int],
+    err: wp.array[wp.float32],
     divergence_threshold: float,
 ):
     i = wp.tid()
@@ -236,17 +243,17 @@ def _apply_solve_convergence_to_error(
 
 @wp.kernel
 def _adapt_dt(
-    err: wp.array(dtype=wp.float32),
-    sim_time: wp.array(dtype=wp.float32),
-    next_time: wp.array(dtype=wp.float32),
-    dt: wp.array(dtype=wp.float32),
-    dt_half: wp.array(dtype=wp.float32),
-    ideal_dt: wp.array(dtype=wp.float32),
-    diverged: wp.array(dtype=wp.bool),
-    accept: wp.array(dtype=wp.bool),
-    accepted_error: wp.array(dtype=wp.float32),
-    substeps_frame: wp.array(dtype=wp.int32),
-    cum_accepted: wp.array(dtype=wp.int32),
+    err: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
+    ideal_dt: wp.array[wp.float32],
+    diverged: wp.array[wp.bool],
+    accept: wp.array[wp.bool],
+    accepted_error: wp.array[wp.float32],
+    substeps_frame: wp.array[wp.int32],
+    cum_accepted: wp.array[wp.int32],
     mode: int,
     tol: float,
     dt_min: float,
@@ -347,10 +354,10 @@ def _adapt_dt(
 
 @wp.kernel
 def _commit_float(
-    src: wp.array(dtype=wp.float32),
-    accept: wp.array(dtype=wp.bool),
+    src: wp.array[wp.float32],
+    accept: wp.array[wp.bool],
     stride: int,
-    state: wp.array(dtype=wp.float32),
+    state: wp.array[wp.float32],
 ):
     """Commit the stepped result into the working state for accepted worlds; hold otherwise."""
     i = wp.tid()
@@ -360,10 +367,10 @@ def _commit_float(
 
 @wp.kernel
 def _commit_transform(
-    src: wp.array(dtype=wp.transform),
-    accept: wp.array(dtype=wp.bool),
+    src: wp.array[wp.transform],
+    accept: wp.array[wp.bool],
     stride: int,
-    state: wp.array(dtype=wp.transform),
+    state: wp.array[wp.transform],
 ):
     """Commit body poses for accepted worlds; hold otherwise."""
     i = wp.tid()
@@ -373,10 +380,10 @@ def _commit_transform(
 
 @wp.kernel
 def _commit_spatial_vector(
-    src: wp.array(dtype=wp.spatial_vector),
-    accept: wp.array(dtype=wp.bool),
+    src: wp.array[wp.spatial_vector],
+    accept: wp.array[wp.bool],
     stride: int,
-    state: wp.array(dtype=wp.spatial_vector),
+    state: wp.array[wp.spatial_vector],
 ):
     """Commit body velocities for accepted worlds; hold otherwise."""
     i = wp.tid()
@@ -386,15 +393,15 @@ def _commit_spatial_vector(
 
 @wp.kernel
 def _reset_worlds(
-    mask: wp.array(dtype=wp.bool),
+    mask: wp.array[wp.bool],
     dt_init: float,
-    ideal_dt: wp.array(dtype=wp.float32),
-    dt: wp.array(dtype=wp.float32),
-    dt_half: wp.array(dtype=wp.float32),
-    sim_time: wp.array(dtype=wp.float32),
-    next_time: wp.array(dtype=wp.float32),
-    diverged: wp.array(dtype=wp.bool),
-    accepted: wp.array(dtype=wp.bool),
+    ideal_dt: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    diverged: wp.array[wp.bool],
+    accepted: wp.array[wp.bool],
 ):
     """Restore the per-world controller state to construction defaults for masked worlds.
 
@@ -415,10 +422,10 @@ def _reset_worlds(
 
 @wp.kernel
 def _mark_unfinished(
-    sim_time: wp.array(dtype=wp.float32),
-    next_time: wp.array(dtype=wp.float32),
-    solve_ok: wp.array(dtype=int),
-    flag: wp.array(dtype=wp.int32),
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    solve_ok: wp.array[int],
+    flag: wp.array[wp.int32],
 ):
     """Set ``flag[0]`` to the loop status: 0 done, 1 unfinished, 2 solve failed.
 
@@ -755,20 +762,33 @@ class SolverSAPAdaptive:
 
         # Drake CENIC warm-starts: full from v_t.
         self._copy_state_velocity_to_sap_guess(self._state_cur, self._vt)
-        self.substep(self._state_cur, self._scratch_full, self._sap_control, self._sap_contacts, self._dt,
-                     guess=self._vt)
+        self.substep(
+            self._state_cur, self._scratch_full, self._sap_control, self._sap_contacts, self._dt, guess=self._vt
+        )
         if self._do_doubling:
             # half-1 from (v_t + v_full) / 2, reusing the q_t contact model.
             wp.copy(self._vfull, self._sap.contact_solve.v_flat)
             self._average_velocity_guess(self._vt, self._vfull, self._vhalf1)
-            self.substep(self._state_cur, self._scratch_mid, self._sap_control, self._sap_contacts, self._dt_half,
-                         guess=self._vhalf1)
+            self.substep(
+                self._state_cur,
+                self._scratch_mid,
+                self._sap_control,
+                self._sap_contacts,
+                self._dt_half,
+                guess=self._vhalf1,
+            )
 
             # half-2 starts from q_{t+h/2}, so rebuild contacts at the midpoint state and
             # warm-start from v_full.
             self._collide_from(self._scratch_mid)
-            self.substep(self._scratch_mid, self._scratch_double, self._sap_control, self._sap_contacts,
-                         self._dt_half, guess=self._vfull)
+            self.substep(
+                self._scratch_mid,
+                self._scratch_double,
+                self._sap_control,
+                self._sap_contacts,
+                self._dt_half,
+                guess=self._vfull,
+            )
 
         wp.launch(
             _inf_norm_state_error_kernel,
@@ -930,8 +950,15 @@ class SolverSAPAdaptive:
         wp.launch(
             _seed_dt,
             dim=n,
-            inputs=[self._mode_code, self._ideal_dt, self._dt_inner_init, self._dt_min, eff_dt_max,
-                    self._dt, self._dt_half],
+            inputs=[
+                self._mode_code,
+                self._ideal_dt,
+                self._dt_inner_init,
+                self._dt_min,
+                eff_dt_max,
+                self._dt,
+                self._dt_half,
+            ],
             device=device,
         )
         self._substeps_frame.zero_()

@@ -150,12 +150,14 @@ def _calc_adjusted_step(
 ):
     """Per-world Drake CalcAdjustedStepSize for step doubling (err_order=2).
 
-    Writes three decisions per world:
+    Writes two decisions per world:
       * ``accepted`` -- advance ``sim_time`` (progress; avoids a boundary-loop hang).
       * ``commit``   -- write the doubled state. ``False`` => hold the last good state
         (used to refuse a non-finite step instead of poisoning the batch with NaN).
-      * ``diverged`` -- latch: the world hit the ``dt_min`` floor still non-finite, so it
-        cannot be salvaged by subdivision; the env should reset it.
+
+    ``diverged`` is accepted for signature compatibility but NEVER WRITTEN: the
+    dt_min-floor latch was removed (see the comment in the floor branch below), so
+    the array stays all-False.
 
     The error kernel emits a large sentinel (``1e10``) for NaN/inf states, so
     ``e >= divergence_threshold`` (or a literal NaN/inf) means "diverged".
@@ -427,9 +429,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         solver = newton.solvers.SolverMuJoCoAdaptive(model, tol=1e-3)
         state_0, state_1 = model.state(), model.state()
 
+        t = 0.0
         while viewer.is_running():
             state_0, state_1 = solver.step_dt(DT, state_0, state_1, control, apply_forces=viewer.apply_forces)
-            viewer.render(state_0, solver.sim_time.numpy().min())
+            t += DT  # solver.sim_time is REBASED per boundary (~[0, DT]); accumulate absolute time here
+            viewer.render(state_0, t)
     """
 
     def __init__(
@@ -1132,10 +1136,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     # =====================================================================
     @property
     def diverged(self) -> wp.array:
-        """Per-world divergence latch from the most recent step, shape ``[world_count]``, bool, on device.
+        """Per-world divergence latch, shape ``[world_count]``, bool, on device.
 
-        ``True`` for a world that hit the ``dt_min`` floor with a non-finite state: the solver
-        held its last good state instead of writing NaN. The env should reset these worlds.
+        CURRENTLY A DORMANT NO-OP: the floor latch was removed from
+        :func:`_calc_adjusted_step` (a non-finite world at the ``dt_min`` floor now
+        commits through the ``e > tol`` path like any can't-meet-tol world), so this
+        array is never set and stays all-False. Kept for API compatibility.
         """
         return self._diverged
 

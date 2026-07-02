@@ -15,10 +15,10 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
+import matplotlib  # noqa: TID253
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 
 from scripts.bench.infra import MeasureResult, measure, power_law_exponent
 from scripts.bench.plotting import STYLES, SeriesData, log_log_plot, save_fig
@@ -70,7 +70,7 @@ def _measure_mode(mode: str, n: int, steps: int, warmup: int, trials: int = 1) -
             return measure(build_model_randomized, step_fn, n, steps, warmup)
 
         elif mode == "single_iter":
-            from scripts.bench.benchmarks._single_iter import measure_single_iter
+            from scripts.bench.benchmarks._single_iter import measure_single_iter  # noqa: PLC0415
 
             return measure_single_iter(n, steps, warmup)
 
@@ -92,9 +92,11 @@ def _collect_error_trace(steps: int) -> dict:
     s0, s1, ctrl = model.state(), model.state(), model.control()
 
     sim_times, errors, dts = [], [], []
+    t = 0.0  # solver.sim_time is rebased per boundary; accumulate absolute time here
     for _ in range(steps):
         s0, s1 = solver.step_dt(DT_OUTER, s0, s1, ctrl)
-        sim_times.append(float(solver.sim_time.numpy()[0]))
+        t += DT_OUTER
+        sim_times.append(t)
         errors.append(float(solver.last_error.numpy()[0]))
         dts.append(float(solver.dt.numpy()[0]))
 
@@ -193,9 +195,9 @@ def plot(data: dict, out_dir: Path) -> None:
             continue
         md = modes_data[mode]
         k_means = md["k_means"]
-        norm_medians = [m / k * 1e3 for m, k in zip(md["medians"], k_means)]
-        norm_p25 = [m / k * 1e3 for m, k in zip(md["p25"], k_means)]
-        norm_p75 = [m / k * 1e3 for m, k in zip(md["p75"], k_means)]
+        norm_medians = [m / k * 1e3 for m, k in zip(md["medians"], k_means, strict=True)]
+        norm_p25 = [m / k * 1e3 for m, k in zip(md["p25"], k_means, strict=True)]
+        norm_p75 = [m / k * 1e3 for m, k in zip(md["p75"], k_means, strict=True)]
         norm_series[mode] = SeriesData(
             medians=norm_medians,
             p25=norm_p25,
@@ -277,7 +279,7 @@ def plot(data: dict, out_dir: Path) -> None:
         if mode not in modes_data:
             continue
         md = modes_data[mode]
-        amort = [m / n_val * 1e3 for m, n_val in zip(md["medians"], ns)]
+        amort = [m / n_val * 1e3 for m, n_val in zip(md["medians"], ns, strict=True)]
         amort_series[mode] = SeriesData(medians=amort)
     log_log_plot(
         ax,

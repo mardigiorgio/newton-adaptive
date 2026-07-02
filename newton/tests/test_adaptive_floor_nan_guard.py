@@ -1,15 +1,16 @@
-"""Fix A: floor NaN-guard for the adaptive step controller.
+"""Contract tests for the adaptive step controller (`_calc_adjusted_step`).
 
-The Drake step-doubling controller (`_calc_adjusted_step`) must never *commit* a
-non-finite state into the simulation. The error kernel maps a diverged/NaN state
-to a large sentinel; at the ``dt_min`` floor the controller previously force-accepted
-that world to avoid a boundary-loop hang -- writing the NaN state straight into the
-batch and aborting training via rsl_rl's check_nan.
-
-The fixed contract separates two booleans:
+Current contract (the dt_min-floor divergence latch was REMOVED by design):
   * ``accepted`` -- advance ``sim_time`` (progress / no hang)
   * ``commit``   -- write the new (doubled) state; FALSE => hold the last good state
-plus a ``diverged`` latch the env reads to reset the world.
+  * ``diverged`` -- accepted for signature compatibility but never written (all-False)
+
+Above the floor, a diverged (sentinel-error) world REJECTS and retries smaller --
+that is the NaN containment path (the error kernel flags NaN per component; see the
+fmaxf note there). AT the floor, any world with e > tol -- including a sentinel one --
+accepts AND commits: dt_min (~1e-6 s) sits ~1000x below the stable fixed step, so a
+state that is non-finite there would have been non-finite for the fixed solver too;
+the old hold-last-good latch was dormant in that regime and was removed.
 
 This is a pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
 """
@@ -17,9 +18,9 @@ This is a pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
 import numpy as np
 import warp as wp
 
-wp.init()
-
 from newton._src.solvers.mujoco.solver_mujoco_adaptive import _calc_adjusted_step
+
+wp.init()
 
 DEV = "cpu"
 TOL = 1.0e-3
@@ -50,12 +51,14 @@ def _run(err_vals, dt_vals):
     )
 
 
-def test_floor_diverged_is_held_not_committed():
-    """At the floor with a diverged (sentinel) error: advance but DO NOT commit, and flag diverged."""
-    accepted, commit, diverged, _ = _run([SENTINEL], [DT_MIN])
+def test_floor_diverged_commits_progress_without_latch():
+    """At the floor with a diverged (sentinel) error: accept AND commit through the
+    e > tol path, and do NOT set the (removed) diverged latch."""
+    accepted, commit, diverged, ideal = _run([SENTINEL], [DT_MIN])
     assert bool(accepted[0]) is True, "must advance to avoid a boundary-loop hang"
-    assert bool(commit[0]) is False, "must NOT write the NaN state (hold last good)"
-    assert bool(diverged[0]) is True, "must flag the world for env reset"
+    assert bool(commit[0]) is True, "floor worlds commit like any can't-meet-tol world"
+    assert bool(diverged[0]) is False, "latch was removed; must stay all-False"
+    assert abs(float(ideal[0]) - DT_MIN) < 1e-12, "floor step pins ideal_dt to dt_min"
 
 
 def test_floor_finite_over_tol_commits_progress():
@@ -92,7 +95,7 @@ if __name__ == "__main__":
         try:
             fn()
             print(f"PASS {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             failed += 1
             print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")

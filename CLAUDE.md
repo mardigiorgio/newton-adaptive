@@ -1,6 +1,6 @@
 ## CENIC simulation loop pattern
 
-All scripts using `SolverMuJoCoCENIC` must use `step_dt` — never reimplement the inner loop manually.
+All scripts using `SolverMuJoCoAdaptive` (the adaptive step-doubling solver; true CENIC = adaptive + convex ICF contact, not yet built) must use `step_dt` — never reimplement the inner loop manually.
 
 ```python
 DT = 0.002  # 500 Hz — default control and render period [s]
@@ -35,9 +35,10 @@ while True:
 
 Correct — use `step_dt`, which handles the inner loop internally:
 ```python
-# step_dt launches kernels directly via wp.launch() per iteration and checks a
-# 4-byte boundary flag via .numpy() -- one int32 per iteration (K~3).
-# Do not reimplement this loop manually.
+# step_dt replays a captured per-iteration CUDA graph and checks a 4-byte
+# boundary flag via .numpy() -- one int32 per iteration. With
+# NEWTON_MJ_ADAPTIVE_CONDITIONAL=1 the whole loop is one conditional graph
+# node (zero host syncs). Do not reimplement this loop manually.
 state_0, state_1 = solver.step_dt(DT, state_0, state_1, control)
 ```
 
@@ -59,15 +60,15 @@ Any `.numpy()` inside `while True: … solver.step(…)` must be rejected in rev
 
 ## dt parameter rules
 
-`dt_min` must always be strictly less than `dt_init`. If `dt_min >= dt_init`, any rejected step clamps dt *upward*, which is physically wrong and causes oscillation.
+`dt_inner_min` must always be strictly less than `dt_inner_init`. If `dt_inner_min >= dt_inner_init`, any rejected step clamps dt *upward*, which is physically wrong and causes oscillation.
 
 ```python
-# Correct relationship:  dt_min < dt_init <= dt_max
-solver = SolverMuJoCoCENIC(
+# Correct relationship:  dt_inner_min < dt_inner_init <= dt_inner_max
+solver = SolverMuJoCoAdaptive(
     model,
-    dt_init=1e-3,
-    dt_min=5e-4,   # floor — must be < dt_init
-    dt_max=0.008,
+    dt_inner_init=1e-3,
+    dt_inner_min=5e-4,   # floor — must be < dt_inner_init
+    dt_inner_max=0.008,
 )
 ```
 
@@ -77,7 +78,7 @@ solver = SolverMuJoCoCENIC(
 
 `viewer.render(state, sim_time)` drives the camera and UI from **simulation time**, not wall clock. This prevents camera jumps during dense contact substeps where many physics steps fire between renders. No additional timing logic is needed in scripts — `render()` handles it.
 
-Multi-world scripts (`--num-worlds N`) produce diverging trajectories even from identical initial conditions. This is expected: GPU floating-point reductions are non-associative, causing per-world RMS error estimates to differ by ULP, which eventually leads to different accept/reject decisions and permanently diverging trajectories. Use `--num-worlds 1` for visualization; use `--headless` for data collection.
+Multi-world scripts (`--num-worlds N`) produce diverging trajectories even from identical initial conditions. This is expected: GPU floating-point reductions are non-associative, causing per-world inf-norm error estimates to differ by ULP, which eventually leads to different accept/reject decisions and permanently diverging trajectories. Use `--num-worlds 1` for visualization; use `--headless` for data collection.
 
 ---
 

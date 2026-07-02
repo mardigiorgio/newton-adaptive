@@ -19,12 +19,11 @@ from pathlib import Path
 
 import warp as wp
 
-
 BENCHMARKS_PKG = "scripts.bench.benchmarks"
 RESULTS_ROOT = Path("scripts/bench/results")
 
 # Benchmark modules in execution order.
-BENCHMARK_NAMES = ["scaling", "components", "accuracy", "timeline", "initial_conditions"]
+BENCHMARK_NAMES = ["scaling", "accuracy", "timeline", "initial_conditions"]
 
 
 def _git_short_hash() -> str:
@@ -32,7 +31,9 @@ def _git_short_hash() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short=7", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -43,7 +44,9 @@ def _git_branch() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -71,12 +74,12 @@ def _run_benchmark_subprocess(
     cmd = [sys.executable, "-m", f"{BENCHMARKS_PKG}.{bench_name}"]
     cmd.extend(["--out-dir", str(out_dir)])
 
-    if "ns" in args and bench_name in ("scaling", "components", "initial_conditions"):
+    if "ns" in args and bench_name in ("scaling", "initial_conditions"):
         cmd.append("--ns")
         cmd.extend(str(n) for n in args["ns"])
-    if "steps" in args and bench_name in ("scaling", "components", "initial_conditions"):
+    if "steps" in args and bench_name in ("scaling", "initial_conditions"):
         cmd.extend(["--steps", str(args["steps"])])
-    if "warmup" in args and bench_name in ("scaling", "components", "initial_conditions"):
+    if "warmup" in args and bench_name in ("scaling", "initial_conditions"):
         cmd.extend(["--warmup", str(args["warmup"])])
     if "trials" in args and bench_name in ("accuracy", "initial_conditions"):
         cmd.extend(["--trials", str(args["trials"])])
@@ -94,6 +97,7 @@ def _run_benchmark_subprocess(
     t0 = time.perf_counter()
     result = subprocess.run(
         cmd,
+        check=False,  # returncode handled below
         capture_output=False,  # Stream output to terminal.
         text=True,
         timeout=1800,  # 30 min max.

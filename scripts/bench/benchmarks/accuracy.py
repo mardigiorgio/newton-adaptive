@@ -3,8 +3,9 @@
 
 """Accuracy benchmark: wall time vs tolerance, error traces, dt traces.
 
-Runs a work-precision sweep for both ``per_world`` and ``global`` dt modes so
-the value of per-world adaptivity can be read directly off the plot.
+Runs a work-precision sweep for the ``per_world`` dt mode (the "global" mode was
+removed from the solver: a shared worst-case dt couples worlds, breaking the
+per-world Markov property).
 
 Each measurement runs in a subprocess for GPU state isolation.
 
@@ -21,19 +22,19 @@ import sys
 import textwrap
 from pathlib import Path
 
-import matplotlib
+import matplotlib  # noqa: TID253
 import numpy as np
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 
 from scripts.bench.plotting import save_fig
 from scripts.scenes.contact_objects import DT_INNER_MIN, DT_OUTER
 
-DT_MODES = ("per_world", "global")
+# "global" removed: dt_mode="global" no longer exists in the solver.
+DT_MODES = ("per_world",)
 DT_MODE_STYLE = {
     "per_world": {"color": "tab:blue", "label": "per-world dt"},
-    "global": {"color": "tab:orange", "label": "global (worst-case) dt"},
 }
 
 
@@ -89,9 +90,11 @@ def _measure_traces(tol: float, n_worlds: int, sim_duration: float) -> dict:
         s0, s1 = model.state(), model.state()
         ctrl = model.control()
         sim_times, errors, dts = [], [], []
+        t = 0.0  # solver.sim_time is rebased per boundary; accumulate absolute time here
         for _ in range(round({sim_duration} / DT_OUTER)):
             s0, s1 = solver.step_dt(DT_OUTER, s0, s1, ctrl)
-            sim_times.append(float(solver.sim_time.numpy()[0]))
+            t += DT_OUTER
+            sim_times.append(t)
             errors.append(float(solver.last_error.numpy()[0]))
             dts.append(float(solver.dt.numpy()[0]))
         print(json.dumps({{"t": sim_times, "e": errors, "d": dts}}))
@@ -110,8 +113,7 @@ def run(
 
     Args:
         tols: Tolerances to sweep.  Defaults to a log-spaced grid.
-        n_worlds: World count for the wall-time sweep.  Must be > 1 for the
-            per-world vs global comparison to be meaningful.
+        n_worlds: World count for the wall-time sweep.
         sim_duration: Simulated seconds per measurement.
         trials: Number of independent subprocess measurements per point
             (median-reduced).

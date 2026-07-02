@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""dt-mode comparison: per-world vs global adaptive vs fixed-step.
+"""dt-mode comparison: per-world adaptive vs fixed-step.
+
+(The "global" adaptive mode was removed from the solver -- a shared worst-case dt
+couples worlds, breaking the per-world Markov property -- so this now compares the
+two remaining modes.)
 
 Standalone:
     uv run python -m scripts.bench.benchmarks.dt_comparison --ns 1 4 16 64 256
 
-Produces 4 plots:
-  - dt_comparison_wall_time: wall time per outer step vs N (all 3 modes)
-  - dt_comparison_iterations: iteration count K vs N (per_world vs global)
-  - dt_comparison_amortization: cost per world vs N (all 3 modes)
-  - dt_comparison_speedup: speedup of per_world over global/fixed vs N
+Produces plots:
+  - dt_comparison_wall_time: wall time per outer step vs N
+  - dt_comparison_iterations: iteration count K vs N
+  - dt_comparison_amortization: cost per world vs N
+  - dt_comparison_speedup: speedup of per_world over fixed vs N
 """
 
 from __future__ import annotations
@@ -19,21 +23,22 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
+import matplotlib  # noqa: TID253
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 import numpy as np
 
 from scripts.bench.infra import MeasureResult, measure, power_law_exponent
 from scripts.bench.plotting import save_fig
 from scripts.scenes.contact_objects import DT_OUTER, build_model_randomized, make_fixed_solver, make_solver
 
-MODES = ["adaptive_per_world", "adaptive_global", "fixed"]
+# "adaptive_global" removed: dt_mode="global" no longer exists in the solver
+# (a shared worst-case dt couples worlds, breaking the per-world Markov property).
+MODES = ["adaptive_per_world", "fixed"]
 
 _STYLES = {
     "adaptive_per_world": {"color": "#1f77b4", "marker": "o", "ls": "-", "label": "adaptive per-world dt"},
-    "adaptive_global": {"color": "#ff7f0e", "marker": "s", "ls": "-", "label": "adaptive global dt"},
     "fixed": {"color": "#2ca02c", "marker": "D", "ls": "--", "label": "Fixed-step (dt=10 ms)"},
 }
 
@@ -46,20 +51,6 @@ def _measure_mode(mode: str, n: int, steps: int, warmup: int) -> MeasureResult:
             key = id(model)
             if key not in solver_cache:
                 solver_cache[key] = make_solver(model, dt_mode="per_world")
-            return solver_cache[key].step_dt(DT_OUTER, s0, s1, ctrl)
-
-        def get_k():
-            return int(next(iter(solver_cache.values())).iteration_count.numpy()[0])
-
-        return measure(build_model_randomized, step_fn, n, steps, warmup, get_k=get_k)
-
-    elif mode == "adaptive_global":
-        solver_cache = {}
-
-        def step_fn(model, s0, s1, ctrl):
-            key = id(model)
-            if key not in solver_cache:
-                solver_cache[key] = make_solver(model, dt_mode="global")
             return solver_cache[key].step_dt(DT_OUTER, s0, s1, ctrl)
 
         def get_k():
@@ -153,7 +144,7 @@ def plot(data: dict, out_dir: Path) -> None:
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Wall time per outer step [ms]", fontsize=11)
     ax.set_title(
-        f"Wall time vs N: per-world dt vs global dt vs fixed-step  (DT_outer={DT_OUTER * 1e3:.0f} ms)",
+        f"Wall time vs N: per-world dt vs fixed-step  (DT_outer={DT_OUTER * 1e3:.0f} ms)",
         fontsize=11,
     )
     ax.set_xscale("log", base=2)
@@ -162,9 +153,9 @@ def plot(data: dict, out_dir: Path) -> None:
     ax.grid(True, which="both", alpha=0.3)
     save_fig(fig, out_dir / "dt_comparison_wall_time.png")
 
-    # --- Plot 2: Iteration count K vs N (per_world vs global) ---
+    # --- Plot 2: Iteration count K vs N ---
     fig, ax = plt.subplots(figsize=(10, 6))
-    for mode in ["adaptive_per_world", "adaptive_global"]:
+    for mode in ["adaptive_per_world"]:
         if mode not in modes_data:
             continue
         md = modes_data[mode]
@@ -195,7 +186,7 @@ def plot(data: dict, out_dir: Path) -> None:
     ax.axhline(1, color="grey", ls=":", lw=1, label="K = 1 (ideal)")
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Iterations per step_dt call", fontsize=11)
-    ax.set_title("Adaptive iteration count: per-world dt vs global dt", fontsize=11)
+    ax.set_title("Adaptive iteration count vs N (per-world dt)", fontsize=11)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     ax.legend(fontsize=9, loc="upper left")
@@ -209,7 +200,7 @@ def plot(data: dict, out_dir: Path) -> None:
             continue
         md = modes_data[mode]
         s = _style(mode)
-        amort = [m / n_val * 1e3 for m, n_val in zip(md["medians"], ns)]
+        amort = [m / n_val * 1e3 for m, n_val in zip(md["medians"], ns, strict=True)]
         ax.plot(ns, amort, color=s["color"], marker=s["marker"], ls=s["ls"], lw=2, ms=5, label=s["label"])
     ax.set_xlabel("N worlds", fontsize=11)
     ax.set_ylabel("Wall time per world per outer step [ms]", fontsize=11)
@@ -220,34 +211,17 @@ def plot(data: dict, out_dir: Path) -> None:
     ax.grid(True, which="both", alpha=0.3)
     save_fig(fig, out_dir / "dt_comparison_amortization.png")
 
-    # --- Plot 4: Speedup of adaptive over fixed, and per-world over global ---
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Left: adaptive (per_world) vs fixed
-    ax = axes[0]
+    # --- Plot 4: Speedup of adaptive (per-world) over fixed ---
+    fig, ax = plt.subplots(figsize=(8, 5))
     if "adaptive_per_world" in modes_data and "fixed" in modes_data:
         pw = modes_data["adaptive_per_world"]["medians"]
         fx = modes_data["fixed"]["medians"]
-        ratio = [f / p for p, f in zip(pw, fx)]
+        ratio = [f / p for p, f in zip(pw, fx, strict=True)]
         ax.plot(ns, ratio, color=_STYLES["adaptive_per_world"]["color"], marker="o", ls="-", lw=2, ms=5)
         ax.axhline(1, color="grey", ls=":", lw=1)
         ax.set_xlabel("N worlds", fontsize=11)
         ax.set_ylabel("Speedup (fixed / adaptive per-world)", fontsize=11)
         ax.set_title("Fixed-step vs adaptive per-world dt", fontsize=11)
-        ax.set_xscale("log", base=2)
-        ax.grid(True, which="both", alpha=0.3)
-
-    # Right: per-world vs global
-    ax = axes[1]
-    if "adaptive_per_world" in modes_data and "adaptive_global" in modes_data:
-        pw = modes_data["adaptive_per_world"]["medians"]
-        gl = modes_data["adaptive_global"]["medians"]
-        ratio = [g / p for p, g in zip(pw, gl)]
-        ax.plot(ns, ratio, color=_STYLES["adaptive_per_world"]["color"], marker="o", ls="-", lw=2, ms=5)
-        ax.axhline(1, color="grey", ls=":", lw=1)
-        ax.set_xlabel("N worlds", fontsize=11)
-        ax.set_ylabel("Speedup (global / per-world)", fontsize=11)
-        ax.set_title("Per-world dt vs global dt", fontsize=11)
         ax.set_xscale("log", base=2)
         ax.grid(True, which="both", alpha=0.3)
 

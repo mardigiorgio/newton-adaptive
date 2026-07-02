@@ -1,3 +1,11 @@
+> **SUPERSEDED (2026-07-01) — do not apply these patches/overlays.**
+> The adaptive-solver integration this scaffold was planned for was implemented NATIVELY
+> in the IsaacLab fork instead: see `IsaacLab/source/isaaclab_newton/` (mjwarp_manager's
+> `adaptive` branch, the `newton_adaptive_ui` extension, and the task `newton_mjwarp`
+> presets). `isaaclab_newton_adaptive.patch` / `apply_isaaclab_delta.sh` would apply
+> stale changes over code that already has them. Kept only for the verified Isaac Sim
+> 6.0 version facts below.
+
 # adaptive_isaac — the adaptive solver into the Isaac Lab Newton backend (Thread B, B1–B4)
 
 **Status: NOT STARTED (scaffold).** Home for the *integration* glue — the Newton → Isaac Sim →

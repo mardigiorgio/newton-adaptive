@@ -27,9 +27,9 @@ def main():
     parser.add_argument("--list", action="store_true", help="List available benchmarks and exit")
 
     # Benchmark parameter overrides.
-    parser.add_argument("--ns", type=int, nargs="+", default=None, help="Override N values for scaling/components")
-    parser.add_argument("--steps", type=int, default=None, help="Override timed steps for scaling/components")
-    parser.add_argument("--warmup", type=int, default=None, help="Override warmup steps for scaling/components")
+    parser.add_argument("--ns", type=int, nargs="+", default=None, help="Override N values for scaling")
+    parser.add_argument("--steps", type=int, default=None, help="Override timed steps for scaling")
+    parser.add_argument("--warmup", type=int, default=None, help="Override warmup steps for scaling")
     parser.add_argument("--trials", type=int, default=None, help="Override trial count for accuracy/initial_conditions")
     parser.add_argument(
         "--tols", type=float, nargs="+", default=None, help="Tolerance curves for initial_conditions sweep"
