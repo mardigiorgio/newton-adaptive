@@ -9,6 +9,15 @@ fixed gold, measuring trajectory error AND peak penetration vs compute, plus the
 dt-collapse-at-impact trace.
 
     uv run --extra rl --extra examples --extra importers -m scripts.rl.adaptive_expts.v1_stiff_contact
+
+CAVEAT (measured 2026-07-02): the peak-penetration and trajectory-error metrics here are
+CHAOS-CONTAMINATED and must not be quoted as evidence of contact-resolution quality.
+Identically-seeded runs of this 18-body scene diverge to O(1) within ~20 control steps
+(GPU reduction nondeterminism; see CLAUDE.md), so a single rollout's peak |dist| mostly
+reflects WHICH equally-valid trajectory was sampled, not how well contact was resolved
+(observed: tighter tol -> deeper single-rollout peak pen, moving AWAY from gold). For a
+chaos-immune penetration comparison use v1_penetration_stats.py (N independent
+single-impact worlds, per-world gold, distributional metric).
 """
 
 from __future__ import annotations
@@ -17,10 +26,10 @@ import argparse
 import json
 import os
 
-import matplotlib
+import matplotlib  # noqa: TID253
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 import numpy as np
 import warp as wp
 

@@ -1,4 +1,11 @@
 """Intuition figure: penetration depth over time for one stiff sphere impact.
+
+CAVEAT (found 2026-07-03): this scene authors kd=0.0, and convert_solref maps (ke, kd)
+to MuJoCo contact solref only when BOTH are > 0 -- so KE here is INERT and the contact
+runs at MuJoCo DEFAULT compliance (solref 0.02/1, ~20 mm compression for this sphere).
+The stepper comparison is still valid (all variants see the same contact), but the
+"stiff" framing is not: for a real stiffness sweep use v1_penetration_stats.py with
+PEN_KE/PEN_KD (both > 0).
 Coarse fixed-step gets the physics qualitatively wrong (overshoots / ejects), while
 the adaptive solver (paper-faithful, S=identity) tracks the dt->0 reference by refining dt at impact.
 
@@ -9,10 +16,10 @@ from __future__ import annotations
 
 import os
 
-import matplotlib
+import matplotlib  # noqa: TID253
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 import numpy as np
 import warp as wp
 

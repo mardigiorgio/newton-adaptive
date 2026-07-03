@@ -1,4 +1,11 @@
 """V1 (corrected) clean integration test: a single rigid sphere driven into an
+
+CAVEAT (found 2026-07-03): this scene authors kd=0.0, and convert_solref maps (ke, kd)
+to MuJoCo contact solref only when BOTH are > 0 -- so KE here is INERT and the contact
+runs at MuJoCo DEFAULT compliance (solref 0.02/1, ~20 mm compression for this sphere).
+The stepper comparison is still valid (all variants see the same contact), but the
+"stiff" framing is not: for a real stiffness sweep use v1_penetration_stats.py with
+PEN_KE/PEN_KD (both > 0).
 already-detected stiff contact (no policy, no chaos, no collision-cadence ambiguity).
 
 This is the confound-free test the broken Phase-0b / V1 metrics never ran. With the
@@ -14,10 +21,10 @@ import argparse
 import json
 import os
 
-import matplotlib
+import matplotlib  # noqa: TID253
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: TID253
 import numpy as np
 import warp as wp
 
@@ -83,7 +90,7 @@ def rollout_fixed(fixed_dt: float):
     c = m.control()
     n = round(DT / fixed_dt)
     zmin = 9.0
-    for i in range(round(T / DT)):
+    for _i in range(round(T / DT)):
         for _ in range(n):
             s0.clear_forces()
             s.step(s0, s1, c, None, fixed_dt)
