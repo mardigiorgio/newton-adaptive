@@ -4,9 +4,10 @@
 This is the CENIC integrator for the convex SAP contact solver. The manager hands
 it a state and a control boundary period ``dt_outer``; it advances every world to
 that boundary **entirely on the GPU** using a TRUE per-world adaptive step and
-returns the advanced state. The returned state is more accurate than a fixed step
-(local error is controlled, not whatever the step lands on), so the RL ``(s, a, s')``
-transitions are faithful to the real dynamics and the policy transfers to hardware.
+returns the advanced state. The returned state has controlled LOCAL error per step
+(unlike a fixed step, where accuracy is whatever the step lands on). The research
+HYPOTHESIS -- not yet validated -- is that error-controlled ``(s, a, s')`` transitions
+improve policy transfer to hardware.
 
 The per-world primitive is a **dt vector** -- ``dt[world]`` -- never a substep count
 ``N``. Each world adapts ITS OWN dt from ITS OWN step-doubling error estimate; there
@@ -31,7 +32,8 @@ stops the instant every world has reached its boundary)::
     write state_cur back
 
 The ONLY host sync in the step path is that single 4-byte boundary-flag read per
-iteration (typically ~3 iterations/frame): it lets the loop stop as soon as every world
+iteration (iteration counts are scene-dependent: a few per boundary on gentle scenes,
+10-20+ measured on contact-rich in-hand manipulation): it lets the loop stop as soon as every world
 lands instead of grinding a fixed count of wasted no-op substeps (a ``dt=0`` no-op still
 runs the full batched SAP solve, so wasted iterations are NOT free). Reject is a masked
 state-hold (a data branch), not control flow. The inner SAP solve is run CONVERGENT (to
@@ -966,7 +968,7 @@ class SolverSAPAdaptive:
 
         # Masked substep march: each attempt rebuilds contacts at q_t and, for
         # step-doubling, at q_{t+h/2}. The loop stops as soon as every world reaches
-        # its boundary (one 4-byte flag read per iteration; ~3 iters typically).
+        # its boundary (one 4-byte flag read per iteration; count is scene-dependent).
         self._run_substep_loop(eff_dt_max, dt_outer)
 
         # Optional per-world spread telemetry (diagnostic; one host sync, throttled).

@@ -21,7 +21,7 @@ while viewer.is_running():
 
 ## CRITICAL: Zero device transfers in the hot path
 
-**Every `.numpy()` call on a GPU array is a full CUDA device synchronization.** In the inner physics loop this fires on every substep — thousands of times per frame during dense contact. This is the single most destructive performance pattern in CENIC scripts.
+**Every `.numpy()` call on a GPU array is a full CUDA device synchronization.** The cost is size- and placement-dependent (measured: a 4-byte boundary-flag read is tens of microseconds — noise next to a multi-ms iteration; a full-state readback inside the inner loop, repeated per substep, stalls the pipeline and dominates). The rule below exists so the destructive variant can never appear.
 
 ### The rule: `.numpy()` must never appear inside the inner physics loop.
 
