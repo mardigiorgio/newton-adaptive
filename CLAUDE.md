@@ -78,7 +78,7 @@ solver = SolverMuJoCoAdaptive(
 
 `viewer.render(state, sim_time)` drives the camera and UI from **simulation time**, not wall clock. This prevents camera jumps during dense contact substeps where many physics steps fire between renders. No additional timing logic is needed in scripts — `render()` handles it.
 
-Multi-world scripts (`--num-worlds N`) produce diverging trajectories even from identical initial conditions. This is expected: GPU floating-point reductions are non-associative, causing per-world inf-norm error estimates to differ by ULP, which eventually leads to different accept/reject decisions and permanently diverging trajectories. Use `--num-worlds 1` for visualization; use `--headless` for data collection.
+Identically-seeded runs are NOT bit-reproducible (measured 2026-07-02, Allegro reorient, 64 envs, bit-identical inputs): trajectories diverge at step 0 in BOTH the fixed-step and adaptive solvers (max|dq| ~1e-6..1e-5 after one control step), because MuJoCo-Warp's contact pipeline uses non-associative GPU reductions. Contact-rich dynamics then amplify chaotically (~O(1) rad by ~20 control steps). The adaptive controller's accept/reject decisions also diverge (iteration counts split within a few steps), but that is a consequence of already-divergent states, not the cause -- the controller-free fixed solver diverges identically. Implications: datasets/demos must be reproduced by RECORDING, never by replay; use `--num-worlds 1` for visualization and `--headless` for data collection.
 
 ---
 
