@@ -56,7 +56,11 @@ def _build():
     t.add_shape_sphere(bd, radius=R, cfg=cfg)
     b = newton.ModelBuilder()
     b.replicate(t, N_WORLDS)
-    b.add_ground_plane()
+    # Author the ground's material too: with equal geom priority mjw AVERAGES the
+    # two geoms' solref 50/50, so an unauthored ground (default ke=2.5e3, kd=0 ->
+    # default solref 0.02/1) dilutes any authored sphere stiffness to ~half-default
+    # (this capped the original stiffness sweep at ~10 ms pair timeconst).
+    b.add_ground_plane(cfg=cfg)
     return b.finalize()
 
 
