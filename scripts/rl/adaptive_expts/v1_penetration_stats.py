@@ -43,7 +43,7 @@ KE = float(os.environ.get("PEN_KE", "1e4"))  # contact stiffness; sweep via env 
 KD = float(os.environ.get("PEN_KD", "0"))  # contact damping. NOTE: convert_solref only maps
 # (ke, kd) -> MuJoCo solref when BOTH are > 0; with kd=0 the contact runs at MuJoCo DEFAULT
 # compliance (solref 0.02/1) and ke is inert. timeconst=2/kd, dampratio=(kd/2)*sqrt(1/ke).
-INTEG = "euler"
+INTEG = os.environ.get("PEN_INTEG", "euler")
 TOLS = (1e-2, 3e-3, 1e-3, 3e-4)
 FIXED_DTS = (5e-3, 2e-3, 1e-3, 5e-4)
 
@@ -56,11 +56,13 @@ def _build():
     t.add_shape_sphere(bd, radius=R, cfg=cfg)
     b = newton.ModelBuilder()
     b.replicate(t, N_WORLDS)
-    # Author the ground's material too: with equal geom priority mjw AVERAGES the
+    # Author the ground's stiffness too: with equal geom priority mjw AVERAGES the
     # two geoms' solref 50/50, so an unauthored ground (default ke=2.5e3, kd=0 ->
     # default solref 0.02/1) dilutes any authored sphere stiffness to ~half-default
-    # (this capped the original stiffness sweep at ~10 ms pair timeconst).
-    b.add_ground_plane(cfg=cfg)
+    # (this capped the original stiffness sweep at ~10 ms pair timeconst). Keep the
+    # ground's DEFAULT friction: pair mu is the max of the two geoms, and a fully
+    # frictionless pair (both mu=0) NaNs the mjw solver within ~30 steps.
+    b.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(ke=KE, kd=KD, margin=0.005))
     return b.finalize()
 
 
