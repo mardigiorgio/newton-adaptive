@@ -1,0 +1,76 @@
+{
+ "meta": {
+  "n_worlds": 256,
+  "T": 0.1,
+  "dt_rec": 0.002,
+  "gold_dt": 5e-05,
+  "ke": 100000000.0,
+  "tau_d": 0.01,
+  "gold_median_pen_mm": 0.0,
+  "gold_max_pen_mm": 0.0
+ },
+ "adaptive": [
+  {
+   "tol": 0.01,
+   "evals": 38400,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  },
+  {
+   "tol": 0.001,
+   "evals": 38400,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  },
+  {
+   "tol": 0.0003,
+   "evals": 38400,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  }
+ ],
+ "fixed": [
+  {
+   "dt": 0.002,
+   "evals": 12800,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  },
+  {
+   "dt": 0.001,
+   "evals": 25600,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  },
+  {
+   "dt": 0.0005,
+   "evals": 51200,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0,
+   "median_pen_mm": 0.0,
+   "max_pen_mm": 0.0
+  }
+ ]
+}

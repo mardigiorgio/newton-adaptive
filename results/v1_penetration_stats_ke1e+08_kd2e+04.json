@@ -1,0 +1,78 @@
+{
+ "meta": {
+  "n_worlds": 256,
+  "T": 0.1,
+  "dt_rec": 0.002,
+  "gold_dt": 5e-06,
+  "ke": 100000000.0,
+  "gold_median_pen_mm": 0.0
+ },
+ "adaptive": [
+  {
+   "tol": 0.01,
+   "substeps": 150,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  },
+  {
+   "tol": 0.003,
+   "substeps": 195,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  },
+  {
+   "tol": 0.001,
+   "substeps": 411,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  },
+  {
+   "tol": 0.0003,
+   "substeps": 474,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  }
+ ],
+ "fixed": [
+  {
+   "dt": 0.005,
+   "substeps": 50,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 5.130331963300705,
+   "max_err_mm": 14.45869356393814,
+   "bias_mm": 1.4215220144251361
+  },
+  {
+   "dt": 0.002,
+   "substeps": 50,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  },
+  {
+   "dt": 0.001,
+   "substeps": 100,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  },
+  {
+   "dt": 0.0005,
+   "substeps": 200,
+   "median_err_mm": 0.0,
+   "p90_err_mm": 0.0,
+   "max_err_mm": 0.0,
+   "bias_mm": 0.0
+  }
+ ]
+}

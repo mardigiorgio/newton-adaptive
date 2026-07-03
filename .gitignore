@@ -80,3 +80,6 @@ integrator_base.cc
 
 # editable-install build artifact
 *.egg-info/
+
+# RL training logs from smoke runs
+logs/

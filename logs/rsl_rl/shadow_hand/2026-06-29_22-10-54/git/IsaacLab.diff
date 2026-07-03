@@ -1,0 +1,14 @@
+--- git commit ---
+ce4a3b071da772f5a310c32625ad0091f825f076
+
+
+--- git status ---
+On branch develop
+Your branch and 'upstream/develop' have diverged,
+and have 3 and 5 different commits each, respectively.
+  (use "git pull" if you want to integrate the remote branch with yours)
+
+nothing to commit, working tree clean 
+
+
+--- git diff ---
