@@ -83,3 +83,4 @@ integrator_base.cc
 
 # RL training logs from smoke runs
 logs/
+wandb/

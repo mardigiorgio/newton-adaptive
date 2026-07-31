@@ -71,7 +71,7 @@ changes, dependency constraints, and migration guidance.
 Run targeted searches before finishing:
 
 ```bash
-rg -n "removed|removal|deprecated|will be removed|private|_[a-zA-Z].*in favor|SensorRaycast|raycast_kernel_no_hfield" CHANGELOG.md
+rg -n "removed|removal|deprecated|will be removed|private|_[a-zA-Z].*in favor" CHANGELOG.md
 git diff -- CHANGELOG.md
 ```
 

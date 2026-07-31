@@ -1,6 +1,6 @@
 ## CENIC simulation loop pattern
 
-All scripts using `SolverMuJoCoAdaptive` (the adaptive step-doubling solver; true CENIC = adaptive + convex ICF contact, not yet built) must use `step_dt` — never reimplement the inner loop manually.
+All scripts using `SolverMuJoCoAdaptive` (the adaptive step-doubling solver) must use `step_dt` — never reimplement the inner loop manually.
 
 ```python
 DT = 0.002  # 500 Hz — default control and render period [s]
@@ -21,7 +21,7 @@ while viewer.is_running():
 
 ## CRITICAL: Zero device transfers in the hot path
 
-**Every `.numpy()` call on a GPU array is a full CUDA device synchronization.** The cost is size- and placement-dependent (measured: a 4-byte boundary-flag read is tens of microseconds — noise next to a multi-ms iteration; a full-state readback inside the inner loop, repeated per substep, stalls the pipeline and dominates). The rule below exists so the destructive variant can never appear.
+**Every `.numpy()` call on a GPU array is a full CUDA device synchronization.** Cost grows with the amount of data transferred and with how often the call fires.
 
 ### The rule: `.numpy()` must never appear inside the inner physics loop.
 
@@ -35,18 +35,15 @@ while True:
 
 Correct — use `step_dt`, which handles the inner loop internally:
 ```python
-# step_dt replays a captured per-iteration CUDA graph and checks a 4-byte
-# boundary flag via .numpy() -- one int32 per iteration. With
-# NEWTON_MJ_ADAPTIVE_CONDITIONAL=1 the whole loop is one conditional graph
-# node (zero host syncs). Do not reimplement this loop manually.
+# step_dt owns the inner loop and its per-iteration boundary check.
+# NEWTON_MJ_ADAPTIVE_CONDITIONAL=1 runs the whole loop as one conditional
+# CUDA graph node (no host syncs). Do not reimplement this loop manually.
 state_0, state_1 = solver.step_dt(DT, state_0, state_1, control)
 ```
 
-### Why N worlds do not hurt physics throughput — but do hurt render throughput
+### Rendering at N > 1
 
-MuJoCo Warp batches all N worlds into a single GPU kernel per step. For small N (≤ ~64 worlds of simple geometry) the GPU is not saturated — physics throughput scales sub-linearly with N, approaching free.
-
-The viewer is the bottleneck at large N. `log_state` calls `wp.synchronize()` once per frame to flush the VBO copy. With N worlds doing more GPU work, that sync takes longer. **For data collection at N > 1, always run `--headless`.**
+The viewer synchronizes the GPU once per frame to flush the VBO copy, so rendering cost grows with total GPU work. **For data collection at N > 1, always run `--headless`.**
 
 ### Acceptable `.numpy()` call-sites (outside the inner loop)
 
@@ -78,7 +75,7 @@ solver = SolverMuJoCoAdaptive(
 
 `viewer.render(state, sim_time)` drives the camera and UI from **simulation time**, not wall clock. This prevents camera jumps during dense contact substeps where many physics steps fire between renders. No additional timing logic is needed in scripts — `render()` handles it.
 
-Identically-seeded runs are NOT bit-reproducible (measured 2026-07-02, Allegro reorient, 64 envs, bit-identical inputs): trajectories diverge at step 0 in BOTH the fixed-step and adaptive solvers (max|dq| ~1e-6..1e-5 after one control step), because MuJoCo-Warp's contact pipeline uses non-associative GPU reductions. Contact-rich dynamics then amplify chaotically (~O(1) rad by ~20 control steps). The adaptive controller's accept/reject decisions also diverge (iteration counts split within a few steps), but that is a consequence of already-divergent states, not the cause -- the controller-free fixed solver diverges identically. Implications: datasets/demos must be reproduced by RECORDING, never by replay; use `--num-worlds 1` for visualization and `--headless` for data collection.
+Identically-seeded runs are NOT bit-reproducible (in either the fixed-step or the adaptive solver). Reproduce datasets/demos by RECORDING, never by replay; use `--num-worlds 1` for visualization and `--headless` for data collection.
 
 ---
 
