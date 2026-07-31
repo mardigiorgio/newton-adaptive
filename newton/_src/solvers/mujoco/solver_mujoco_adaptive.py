@@ -45,9 +45,6 @@ mujoco_warp's per-step scratch allocations behind a per-call-site buffer cache
 :mod:`.mjw_alloc_cache`). The controller kernels (Drake step sizing, the inf-norm
 error metric, the masked restore, the time rebase/clamp) are defined inline below,
 so this solver is self-contained: open this one file to see all of its logic.
-
-Note: true CENIC = this adaptive controller + convex ICF contact; the ICF contact model
-is not yet built, so this is the adaptive (pseudo-CENIC) MuJoCo solver.
 """
 
 from __future__ import annotations
@@ -62,6 +59,7 @@ import warp as wp
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ...utils.benchmark import event_scope
+from .kernels import convert_mj_coords_to_warp_kernel, eval_articulation_fk
 from .mjw_alloc_cache import MjwStepAllocCache
 from .solver_mujoco import SolverMuJoCo
 
@@ -91,27 +89,27 @@ def _inf_norm_state_error_kernel(
     qpos_double: wp.array2d[wp.float32],
     state_scale: wp.array2d[wp.float32],
     nq: int,
+    kd_over_m: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    qvel_double: wp.array2d[wp.float32],
+    nv: int,
     error_out: wp.array[wp.float32],
 ):
-    """Adaptive-controller accuracy metric (Kurtz & Castro, Sec. V-E)::
+    """Adaptive-controller accuracy metric::
 
         e^{n+1} = || S (q^{n+1} - q̂^{n+1}) ||_∞
 
     Position-only inf-norm of the difference between the doubled half-step ``q`` and the
     full step ``q̂``, computed directly on MuJoCo ``qpos`` (the loop's native space),
-    scaled by the diagonal ``S`` that "maps each component to a dimensionless unit."
-    Velocity and contact impulses are excluded from the controller, exactly as the paper
-    specifies. The paper gives no formula for ``S`` and mandates NO mass weighting,
-    clipping, or normalization ("S can be estimated from knowledge of coordinate types
-    or specified by expert users"); here ``S = identity`` per PI directive (free-joint
-    quaternions therefore enter in MuJoCo's wxyz convention -- same components as the
-    Newton joint_q metric, so the inf-norm is unchanged for hinge/slide/ball/free
-    layouts). Diverged sims get error = 1e10.
+    scaled by the diagonal ``S`` (default identity; free-joint quaternions enter in
+    MuJoCo's wxyz convention). Velocity and contact impulses are excluded from the
+    error norm. Diverged sims get error = 1e10.
     """
     world = wp.tid()
 
     max_err = float(0.0)
     has_nan = int(0)
+    h = dt[world]
     for i in range(nq):
         d = wp.abs(qpos_double[world, i] - qpos_full[world, i])
         # NaN must be flagged per component: wp.max is fmaxf on CUDA, which RETURNS THE
@@ -120,7 +118,23 @@ def _inf_norm_state_error_kernel(
         if wp.isnan(d):
             has_nan = 1
         else:
-            max_err = wp.max(max_err, state_scale[world, i] * d)
+            # Filtered error estimate (NEWTON_ADAPTIVE_FILTERED_ERR=1; kd_over_m all-zero
+            # otherwise, weight == 1): discount each coordinate by the damping factor of
+            # the implicit solve, w_i = 1/(1 + h*kd_i/M_ii). Error in a fast-decaying
+            # actuator mode is damped in the ESTIMATE by the same factor the integrator
+            # damps it in the SOLUTION; undamped coords (kd=0) keep w=1, and w -> 1 as
+            # h -> 0, restoring full sensitivity when the step resolves the mode.
+            w = state_scale[world, i] / (wp.float32(1.0) + h * kd_over_m[i])
+            max_err = wp.max(max_err, w * d)
+
+    # Full-state divergence detection: the error NORM stays position-only, but the
+    # committed state includes qvel, so finiteness must be checked there too. A
+    # non-finite velocity with still-finite positions would otherwise commit
+    # (position error looks small) and poison subsequent steps via forces ~ v.
+    for i in range(nv):
+        v = qvel_double[world, i]
+        if wp.isnan(v) or wp.isinf(v):
+            has_nan = 1
 
     if has_nan != 0 or wp.isnan(max_err) or wp.isinf(max_err):
         max_err = float(1.0e10)
@@ -147,6 +161,13 @@ def _calc_adjusted_step(
     tol: float,
     dt_min: float,
     divergence_threshold: float,
+    limited: wp.array[wp.int32],
+    consec_rej: wp.array[wp.int32],
+    order_aware: int,
+    sliver_fix: int,
+    nan_guard: int,
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
 ):
     """Per-world Drake CalcAdjustedStepSize for step doubling (err_order=2).
 
@@ -155,9 +176,8 @@ def _calc_adjusted_step(
       * ``commit``   -- write the doubled state. ``False`` => hold the last good state
         (used to refuse a non-finite step instead of poisoning the batch with NaN).
 
-    ``diverged`` is accepted for signature compatibility but NEVER WRITTEN: the
-    dt_min-floor latch was removed (see the comment in the floor branch below), so
-    the array stays all-False.
+    ``diverged`` is set only by the NaN-guard floor path (``nan_guard == 1``);
+    no other path writes it.
 
     The error kernel emits a large sentinel (``1e10``) for NaN/inf states, so
     ``e >= divergence_threshold`` (or a literal NaN/inf) means "diverged".
@@ -166,17 +186,10 @@ def _calc_adjusted_step(
     world = wp.tid()
     e = err[world]
     step = dt[world]
-    # NOTE (measured, 2026-07-01): ``step`` here is the post-boundary-clamp dt, so an
-    # accepted landing sliver rewrites ideal_dt relative to the remainder (<= 5x it),
-    # collapsing the carried dt. This is DELIBERATELY RETAINED. A Drake-style fix
-    # ("artificially limited" steps keep the carried ideal_dt) was implemented and
-    # A/B-benchmarked on Allegro reorient (2048 envs, tol=1e-3): iterations were
-    # UNCHANGED (the boundary loop is gated by the max-substep world, whose dt is
-    # error-limited, not landing-limited) while wall time rose 5.2% because the
-    # non-binding worlds ran larger, costlier constraint solves for zero iteration
-    # savings. At batch scale the landing collapse acts as a free dt-limiter on
-    # non-binding worlds. Revisit for small world counts or much tighter tolerances,
-    # where a landing-poisoned world CAN be the binding one.
+    # NOTE: ``step`` here is the post-boundary-clamp dt, so by default an accepted
+    # landing sliver rewrites ideal_dt relative to the remainder (<= 5x it),
+    # collapsing the carried dt. The Drake "artificially limited" exemption is
+    # opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1 (see the sliver branch below).
     is_diverged = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
 
     # Boundary-stalled worlds (dt clamped to 0): no-op step; accept+commit the
@@ -189,19 +202,29 @@ def _calc_adjusted_step(
 
     # At the floor we cannot subdivide any further.
     if step <= dt_min * wp.float32(1.001):
-        # Divergence latch removed (per request): a world that is still non-finite at
-        # the dt_min floor now COMMITS through the e > tol path below, exactly like a
-        # finite-but-can't-meet-tol world, instead of holding its last-good state and
-        # flagging the env to reset it. Rationale: dt_min (~1e-6 s) is ~1000x below the
-        # stable fixed step, so if the fixed step does not produce NaN, the floor will
-        # not either; the latch was dormant in that regime. (`diverged` is therefore
-        # never set -> stays all-False; the manager's reset(world_mask=diverged) and the
-        # `diverged` property are left in place as dormant no-ops.)
+        # With nan_guard off, a world still non-finite at the dt_min floor commits
+        # through the e > tol path below like any can't-meet-tol world; with nan_guard
+        # on (default), the guard below refuses the commit and latches `diverged`.
         if e > tol:
-            # Finite but can't meet tol at the floor: accept progress and commit.
             accepted[world] = True
-            commit[world] = True
             ideal_dt[world] = dt_min
+            consec_rej[world] = 0
+            # NaN guard (NEWTON_ADAPTIVE_NAN_GUARD=1, default): never commit a non-finite
+            # state at the floor -- hold the last-good (finite) state, freeze this world
+            # to its frame boundary, and latch `diverged` so env-side terminations can
+            # reset it. The 1e3*tol sanity bound extends the same treatment to
+            # catastrophic-but-FINITE floor errors: a dt_min step that still moves a
+            # coordinate by >1000x tol is a blow-up in progress; committing it would
+            # poison the world before the NaN appears.
+            if nan_guard == 1 and (
+                wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold or e > wp.float32(1000.0) * tol
+            ):
+                commit[world] = False
+                diverged[world] = True
+                sim_time[world] = next_time[world]
+                return
+            # Finite but can't meet tol at the floor: accept progress and commit.
+            commit[world] = True
             return
         # e <= tol at the floor: fall through to the normal accept path.
 
@@ -210,11 +233,19 @@ def _calc_adjusted_step(
         accepted[world] = False
         commit[world] = False
         ideal_dt[world] = _DRAKE_MIN_SHRINK * step
+        consec_rej[world] = consec_rej[world] + 1
         return
 
     new_step = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
 
-    # Symmetric deadband (paper Alg 1): keep dt unchanged when new_step lands
+    # Order-aware rejection sizing (NEWTON_ADAPTIVE_ORDER_AWARE=1): from the second
+    # consecutive rejection onward, size with the FIRST-order rule (tol/e) instead of
+    # the step-doubling sqrt (which assumes order 2 and can overshoot in rejection
+    # cascades where the effective local order is lower, e.g. contact events).
+    if order_aware == 1 and e > tol and consec_rej[world] >= 1:
+        new_step = _DRAKE_SAFETY * step * (tol / wp.max(e, wp.float32(1.0e-30)))
+
+    # Symmetric deadband: keep dt unchanged when new_step lands
     # in [k_Low * dt, k_High * dt]. Prevents dt thrash from small error spikes
     # (lower edge) and suppresses tiny grows (upper edge).
     if new_step > _DRAKE_HYSTERESIS_LOW * step and new_step < _DRAKE_HYSTERESIS_HIGH * step:
@@ -225,6 +256,16 @@ def _calc_adjusted_step(
     acc = e <= tol or new_step >= step
     accepted[world] = acc
     commit[world] = acc
+    if acc:
+        consec_rej[world] = 0
+        # Sliver exemption (NEWTON_ADAPTIVE_SLIVER_FIX=1): an accepted step that was
+        # artificially shortened by the boundary clamp says nothing about the error-limited
+        # step size, so keep the carried ideal_dt instead of collapsing it to ~the sliver
+        # (Drake's artificially-limited rule).
+        if sliver_fix == 1 and limited[world] == 1:
+            return
+    else:
+        consec_rej[world] = consec_rej[world] + 1
     ideal_dt[world] = new_step
 
 
@@ -258,10 +299,9 @@ def _reset_worlds(
     """Restore the step-doubling controller's persistent per-world state to
     construction defaults for worlds flagged in ``mask``; leave others untouched.
 
-    Fix C (per-world controller reset on env/episode reset). sim_time and next_time
-    are reset TOGETHER to 0 so the world restarts a clean boundary interval (the next
-    step_dt advances next_time by dt_outer from 0); this also drops the float32
-    unbounded-growth of a long-lived world."""
+    sim_time and next_time are reset TOGETHER to 0 so the world restarts a clean
+    boundary interval (the next step_dt advances next_time by dt_outer from 0); this
+    also bounds the float32 growth of a long-lived world."""
     i = wp.tid()
     if mask[i]:
         ideal_dt[i] = dt_init
@@ -336,10 +376,10 @@ def _rebase_time(
 ):
     """Rebase both per-world clocks by subtracting each world's boundary baseline.
 
-    Fix B (float32 time-rebase). ``_sim_time`` and ``_next_time`` are never reset and
-    grow unbounded across a training run; the landing remainder ``next_time - sim_time``
-    then loses float32 precision as magnitude grows, causing dt jitter that worsens over
-    time. Subtracting the per-world baseline ``next_time[i]`` (NOT zeroing) keeps both
+    ``_sim_time`` and ``_next_time`` otherwise grow unbounded across a long run; the
+    landing remainder ``next_time - sim_time`` then loses float32 precision as magnitude
+    grows, causing dt jitter that worsens over time.
+    Subtracting the per-world baseline ``next_time[i]`` (NOT zeroing) keeps both
     clocks small while preserving the remainder bit-exactly: ``next_time`` -> 0 and
     ``sim_time`` -> the (>= 0) residual overshoot, which is carried forward instead of
     dropped. Called once at the top of ``step_dt`` before ``_boundary_advance``.
@@ -356,19 +396,25 @@ def _clamp_dt_to_boundary(
     dt_half: wp.array[wp.float32],
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
+    limited: wp.array[wp.int32],
 ):
     """Clamp dt so worlds don't overshoot their boundary target.
 
-    Worlds already at or past the boundary get dt=0 (no-op step).
+    Worlds already at or past the boundary get dt=0 (no-op step). ``limited[i]=1``
+    marks a step artificially shortened by the boundary (a "landing sliver"), so the
+    controller can exempt it from step-size resizing (Drake's artificially-limited
+    rule, opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1).
     """
     i = wp.tid()
     remaining = next_time[i] - sim_time[i]
+    limited[i] = 0
     if remaining <= wp.float32(0.0):
         dt[i] = wp.float32(0.0)
         dt_half[i] = wp.float32(0.0)
     elif dt[i] > remaining:
         dt[i] = remaining
         dt_half[i] = remaining * wp.float32(0.5)
+        limited[i] = 1
 
 
 @wp.kernel
@@ -447,6 +493,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         dt_mode: str = "per_world",
         tiling: str = "ragged",
         max_substeps: int = 256,
+        use_newton_contacts: bool = False,
         **kwargs,
     ):
         """
@@ -482,10 +529,21 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             )
         if int(max_substeps) < 1:
             raise ValueError(f"max_substeps must be >= 1, got {max_substeps!r}")
-        # Contacts come from MuJoCo's native collision pipeline (run_collision_detection=True);
-        # each step-doubling substep re-collides via mujoco_warp, so MuJoCo sizes its own contact
-        # buffers and there is no separate Newton collision pass to feed in.
-        super().__init__(model, separate_worlds=True, use_mujoco_cpu=False, use_mujoco_contacts=True, **kwargs)
+        # Contact source is selectable: with ``use_newton_contacts=True`` the externally
+        # provided Newton CollisionPipeline contacts (full non-convex mesh/SDF fidelity)
+        # are injected ONCE per boundary and held across the step-doubling march —
+        # identical contacts for every substep keep the error estimate consistent.
+        # Otherwise MuJoCo re-collides each substep on ITS OWN geometry, which
+        # convexifies meshes and only instantiates env_0's static geoms — unusable
+        # for multi-env non-convex scenes.
+        self._use_newton_contacts = bool(use_newton_contacts)
+        super().__init__(
+            model,
+            separate_worlds=True,
+            use_mujoco_cpu=False,
+            use_mujoco_contacts=not self._use_newton_contacts,
+            **kwargs,
+        )
 
         world_count = model.world_count
         device = model.device
@@ -505,7 +563,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
         # ---- controller scalars / bounds ----
         self._tol = float(tol)
-        # Fix C: construction default for the per-world controller reset, plus a
+        # Construction default for the per-world controller reset, plus a
         # reusable all-True mask for a full reset (world_mask=None path).
         self._dt_inner_init = float(dt_inner_init)
         self._full_world_mask = wp.full(world_count, True, dtype=wp.bool, device=device)
@@ -550,11 +608,23 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._status_scalars = wp.zeros(6, dtype=wp.float32, device=device)
 
         self._iteration_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
+        # Controller-fix state (see _clamp_dt_to_boundary / _calc_adjusted_step):
+        # per-world boundary-limited flag + consecutive-rejection counter, and the two
+        # opt-in fix switches (baked into the captured graph at construction).
+        self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
+        self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
+        self._order_aware_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ORDER_AWARE", "0") == "1" else 0
+        self._sliver_fix_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_SLIVER_FIX", "0") == "1" else 0
+        # Non-finite (or catastrophic) state at the dt floor: NEVER commit it. Hold
+        # the last valid state for this ONE frame and latch ``diverged``; the env
+        # consumes the latch as a termination and resets the world the same step.
+        # NEWTON_ADAPTIVE_NAN_GUARD=0 restores the legacy commit-anyway behavior.
+        self._nan_guard_flag = 0 if os.environ.get("NEWTON_ADAPTIVE_NAN_GUARD", "1") == "0" else 1
         # Non-resetting cumulative boundary-loop iteration count (NOT zeroed per
         # step_dt, unlike _iteration_count_buf). Each iteration runs the 3-eval
         # step-doubling attempt, so total MuJoCo opt-steps = iterations * 3, and
         # rejected attempts are counted (a rejection is just another iteration).
-        # Used as the compute axis for work-precision (V1). Reset with
+        # Used as the compute axis for work-precision. Reset with
         # reset_compute_counter().
         self._cum_iters = wp.zeros(1, dtype=wp.int32, device=device)
 
@@ -562,17 +632,51 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
         self.mjw_model.opt.timestep = self._timestep_buf
 
-        # Adaptive-controller accuracy-metric scaling S (Sec. V-E): e = || S (q - q̂) ||_inf. The paper
-        # gives no formula for S and specifies NO mass weighting, clipping, or
-        # normalization -- "S can be estimated from knowledge of coordinate types or
-        # specified by expert users." Per PI directive (project_s_removed_identity),
-        # S = identity. To use expert per-coordinate scales, overwrite self._state_scale
+        # Accuracy-metric scaling S: e = || S (q - q̂) ||_inf. Default S = identity.
+        # To use expert per-coordinate scales, overwrite self._state_scale
         # (shape [world_count, nq]; scales MuJoCo qpos components) after construction.
         self._state_scale = wp.array(
             np.ones((world_count, self._nq), dtype=np.float32),
             dtype=wp.float32,
             device=device,
         )
+
+        # Filtered error estimate (NEWTON_ADAPTIVE_FILTERED_ERR=1): per-qpos-coordinate
+        # damping rate kd_i/M_ii [1/s] for the estimate filter w = 1/(1 + h*kd/M) in the
+        # error kernel. kd = joint damping + implicit-actuator kv (affine bias, biasprm[2]);
+        # M_ii from dof_M0 (reference-pose inertia diagonal — configuration dependence is
+        # second-order for a filter). Hinge/slide coords only; ball/free coords get 0
+        # (weight 1, full sensitivity). All-zero when the flag is off => weight exactly 1.
+        kd_over_m = np.zeros(self._nq, dtype=np.float32)
+        if os.environ.get("NEWTON_ADAPTIVE_FILTERED_ERR", "0") == "1":
+            mjm = self.mj_model
+            dof_kd = np.array(mjm.dof_damping, dtype=np.float64).copy()
+            for a in range(mjm.nu):
+                if mjm.actuator_trntype[a] == 0 and mjm.actuator_biastype[a] == 1:  # joint, affine
+                    j = mjm.actuator_trnid[a, 0]
+                    dof_kd[mjm.jnt_dofadr[j]] += -float(mjm.actuator_biasprm[a, 2])
+            m0 = np.maximum(np.array(mjm.dof_M0, dtype=np.float64), 1e-12)
+            for j in range(mjm.njnt):
+                if mjm.jnt_type[j] in (2, 3):  # slide, hinge: one dof, one qpos coord
+                    kd_over_m[mjm.jnt_qposadr[j]] = dof_kd[mjm.jnt_dofadr[j]] / m0[mjm.jnt_dofadr[j]]
+        self._kd_over_m = wp.array(kd_over_m, dtype=wp.float32, device=device)
+
+        # ---- injected-contact refresh ----
+        # With use_newton_contacts, the boundary call converts the CollisionPipeline
+        # contacts ONCE with boundary-entry transforms. The inner march must NOT reuse
+        # the boundary ``dist``: a stale negative dist keeps firing penalty force into
+        # a body that has already separated — energy injection the step-doubling
+        # controller CANNOT see (both trial solutions share the snapshot, so the error
+        # cancels in the comparison). So dist/pos are re-anchored to the CURRENT
+        # marching state at every iteration via the conversion kernel's fast path
+        # (frame/solref/friction stay from the boundary full pass).
+        # NEWTON_ADAPTIVE_NO_CONTACT_REFRESH=1 restores the frozen behavior.
+        self._contact_refresh_enabled = self._use_newton_contacts and (
+            os.environ.get("NEWTON_ADAPTIVE_NO_CONTACT_REFRESH", "0") != "1"
+        )
+        self._refresh_state = self.model.state() if self._contact_refresh_enabled else None
+        self._refresh_contacts = None
+        self._refresh_contacts_key = None
 
         # ---- solver-internal CUDA-graph capture ----
         # Default tier: one REGULAR graph per iteration body (keyed by effective dt_max),
@@ -590,7 +694,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._march_graph_cache: dict = {}
         self._march_warmed = False
 
-        # ---- conditional-march tier (opt-in; targets wall time on fast GPUs) ----
+        # ---- conditional-march tier (opt-in) ----
         # NEWTON_MJ_ADAPTIVE_CONDITIONAL=1 runs the WHOLE boundary loop as one CUDA
         # conditional while-node (wp.capture_while): zero host syncs per boundary, and an
         # outer manager-level capture may wrap the full decimation loop around it. This
@@ -615,11 +719,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # (KBI terms scale with dt), constraint solve, integrate -- reusing the prefix
         # the full eval left in mjw_data (its integrator advanced only qpos/qvel/act,
         # which the rollback restores; smooth.py has no timestep dependence). Bonus:
-        # both Richardson estimates then judge the IDENTICAL contact set. Validated in
-        # production (RTX 5090, 8192 Allegro-reorient envs): -15.3% wall time with
-        # iteration parity and error well under tol. NEWTON_MJ_ADAPTIVE_SHARED_FWD=0
-        # opts out. Euler/implicitfast only: RK4 re-runs forward inside its integrator
-        # and falls back to full evals (silently, unless the flag was set explicitly).
+        # both Richardson estimates then judge the IDENTICAL contact set.
+        # NEWTON_MJ_ADAPTIVE_SHARED_FWD=0 opts out. Euler/implicitfast only: RK4
+        # re-runs forward inside its integrator and falls back to full evals
+        # (silently, unless the flag was set explicitly).
         _shared_fwd_env = os.environ.get("NEWTON_MJ_ADAPTIVE_SHARED_FWD")
         self._shared_fwd = (_shared_fwd_env or "1") == "1"
         self._mjw_suffix_integrate = None
@@ -745,6 +848,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self.mjw_data.qpos,
                 self._state_scale,
                 self._nq,
+                self._kd_over_m,
+                self._dt,
+                self.mjw_data.qvel,
+                self._nv,
             ],
             outputs=[self._last_error],
             device=self.model.device,
@@ -781,6 +888,73 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     # =====================================================================
     # Per-frame iteration bodies (the captured/replayed substep bodies)
     # =====================================================================
+    def _refresh_injected_contacts(self) -> None:
+        """Re-anchor injected Newton contacts to the CURRENT marching state.
+
+        mjw qpos/qvel -> Newton joint coords -> FK body poses -> conversion-kernel
+        FAST path (recomputes contact ``dist``/``pos`` only; frame, solref, friction
+        and the compacted layout stay from the boundary full pass). Flat kernel
+        launches on buffers preallocated in ``__init__`` — records cleanly inside
+        the captured iteration graph.
+        """
+        model = self.model
+        st = self._refresh_state
+        mjw = self.mjw_data
+        joints_per_world = model.joint_count // mjw.nworld
+        mujoco_attrs = getattr(model, "mujoco", None)
+        dof_ref = getattr(mujoco_attrs, "dof_ref", None) if mujoco_attrs is not None else None
+        # st.joint_q/qd double as state_prev: the kernel copies kinematic dofs
+        # prev -> out element-wise, which is alias-safe.
+        wp.launch(
+            convert_mj_coords_to_warp_kernel,
+            dim=(mjw.nworld, joints_per_world),
+            inputs=[
+                mjw.qpos,
+                mjw.qvel,
+                joints_per_world,
+                model.joint_type,
+                model.joint_q_start,
+                model.joint_qd_start,
+                model.joint_dof_dim,
+                model.joint_child,
+                model.joint_X_p,
+                model.joint_X_c,
+                model.body_com,
+                dof_ref,
+                model.body_flags,
+                st.joint_q,
+                st.joint_qd,
+                self.mj_q_start,
+                self.mj_qd_start,
+            ],
+            outputs=[st.joint_q, st.joint_qd],
+            device=model.device,
+        )
+        wp.launch(
+            kernel=eval_articulation_fk,
+            dim=model.articulation_count,
+            inputs=[
+                model.articulation_start,
+                model.articulation_end,
+                model.joint_articulation,
+                st.joint_q,
+                st.joint_qd,
+                model.joint_q_start,
+                model.joint_qd_start,
+                model.joint_type,
+                model.joint_parent,
+                model.joint_child,
+                model.joint_X_p,
+                model.joint_X_c,
+                model.joint_axis,
+                model.joint_dof_dim,
+                model.body_com,
+            ],
+            outputs=[st.body_q, st.body_qd],
+            device=model.device,
+        )
+        self._convert_contacts_to_mjwarp(model, st, self._refresh_contacts)
+
     def _run_iteration_body(self, effective_dt_max: float) -> None:
         """ONE ragged adaptive iteration: clamp -> step-double -> error -> Drake controller ->
         masked rollback -> advance -> dt cap -> boundary check. All in MuJoCo qpos/qvel space.
@@ -800,9 +974,15 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         wp.launch(
             _clamp_dt_to_boundary,
             dim=n,
-            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time],
+            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time, self._limited],
             device=dev,
         )
+
+        # Re-anchor injected contacts to the current committed state BEFORE the
+        # trials: they must not push against boundary-stale penetration (energy
+        # injection at footfall — the "flying robots" failure).
+        if self._contact_refresh_enabled and self._refresh_contacts is not None:
+            self._refresh_injected_contacts()
 
         # --- adaptive core: step double, estimate error, run the controller ---
         self._step_double()
@@ -820,6 +1000,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._tol,
                 self._dt_min,
                 self._divergence_threshold,
+                self._limited,
+                self._consec_rej,
+                self._order_aware_flag,
+                self._sliver_fix_flag,
+                self._nan_guard_flag,
+                self._sim_time,
+                self._next_time,
             ],
             device=dev,
         )
@@ -869,13 +1056,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         dt: float | None = None,
         apply_forces=None,
     ) -> tuple[State, State]:
-        """Advance every world by exactly ``dt`` (= ``dt_outer``) seconds of sim time (= CENIC
-        ``DoStep`` + the N-substep march): the boundary call.
+        """Advance every world by exactly ``dt`` (= ``dt_outer``) seconds of sim time:
+        the boundary call.
 
         Newton solver signature ``(state_in, state_out, control, contacts, dt)``. ``state_in`` is
         read and written in place; ``state_out`` is returned unchanged (scratch). ``contacts`` is
-        accepted for signature uniformity but UNUSED -- MuJoCo runs its own collision detection
-        inside each step-doubling substep (``use_mujoco_contacts=True``).
+        UNUSED when constructed with MuJoCo-native contacts (the default), and REQUIRED
+        when ``use_newton_contacts=True`` — injected once per boundary, with dist/pos
+        re-anchored per iteration while the contact refresh is enabled.
 
         Ragged tiling: adaptive boundary loop with a graph-captured iteration body when
         available and a 4-byte ``.numpy()`` boundary-flag read-back per iteration;
@@ -908,8 +1096,29 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Load the incoming Newton state into MuJoCo coordinates ONCE per boundary;
         # the whole inner loop then marches mjw_data.qpos/qvel directly.
         self._update_mjc_data(self.mjw_data, self.model, state_0)
+        if self._use_newton_contacts:
+            if contacts is None:
+                raise ValueError(
+                    "SolverMuJoCoAdaptive(use_newton_contacts=True) requires contacts= at step(); "
+                    "feed the Newton CollisionPipeline contacts from the caller."
+                )
+            # Convert once with boundary-entry transforms (FULL path:
+            # frame/solref/friction/layout); the inner march refreshes dist/pos per
+            # iteration via _refresh_injected_contacts (fast path).
+            self._convert_contacts_to_mjwarp(self.model, state_0, contacts)
+            if self._contact_refresh_enabled:
+                # Seed the refresh scratch (kinematic dofs are copied from prev).
+                self._copy_state(self._refresh_state, state_0)
+                self._refresh_contacts = contacts
+                # A different Contacts object would leave stale device pointers
+                # baked into the captured iteration graphs — drop the caches.
+                key = id(contacts.contact_generation)
+                if key != self._refresh_contacts_key:
+                    self._refresh_contacts_key = key
+                    self._march_graph_cache.clear()
+                    self._conditional_graph_cache.clear()
 
-        # Fix B: rebase both clocks by the per-world boundary so float32 magnitude stays bounded
+        # Rebase both clocks by the per-world boundary so float32 magnitude stays bounded
         # (prevents landing-remainder precision loss / dt jitter that grows over a run). The
         # subtract-baseline preserves the remaining time exactly; do this BEFORE advancing next_time.
         wp.launch(_rebase_time, dim=n, inputs=[self._sim_time, self._next_time], device=device)
@@ -1006,9 +1215,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         """Best-effort: never leave the stream in capture mode after a failed capture.
 
         A stream stuck mid-capture silently records every subsequent launch into an
-        orphan graph, which manifests later as bogus OOMs -- observed on the first
-        conditional-capture experiment. Belt-and-braces alongside ScopedCapture's own
-        cleanup."""
+        orphan graph, which manifests later as bogus OOMs. Belt-and-braces alongside
+        ScopedCapture's own cleanup."""
         try:
             dev = wp.get_device(self.model.device)
             stream = wp.get_stream(dev)
@@ -1103,14 +1311,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         world_mask: wp.array | None = None,
         flags=None,
     ) -> None:
-        """Restore per-world adaptive-controller state for reset worlds (Fix C).
+        """Restore per-world adaptive-controller state for reset worlds.
 
         Overrides :meth:`SolverMuJoCo.reset` (which clears MuJoCo warm-start
         buffers and, per ``flags``, resets joint state to model defaults) and
         ADDITIONALLY restores this controller's persistent per-world buffers
         (ideal_dt/dt/dt_half/sim_time/next_time + the accepted/diverged latches)
         to construction defaults, so pre-reset controller state never leaks into
-        the post-reset (s,a)->s' map. Also the consumer of Fix A's ``diverged``
+        the post-reset (s,a)->s' map. Also the consumer of the ``diverged``
         latch: passing ``world_mask=self.diverged`` clears flagged worlds.
 
         Pass ``flags=0`` (StateFlags none) to keep the env's randomized post-reset
@@ -1142,10 +1350,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     def diverged(self) -> wp.array:
         """Per-world divergence latch, shape ``[world_count]``, bool, on device.
 
-        CURRENTLY A DORMANT NO-OP: the floor latch was removed from
-        :func:`_calc_adjusted_step` (a non-finite world at the ``dt_min`` floor now
-        commits through the ``e > tol`` path like any can't-meet-tol world), so this
-        array is never set and stays all-False. Kept for API compatibility.
+        Set by the NaN-guard floor path in :func:`_calc_adjusted_step` (on by
+        default; ``NEWTON_ADAPTIVE_NAN_GUARD=0`` disables it, leaving this
+        all-False). Cleared per world by :meth:`reset`.
         """
         return self._diverged
 
@@ -1176,7 +1383,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         """Per-world simulation time [s], shape ``[world_count]``, float32, on device.
 
         Only advances for accepted steps. Rebased to its outer boundary at the start of
-        each :meth:`step_dt` (Fix B float32 time-rebase), so this is the time WITHIN the
+        each :meth:`step_dt` (float32 time-rebase), so this is the time WITHIN the
         current outer interval (``~[0, dt_outer]``), not absolute cumulative time. A
         consumer needing absolute time must accumulate ``dt_outer`` itself.
         """
