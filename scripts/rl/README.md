@@ -38,7 +38,7 @@ untouched.
   stiff / non-convex-SDF tunneling contact**.
 
 (The Trossen teacher/student workstream was removed 2026-07-02: it predated and did not use the
-isaac-rubato study setup.)
+IsaacLabRubato (then isaac-rubato) study setup.)
 
 ## Running
 
