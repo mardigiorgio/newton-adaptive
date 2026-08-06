@@ -50,6 +50,7 @@ so this solver is self-contained: open this one file to see all of its logic.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import warnings
 
@@ -81,6 +82,70 @@ def _apply_dt_cap(
     actual = wp.clamp(ideal_dt[i], dt_min, dt_max)
     dt[i] = actual
     dt_half[i] = actual * wp.float32(0.5)
+
+
+def _dt_hist_layout(dt_min: float, dt_init: float, bins_per_decade: int) -> tuple[int, float]:
+    """Bin count and low edge for the dt-occupancy histogram.
+
+    One extra decade above ``dt_init`` is included because the controller may grow the
+    step beyond its initial value, up to the outer boundary period.
+
+    Args:
+        dt_min: Adaptive timestep floor [s].
+        dt_init: Initial adaptive timestep [s].
+        bins_per_decade: Log-spaced bins per decade.
+
+    Returns:
+        ``(n_bins, lo_log10)`` -- total bin count (floor bin + log bins + overflow bin)
+        and ``log10(dt_min)``.
+    """
+    lo_log10 = math.log10(dt_min)
+    n_decades = math.ceil(math.log10(dt_init / dt_min)) + 1
+    return 1 + n_decades * bins_per_decade + 1, lo_log10
+
+
+def _dt_hist_edges(dt_min: float, n_bins: int, bins_per_decade: int) -> np.ndarray:
+    """Edges [s] of the log-spaced bins, i.e. bins ``1 .. n_bins - 2``.
+
+    Length is ``n_bins - 1``: the floor bin (0) and the overflow bin (``n_bins - 1``)
+    are open-ended and contribute no finite edge of their own.
+    """
+    return dt_min * 10.0 ** (np.arange(n_bins - 1) / float(bins_per_decade))
+
+
+@wp.kernel
+def _dt_histogram_accum(
+    dt: wp.array[wp.float32],
+    ideal_dt: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt_min: float,
+    lo_log10: float,
+    bins_per_decade: float,
+    n_bins: int,
+    counts: wp.array[wp.int64],
+    saturation: wp.array[wp.float32],
+):
+    """Bin the timestep this iteration is about to attempt.
+
+    Launched at the TOP of the iteration body, before ``_clamp_dt_to_boundary``: at that
+    point ``dt`` still holds the controller's chosen step, not a landing sliver. Worlds
+    already at their boundary are skipped -- they take no further step this interval.
+
+    Bin 0 counts exact floor hits; ``_apply_dt_cap`` produces bitwise ``dt_min`` on clamp,
+    so the equality test is reliable. ``saturation`` accumulates ``min(ideal_dt)`` over
+    floor-clamped worlds, showing how far below the floor the controller wanted to go.
+    """
+    i = wp.tid()
+    if sim_time[i] >= next_time[i]:
+        return
+    h = dt[i]
+    if h <= dt_min:
+        wp.atomic_add(counts, 0, wp.int64(1))
+        wp.atomic_min(saturation, 0, ideal_dt[i])
+        return
+    b = 1 + int(wp.floor((wp.log10(h) - lo_log10) * bins_per_decade))
+    wp.atomic_add(counts, wp.clamp(b, 1, n_bins - 1), wp.int64(1))
 
 
 @wp.kernel

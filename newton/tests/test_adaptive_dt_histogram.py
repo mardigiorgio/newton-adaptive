@@ -1,0 +1,151 @@
+"""Contract tests for the adaptive dt-occupancy histogram.
+
+The bin-logic tests are pure-kernel: warp on CPU, no GPU / MuJoCo / scene needed,
+mirroring test_adaptive_floor_nan_guard.py. The solver-integration tests added later
+DO need CUDA (SolverMuJoCoAdaptive forces use_mujoco_cpu=False) and self-skip without it.
+
+Contract:
+  * bin 0 counts EXACT floor hits (dt <= dt_min); _apply_dt_cap's wp.clamp
+    returns bitwise dt_min on clamp, so equality is reliable.
+  * bins 1..n_bins-1 are log10-spaced, bins_per_decade per decade, with the
+    last bin absorbing everything above the range.
+  * worlds that already landed (sim_time >= next_time) are NOT counted -- they
+    will not take the step being sampled.
+  * the saturation scalar tracks min(ideal_dt) over floor-clamped worlds only.
+"""
+
+import numpy as np
+import warp as wp
+
+from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
+    _dt_hist_edges,
+    _dt_hist_layout,
+    _dt_histogram_accum,
+)
+
+wp.init()
+
+DEV = "cpu"
+DT_MIN = 1.0e-6
+DT_INIT = 1.0e-2
+BPD = 4
+SENTINEL = 1.0e38
+
+
+def _run(dt_vals, ideal_vals=None, landed=None):
+    """Launch the kernel over one synthetic batch; return (counts, saturation)."""
+    n = len(dt_vals)
+    if ideal_vals is None:
+        ideal_vals = dt_vals
+    if landed is None:
+        landed = [False] * n
+    n_bins, lo_log10 = _dt_hist_layout(DT_MIN, DT_INIT, BPD)
+    # A landed world has sim_time >= next_time.
+    sim_time = np.zeros(n, dtype=np.float32)
+    next_time = np.array([0.0 if x else 1.0 for x in landed], dtype=np.float32)
+    counts = wp.zeros(n_bins, dtype=wp.int64, device=DEV)
+    sat = wp.array(np.array([SENTINEL], dtype=np.float32), dtype=wp.float32, device=DEV)
+    wp.launch(
+        _dt_histogram_accum,
+        dim=n,
+        inputs=[
+            wp.array(np.asarray(dt_vals, dtype=np.float32), dtype=wp.float32, device=DEV),
+            wp.array(np.asarray(ideal_vals, dtype=np.float32), dtype=wp.float32, device=DEV),
+            wp.array(sim_time, dtype=wp.float32, device=DEV),
+            wp.array(next_time, dtype=wp.float32, device=DEV),
+            DT_MIN,
+            lo_log10,
+            float(BPD),
+            n_bins,
+            counts,
+            sat,
+        ],
+        device=DEV,
+    )
+    return counts.numpy(), float(sat.numpy()[0])
+
+
+def test_layout_matches_defaults():
+    """IsaacLab defaults give 5 decades -> 1 floor + 20 log + 1 overflow = 22 bins."""
+    n_bins, lo_log10 = _dt_hist_layout(DT_MIN, DT_INIT, BPD)
+    assert n_bins == 22, f"expected 22 bins, got {n_bins}"
+    assert abs(lo_log10 - (-6.0)) < 1e-12, f"expected lo_log10=-6, got {lo_log10}"
+
+
+def test_exact_floor_lands_in_bin_zero():
+    counts, _ = _run([DT_MIN, DT_MIN, 5.0e-3])
+    assert counts[0] == 2, f"expected 2 floor hits, got {counts[0]}"
+    assert counts.sum() == 3, f"expected 3 total, got {counts.sum()}"
+
+
+def test_above_floor_never_lands_in_bin_zero():
+    """A dt one ulp above the floor is NOT a floor hit."""
+    just_above = np.nextafter(np.float32(DT_MIN), np.float32(1.0))
+    counts, _ = _run([just_above])
+    assert counts[0] == 0, "value above the floor must not count as a floor hit"
+    assert counts[1] == 1, f"expected it in bin 1, got bins {np.nonzero(counts)[0]}"
+
+
+def test_landed_worlds_are_not_counted():
+    """A world whose sim_time has reached next_time will not take this step."""
+    counts, _ = _run([DT_MIN, 5.0e-3], landed=[False, True])
+    assert counts.sum() == 1, f"landed world must be skipped, got total {counts.sum()}"
+    assert counts[0] == 1
+
+
+def test_bin_centers_round_trip():
+    """Every log bin is hit exactly once when sampled at its geometric center.
+
+    Bin CENTERS, not edges: a float32 value equal to an edge can fall either
+    side of the float64 edge (np.float32(1e-5) < 1.0000000000000002e-05), which
+    makes edge-valued samples ambiguous by construction.
+    """
+    n_bins, _ = _dt_hist_layout(DT_MIN, DT_INIT, BPD)
+    edges = _dt_hist_edges(DT_MIN, n_bins, BPD)
+    centers = np.sqrt(edges[:-1] * edges[1:])  # geometric mean of each bin
+    counts, _ = _run(centers.astype(np.float32))
+    for b in range(1, len(centers) + 1):
+        assert counts[b] == 1, f"bin {b} got {counts[b]}, expected 1"
+
+
+def test_overflow_bin_absorbs_large_dt():
+    n_bins, _ = _dt_hist_layout(DT_MIN, DT_INIT, BPD)
+    counts, _ = _run([1.0, 1.0e6])
+    assert counts[n_bins - 1] == 2, f"expected 2 in overflow bin, got {counts[n_bins - 1]}"
+
+
+def test_saturation_tracks_min_ideal_dt_at_floor_only():
+    """Saturation depth reads ideal_dt (which is preserved below the floor), and
+    only for worlds actually clamped to the floor."""
+    counts, sat = _run(
+        dt_vals=[DT_MIN, DT_MIN, 5.0e-3],
+        ideal_vals=[1.0e-9, 3.0e-8, 1.0e-12],  # the third is NOT at the floor
+    )
+    assert counts[0] == 2
+    assert abs(sat - 1.0e-9) < 1e-15, f"expected saturation 1e-9, got {sat}"
+
+
+def test_saturation_stays_sentinel_when_floor_never_hit():
+    """SENTINEL is compared via its float32 round-trip, not the double literal:
+    1.0e38 is not exactly representable in float32 (unlike test_adaptive_floor_nan_guard's
+    SENTINEL = 1.0e10, where 5**10 fits the 24-bit mantissa), so the wp.array construction
+    in _run already rounds it -- the untouched value is that rounded value, not 1.0e38."""
+    _, sat = _run([5.0e-3, 8.0e-3])
+    expected = float(np.float32(SENTINEL))
+    assert sat == expected, f"expected untouched sentinel, got {sat}"
+
+
+if __name__ == "__main__":
+    import sys
+
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"PASS {fn.__name__}")
+        except Exception as e:
+            failed += 1
+            print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns) - failed}/{len(fns)} passed")
+    sys.exit(1 if failed else 0)
