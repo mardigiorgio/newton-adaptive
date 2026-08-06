@@ -113,6 +113,15 @@ def _dt_hist_edges(dt_min: float, n_bins: int, bins_per_decade: int) -> np.ndarr
     return dt_min * 10.0 ** (np.arange(n_bins - 1) / float(bins_per_decade))
 
 
+_DT_HIST_SENTINEL = 1.0e38
+"""Initial value of the saturation-depth accumulator; means "floor never hit".
+
+Not exactly representable in float32 (rounds to ``9.9999997e37``), so any comparison
+against the untouched accumulator must go through ``float(np.float32(_DT_HIST_SENTINEL))``
+rather than the raw double literal -- see :meth:`SolverMuJoCoAdaptive.dt_histogram_stats`.
+"""
+
+
 @wp.kernel
 def _dt_histogram_accum(
     dt: wp.array[wp.float32],
@@ -559,6 +568,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         tiling: str = "ragged",
         max_substeps: int = 256,
         use_newton_contacts: bool = False,
+        dt_histogram: bool = False,
+        dt_histogram_bins_per_decade: int = 4,
         **kwargs,
     ):
         """
@@ -580,6 +591,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             max_substeps: Hard upper bound on inner adaptive attempts per control interval. The
                 loop stops after this many iterations and exposes any lag through ``sim_time``.
                 Bounds worst-case work when a world's ideal_dt collapses to the dt_min floor.
+            dt_histogram: Accumulate a per-iteration histogram of the inner timestep so
+                floor occupancy is measurable. Off by default: it adds one kernel launch
+                per adaptive iteration, which would perturb benchmark timings. Must be set
+                at construction — the flag is baked into the captured iteration graph.
+            dt_histogram_bins_per_decade: Log-spaced bins per decade when
+                ``dt_histogram`` is enabled.
             **kwargs: Forwarded to :class:`SolverMuJoCo`.
         """
         if dt_mode != "per_world":
@@ -692,6 +709,20 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Used as the compute axis for work-precision. Reset with
         # reset_compute_counter().
         self._cum_iters = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
+        # iteration body. int64 because a long run at 4096 worlds overflows int32.
+        self._dt_hist: wp.array | None = None
+        self._dt_hist_sat: wp.array | None = None
+        self._dt_hist_bpd = int(dt_histogram_bins_per_decade)
+        self._dt_hist_n_bins = 0
+        self._dt_hist_lo_log10 = 0.0
+        if dt_histogram:
+            self._dt_hist_n_bins, self._dt_hist_lo_log10 = _dt_hist_layout(
+                self._dt_min, self._dt_inner_init, self._dt_hist_bpd
+            )
+            self._dt_hist = wp.zeros(self._dt_hist_n_bins, dtype=wp.int64, device=device)
+            self._dt_hist_sat = wp.full(1, _DT_HIST_SENTINEL, dtype=wp.float32, device=device)
 
         # Stable buffer for opt.timestep; updated via wp.copy() per substep.
         self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
@@ -1030,6 +1061,27 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         """
         n = self.model.world_count
         dev = self.model.device
+
+        # Sample BEFORE _clamp_dt_to_boundary: dt still holds the controller's chosen
+        # step here, not a landing sliver.
+        if self._dt_hist is not None:
+            wp.launch(
+                _dt_histogram_accum,
+                dim=n,
+                inputs=[
+                    self._dt,
+                    self._ideal_dt,
+                    self._sim_time,
+                    self._next_time,
+                    self._dt_min,
+                    self._dt_hist_lo_log10,
+                    float(self._dt_hist_bpd),
+                    self._dt_hist_n_bins,
+                    self._dt_hist,
+                    self._dt_hist_sat,
+                ],
+                device=dev,
+            )
 
         # Count this attempt (per-step + cumulative). A rejection is just another iteration.
         wp.launch(_iter_count_increment, dim=1, inputs=[self._iteration_count_buf], device=dev)
@@ -1442,6 +1494,69 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     def reset_compute_counter(self) -> None:
         """Zero the cumulative iteration/substep counter."""
         self._cum_iters.fill_(0)
+
+    @property
+    def dt_histogram(self) -> wp.array | None:
+        """Per-bin counts of attempted inner steps, shape ``[n_bins]``, int64, on device.
+
+        ``None`` unless the solver was constructed with ``dt_histogram=True``. Bin 0 counts
+        steps taken at the ``dt_inner_min`` floor, bins ``1 .. n_bins - 2`` are log-spaced
+        (see :attr:`dt_histogram_edges`), and the last bin absorbs everything above the
+        range. Read with ``.numpy()`` OUTSIDE the inner loop only (it is a device sync).
+        """
+        return self._dt_hist
+
+    @property
+    def dt_histogram_edges(self) -> np.ndarray | None:
+        """Edges [s] of the log-spaced histogram bins, shape ``[n_bins - 1]``.
+
+        ``None`` unless ``dt_histogram=True``. The floor and overflow bins are open-ended
+        and contribute no finite edge, so this is one shorter than :attr:`dt_histogram`.
+        """
+        if self._dt_hist is None:
+            return None
+        return _dt_hist_edges(self._dt_min, self._dt_hist_n_bins, self._dt_hist_bpd)
+
+    def reset_dt_histogram(self) -> None:
+        """Zero the histogram and saturation accumulators.
+
+        Call after warmup so graph capture and initial dt settling stay out of the counts.
+        No-op when the histogram is disabled.
+        """
+        if self._dt_hist is None:
+            return
+        self._dt_hist.zero_()
+        self._dt_hist_sat.fill_(_DT_HIST_SENTINEL)
+
+    def dt_histogram_stats(self) -> dict[str, float]:
+        """Scalar summary of floor occupancy. Host sync; call outside the hot path.
+
+        Returns:
+            ``total_samples`` (attempted inner steps counted), ``floor_samples``,
+            ``floor_fraction`` (0..1), and ``saturation_depth`` -- the smallest
+            ``ideal_dt`` [s] the controller asked for while clamped to the floor, or
+            ``0.0`` if the floor was never hit.
+
+        Raises:
+            RuntimeError: If the solver was not constructed with ``dt_histogram=True``.
+        """
+        if self._dt_hist is None:
+            raise RuntimeError("dt_histogram_stats() requires SolverMuJoCoAdaptive(dt_histogram=True)")
+        counts = self._dt_hist.numpy()
+        total = int(counts.sum())
+        floor = int(counts[0])
+        sat = float(self._dt_hist_sat.numpy()[0])
+        # _DT_HIST_SENTINEL (1e38) is not exactly representable in float32: the untouched
+        # accumulator reads back as 9.9999997e37, which is < 1.0e38. Comparing against the
+        # raw double literal would never fire, so "floor never hit" must compare against
+        # the SAME float32 round-trip the accumulator itself went through.
+        never_hit = sat >= float(np.float32(_DT_HIST_SENTINEL))
+        return {
+            "total_samples": total,
+            "floor_samples": floor,
+            "floor_fraction": (floor / total) if total else 0.0,
+            "saturation_depth": 0.0 if never_hit else sat,
+        }
 
     @property
     def sim_time(self) -> wp.array:

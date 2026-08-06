@@ -17,11 +17,13 @@ Contract:
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
     _dt_hist_edges,
     _dt_hist_layout,
     _dt_histogram_accum,
 )
+from newton.solvers import SolverMuJoCoAdaptive
 
 wp.init()
 
@@ -133,6 +135,83 @@ def test_saturation_stays_sentinel_when_floor_never_hit():
     _, sat = _run([5.0e-3, 8.0e-3])
     expected = float(np.float32(SENTINEL))
     assert sat == expected, f"expected untouched sentinel, got {sat}"
+
+
+_GPU = wp.get_cuda_device_count() > 0
+
+
+def _skip_without_gpu(name: str) -> bool:
+    """SolverMuJoCoAdaptive forces use_mujoco_cpu=False, so these need a CUDA device."""
+    if not _GPU:
+        print(f"SKIP {name}: no CUDA device")
+        return True
+    return False
+
+
+def _one_sphere_solver(**solver_kwargs):
+    """Minimal falling-sphere scene + adaptive solver; returns (solver, s0, s1, control).
+
+    Bodies must be added inside a ``begin_world()``/``end_world()`` context -- the
+    global world (-1) may not contain bodies. ``add_body()`` already creates the
+    free joint connecting the body to the world, so no separate ``add_joint_free()``
+    call is needed (that would double up into an unsupported loop joint).
+    """
+    builder = newton.ModelBuilder()
+    builder.begin_world()
+    b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_sphere(b, radius=0.1)
+    builder.end_world()
+    builder.add_ground_plane()
+    model = builder.finalize()
+
+    solver = SolverMuJoCoAdaptive(model, **solver_kwargs)
+    s0, s1 = model.state(), model.state()
+    control = model.control()
+    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
+    return solver, s0, s1, control
+
+
+def test_disabled_by_default_exposes_nothing():
+    """Off by default so benchmark timings stay uncontaminated."""
+    if _skip_without_gpu("test_disabled_by_default_exposes_nothing"):
+        return
+    solver, _, _, _ = _one_sphere_solver(dt_inner_init=1e-3, dt_inner_min=1e-5)
+    assert solver.dt_histogram is None
+    assert solver.dt_histogram_edges is None
+    try:
+        solver.dt_histogram_stats()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("dt_histogram_stats() must raise RuntimeError when disabled")
+
+
+def test_enabled_accumulates_over_a_boundary():
+    """With the histogram on, a real boundary call records one sample per attempt."""
+    if _skip_without_gpu("test_enabled_accumulates_over_a_boundary"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(dt_inner_init=1e-3, dt_inner_min=1e-5, dt_histogram=True)
+    solver.reset_dt_histogram()
+    s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+
+    counts = solver.dt_histogram.numpy()
+    assert counts.sum() > 0, "histogram recorded nothing over a boundary call"
+    edges = solver.dt_histogram_edges
+    assert len(edges) == len(counts) - 1, "edges must be one shorter than bins"
+    stats = solver.dt_histogram_stats()
+    assert stats["total_samples"] == int(counts.sum())
+
+
+def test_reset_zeroes_the_accumulators():
+    if _skip_without_gpu("test_reset_zeroes_the_accumulators"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(dt_inner_init=1e-3, dt_inner_min=1e-5, dt_histogram=True)
+    s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+    assert solver.dt_histogram.numpy().sum() > 0
+
+    solver.reset_dt_histogram()
+    assert solver.dt_histogram.numpy().sum() == 0
+    assert solver.dt_histogram_stats()["saturation_depth"] == 0.0
 
 
 if __name__ == "__main__":
