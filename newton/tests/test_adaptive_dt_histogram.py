@@ -214,6 +214,65 @@ def test_reset_zeroes_the_accumulators():
     assert solver.dt_histogram_stats()["saturation_depth"] == 0.0
 
 
+def test_truncation_counters_fire_when_capped():
+    """max_substeps=1 cannot cross a 1/120 s boundary at dt=1e-3, so every
+    boundary truncates and every world ends short of its target time."""
+    if _skip_without_gpu("test_truncation_counters_fire_when_capped"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(
+        dt_inner_init=1e-3, dt_inner_min=1e-5, max_substeps=1, dt_histogram=True
+    )
+    solver.reset_dt_histogram()
+    for _ in range(3):
+        s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+
+    stats = solver.dt_histogram_stats()
+    assert stats["boundaries"] == 3, f"expected 3 boundaries, got {stats['boundaries']}"
+    assert stats["capped_boundaries"] == 3, f"expected 3 capped, got {stats['capped_boundaries']}"
+    assert stats["unfinished_worlds"] == 3, f"expected 3 world-boundaries short, got {stats['unfinished_worlds']}"
+
+
+def test_truncation_counters_stay_zero_when_uncapped():
+    """A generous cap lets every boundary complete."""
+    if _skip_without_gpu("test_truncation_counters_stay_zero_when_uncapped"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(
+        dt_inner_init=1e-3, dt_inner_min=1e-5, max_substeps=256, dt_histogram=True
+    )
+    solver.reset_dt_histogram()
+    for _ in range(3):
+        s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+
+    stats = solver.dt_histogram_stats()
+    assert stats["boundaries"] == 3
+    assert stats["capped_boundaries"] == 0, f"unexpected truncation: {stats}"
+    assert stats["unfinished_worlds"] == 0, f"worlds fell short: {stats}"
+
+
+def test_saturation_depth_nonzero_when_floor_is_hit():
+    """Public-API coverage for the non-zero saturation_depth branch of
+    dt_histogram_stats(): a very tight tol (1e-8) rejects nearly every attempt even
+    during smooth free fall, and dt_inner_min close to dt_inner_init leaves almost no
+    room to shrink into before the controller clamps to the floor. Verified empirically
+    (see task-3-report.md) -- floor_samples > 0 within the very first boundary, with
+    ideal_dt shrinking well below dt_inner_min once clamped. saturation_depth must
+    report that true minimum ideal_dt, not 0.0 (which means "floor never hit")."""
+    if _skip_without_gpu("test_saturation_depth_nonzero_when_floor_is_hit"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(
+        dt_inner_init=1e-3, dt_inner_min=9.9e-4, max_substeps=256, dt_histogram=True, tol=1e-8
+    )
+    solver.reset_dt_histogram()
+    for _ in range(3):
+        s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+
+    stats = solver.dt_histogram_stats()
+    assert stats["floor_samples"] > 0, f"expected the floor to be hit, got {stats}"
+    assert 0.0 < stats["saturation_depth"] < 9.9e-4, (
+        f"expected a positive saturation_depth below dt_inner_min, got {stats['saturation_depth']}"
+    )
+
+
 if __name__ == "__main__":
     import sys
 

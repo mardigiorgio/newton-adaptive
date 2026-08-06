@@ -437,6 +437,35 @@ def _boundary_check(
 
 
 @wp.kernel
+def _count_boundary_truncation(
+    iter_count: wp.array[wp.int32],
+    max_iters: int,
+    out: wp.array[wp.int64],
+):
+    """Record one boundary, and whether ``max_substeps`` truncated it (dim=1).
+
+    ``out[0]`` counts boundaries, ``out[1]`` counts truncated ones. A truncated boundary
+    exits with worlds still short of their target time -- silent under-advance in
+    simulated time, the failure mode a collapsing dt actually produces.
+    """
+    out[0] = out[0] + wp.int64(1)
+    if iter_count[0] >= max_iters:
+        out[1] = out[1] + wp.int64(1)
+
+
+@wp.kernel
+def _count_unfinished_worlds(
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    out: wp.array[wp.int64],
+):
+    """Accumulate world-boundaries that ended short of the target time into ``out[2]``."""
+    i = wp.tid()
+    if sim_time[i] < next_time[i]:
+        wp.atomic_add(out, 2, wp.int64(1))
+
+
+@wp.kernel
 def _boundary_advance(arr: wp.array[wp.float32], delta: float):
     """Increment arr[i] by delta."""
     i = wp.tid()
@@ -714,6 +743,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # iteration body. int64 because a long run at 4096 worlds overflows int32.
         self._dt_hist: wp.array | None = None
         self._dt_hist_sat: wp.array | None = None
+        self._dt_hist_trunc: wp.array | None = None
         self._dt_hist_bpd = int(dt_histogram_bins_per_decade)
         self._dt_hist_n_bins = 0
         self._dt_hist_lo_log10 = 0.0
@@ -723,6 +753,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             )
             self._dt_hist = wp.zeros(self._dt_hist_n_bins, dtype=wp.int64, device=device)
             self._dt_hist_sat = wp.full(1, _DT_HIST_SENTINEL, dtype=wp.float32, device=device)
+            # [0] boundaries, [1] truncated by max_substeps, [2] world-boundaries short of target
+            self._dt_hist_trunc = wp.zeros(3, dtype=wp.int64, device=device)
 
         # Stable buffer for opt.timestep; updated via wp.copy() per substep.
         self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
@@ -1246,6 +1278,21 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
         self._march_ragged(effective_dt_max)
 
+        # Once per boundary, outside the captured body: no per-iteration cost.
+        if self._dt_hist_trunc is not None:
+            wp.launch(
+                _count_boundary_truncation,
+                dim=1,
+                inputs=[self._iteration_count_buf, self._max_substeps, self._dt_hist_trunc],
+                device=device,
+            )
+            wp.launch(
+                _count_unfinished_worlds,
+                dim=n,
+                inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
+                device=device,
+            )
+
         # Convert the final committed state back to Newton coordinates ONCE per boundary
         # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
         # buffers the write so state and state_prev never alias in the convert kernel.
@@ -1527,15 +1574,19 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             return
         self._dt_hist.zero_()
         self._dt_hist_sat.fill_(_DT_HIST_SENTINEL)
+        self._dt_hist_trunc.zero_()
 
     def dt_histogram_stats(self) -> dict[str, float]:
         """Scalar summary of floor occupancy. Host sync; call outside the hot path.
 
         Returns:
             ``total_samples`` (attempted inner steps counted), ``floor_samples``,
-            ``floor_fraction`` (0..1), and ``saturation_depth`` -- the smallest
+            ``floor_fraction`` (0..1), ``saturation_depth`` -- the smallest
             ``ideal_dt`` [s] the controller asked for while clamped to the floor, or
-            ``0.0`` if the floor was never hit.
+            ``0.0`` if the floor was never hit -- ``boundaries`` (``step`` calls
+            counted), ``capped_boundaries`` (boundaries truncated by
+            ``max_substeps``), and ``unfinished_worlds`` (world-boundaries that
+            ended with ``sim_time < next_time``, i.e. silently under-advanced).
 
         Raises:
             RuntimeError: If the solver was not constructed with ``dt_histogram=True``.
@@ -1551,11 +1602,15 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # raw double literal would never fire, so "floor never hit" must compare against
         # the SAME float32 round-trip the accumulator itself went through.
         never_hit = sat >= float(np.float32(_DT_HIST_SENTINEL))
+        trunc = self._dt_hist_trunc.numpy()
         return {
             "total_samples": total,
             "floor_samples": floor,
             "floor_fraction": (floor / total) if total else 0.0,
             "saturation_depth": 0.0 if never_hit else sat,
+            "boundaries": int(trunc[0]),
+            "capped_boundaries": int(trunc[1]),
+            "unfinished_worlds": int(trunc[2]),
         }
 
     @property
