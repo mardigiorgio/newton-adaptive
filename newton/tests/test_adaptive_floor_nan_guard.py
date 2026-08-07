@@ -1,16 +1,22 @@
 """Contract tests for the adaptive step controller (`_calc_adjusted_step`).
 
-Current contract (the dt_min-floor divergence latch was REMOVED by design):
-  * ``accepted`` -- advance ``sim_time`` (progress / no hang)
-  * ``commit``   -- write the new (doubled) state; FALSE => hold the last good state
-  * ``diverged`` -- accepted for signature compatibility but never written (all-False)
+Current contract at the ``dt_min`` floor, where the step can no longer be subdivided.
+A world there with ``e > tol`` always ACCEPTS (advancing ``sim_time`` avoids a
+boundary-loop hang) and pins ``ideal_dt`` to ``dt_min``; what differs is whether the
+state is committed:
 
-Above the floor, a diverged (sentinel-error) world REJECTS and retries smaller --
-that is the NaN containment path (the error kernel flags NaN per component; see the
-fmaxf note there). AT the floor, any world with e > tol -- including a sentinel one --
-accepts AND commits: dt_min (~1e-6 s) sits ~1000x below the stable fixed step, so a
-state that is non-finite there would have been non-finite for the fixed solver too;
-the old hold-last-good latch was dormant in that regime and was removed.
+  * ``nan_guard == 1`` (default) -- a non-finite error, an error at/above the
+    divergence sentinel, or a catastrophic-but-finite error (``e > 1000 * tol``)
+    refuses the commit, latches ``diverged`` for the env to consume as a termination,
+    and freezes the world at its boundary (``sim_time = next_time``).
+  * ``nan_guard == 0`` -- the legacy path: commit anyway, never latch.
+
+Above the floor, a diverged (sentinel-error) world REJECTS and retries smaller -- the
+NaN containment path (the error kernel flags NaN per component).
+
+``force_accept`` is the quantile-stop escape hatch: it makes an otherwise-rejected step
+accept unconditionally, so a world abandoned by the boundary loop still lands on its
+boundary. It must never force a non-finite state through.
 
 This is a pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
 """
@@ -29,7 +35,8 @@ DIVERGENCE = 1.0e9  # threshold; the error kernel emits 1e10 for NaN/inf states
 SENTINEL = 1.0e10  # what _inf_norm_state_error_kernel writes for a diverged world
 
 
-def _run(err_vals, dt_vals):
+def _run(err_vals, dt_vals, nan_guard=1, force_accept=0, order_aware=0, sliver_fix=0):
+    """Launch the controller kernel over one synthetic batch at solver defaults."""
     n = len(err_vals)
     err = wp.array(np.asarray(err_vals, dtype=np.float32), dtype=wp.float32, device=DEV)
     dt = wp.array(np.asarray(dt_vals, dtype=np.float32), dtype=wp.float32, device=DEV)
@@ -37,36 +44,71 @@ def _run(err_vals, dt_vals):
     accepted = wp.zeros(n, dtype=wp.bool, device=DEV)
     commit = wp.zeros(n, dtype=wp.bool, device=DEV)
     diverged = wp.zeros(n, dtype=wp.bool, device=DEV)
+    limited = wp.zeros(n, dtype=wp.int32, device=DEV)
+    consec_rej = wp.zeros(n, dtype=wp.int32, device=DEV)
+    sim_time = wp.zeros(n, dtype=wp.float32, device=DEV)
+    # next_time > sim_time: these worlds have NOT reached their boundary.
+    next_time = wp.full(n, 1.0, dtype=wp.float32, device=DEV)
+    force = wp.full(1, int(force_accept), dtype=wp.int32, device=DEV)
     wp.launch(
         _calc_adjusted_step,
         dim=n,
-        inputs=[err, dt, ideal, accepted, commit, diverged, TOL, DT_MIN, DIVERGENCE],
+        inputs=[
+            err,
+            dt,
+            ideal,
+            accepted,
+            commit,
+            diverged,
+            TOL,
+            DT_MIN,
+            DIVERGENCE,
+            limited,
+            consec_rej,
+            order_aware,
+            sliver_fix,
+            nan_guard,
+            sim_time,
+            next_time,
+            force,
+        ],
         device=DEV,
     )
-    return (
-        accepted.numpy(),
-        commit.numpy(),
-        diverged.numpy(),
-        ideal.numpy(),
-    )
+    return accepted.numpy(), commit.numpy(), diverged.numpy(), ideal.numpy()
 
 
-def test_floor_diverged_commits_progress_without_latch():
-    """At the floor with a diverged (sentinel) error: accept AND commit through the
-    e > tol path, and do NOT set the (removed) diverged latch."""
-    accepted, commit, diverged, ideal = _run([SENTINEL], [DT_MIN])
+def test_floor_diverged_latches_under_nan_guard():
+    """At the floor with a sentinel error and the NaN guard on (default): accept for
+    progress, but REFUSE the commit and latch ``diverged`` so the env can reset it."""
+    accepted, commit, diverged, ideal = _run([SENTINEL], [DT_MIN], nan_guard=1)
     assert bool(accepted[0]) is True, "must advance to avoid a boundary-loop hang"
-    assert bool(commit[0]) is True, "floor worlds commit like any can't-meet-tol world"
-    assert bool(diverged[0]) is False, "latch was removed; must stay all-False"
+    assert bool(commit[0]) is False, "a non-finite floor state must never be committed"
+    assert bool(diverged[0]) is True, "the NaN guard must latch for env-side termination"
     assert abs(float(ideal[0]) - DT_MIN) < 1e-12, "floor step pins ideal_dt to dt_min"
 
 
+def test_floor_diverged_commits_without_nan_guard():
+    """The legacy path (NEWTON_ADAPTIVE_NAN_GUARD=0): commit anyway, never latch."""
+    accepted, commit, diverged, _ = _run([SENTINEL], [DT_MIN], nan_guard=0)
+    assert bool(accepted[0]) is True
+    assert bool(commit[0]) is True, "with the guard off, floor worlds commit like any over-tol world"
+    assert bool(diverged[0]) is False, "the latch is written only by the guard path"
+
+
+def test_floor_catastrophic_but_finite_is_also_guarded():
+    """A finite error > 1000*tol at the floor is a blow-up in progress: guard it too."""
+    accepted, commit, diverged, _ = _run([1.0e4 * TOL], [DT_MIN], nan_guard=1)
+    assert bool(accepted[0]) is True
+    assert bool(commit[0]) is False
+    assert bool(diverged[0]) is True
+
+
 def test_floor_finite_over_tol_commits_progress():
-    """At the floor with a finite error above tol: accept AND commit (preserve prior progress behavior)."""
-    accepted, commit, diverged, _ = _run([10.0 * TOL], [DT_MIN])
+    """A merely over-tolerance finite error at the floor still commits real progress."""
+    accepted, commit, diverged, _ = _run([10.0 * TOL], [DT_MIN], nan_guard=1)
     assert bool(accepted[0]) is True
     assert bool(commit[0]) is True, "finite floor step must still make committed progress"
-    assert bool(diverged[0]) is False
+    assert bool(diverged[0]) is False, "10x tol is under the 1000x catastrophe bound"
 
 
 def test_normal_within_tol_commits():
@@ -84,6 +126,22 @@ def test_above_floor_diverged_rejects_and_retries():
     assert bool(commit[0]) is False
     assert bool(diverged[0]) is False, "not at the floor yet -> not given up"
     assert ideal[0] < 10.0 * DT_MIN, "should shrink the step for the retry"
+
+
+def test_force_accept_turns_a_rejection_into_an_accept():
+    """The quantile stop abandons a world mid-flight; force_accept lands it anyway."""
+    rej_a, _, _, _ = _run([100.0 * TOL], [10.0 * DT_MIN], force_accept=0)
+    assert bool(rej_a[0]) is False, "baseline: this step is rejected"
+    acc_a, acc_c, acc_d, _ = _run([100.0 * TOL], [10.0 * DT_MIN], force_accept=1)
+    assert bool(acc_a[0]) is True, "force_accept must accept the step"
+    assert bool(acc_c[0]) is True, "and commit it, so the world advances"
+    assert bool(acc_d[0]) is False, "a finite forced step is not a divergence"
+
+
+def test_force_accept_never_commits_a_non_finite_state():
+    """force_accept must not launder a diverged world into the committed state."""
+    _, commit, _, _ = _run([SENTINEL], [10.0 * DT_MIN], force_accept=1)
+    assert bool(commit[0]) is False, "a non-finite step must never be force-committed"
 
 
 if __name__ == "__main__":
