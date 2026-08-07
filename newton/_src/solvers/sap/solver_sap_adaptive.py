@@ -73,6 +73,8 @@ from sim.solver_sap import SolverSAP
 
 import newton
 
+from ..adaptive_boundary import QuantileBoundaryStop
+
 # ---- step-evolution mode codes (passed to _adapt_dt as a uniform kernel arg) ----
 _MODE_FIXED = wp.constant(0)
 _MODE_CODES = {"fixed": 0, "adaptive": 1}
@@ -261,6 +263,7 @@ def _adapt_dt(
     dt_min: float,
     dt_max: float,
     divergence_threshold: float,
+    force_accept: wp.array[wp.int32],
 ):
     """The per-world step-doubling controller -- the whole accept/reject/done decision.
 
@@ -278,6 +281,23 @@ def _adapt_dt(
 
     e = err[w]
     is_div = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
+
+    # ---------- Quantile-stop forced completion ----------
+    # The boundary loop abandoned this world once enough of the batch had landed, so take
+    # the boundary-clamped remainder unconditionally: time becomes exact and only this one
+    # step's local error exceeds tol. A non-finite step is still never committed.
+    if force_accept[0] == 1:
+        if is_div:
+            accept[w] = False
+            sim_time[w] = next_time[w]
+            diverged[w] = True
+            return
+        accept[w] = True
+        sim_time[w] = next_time[w]
+        accepted_error[w] = e
+        substeps_frame[w] = substeps_frame[w] + 1
+        wp.atomic_add(cum_accepted, 0, 1)
+        return
 
     # ---------- FIXED: constant dt, error control off (NaN guard only) ----------
     if mode == _MODE_FIXED:
@@ -462,6 +482,7 @@ class SolverSAPAdaptive:
         dt_inner_min: float = 1e-6,
         dt_inner_max: float | None = None,
         max_substeps: int = 16,
+        landed_fraction: float = 1.0,
         max_rigid_contact: int = 128,
         max_iterations: int = 30,
         contact_preset_variant: str = "drake",
@@ -604,6 +625,11 @@ class SolverSAPAdaptive:
         # and 4096 envs. The old >=1024-env SIGABRT was from capturing 3N such bodies in the old
         # per-N loop, not one. On any capture/instantiate failure the loop falls back to eager.
         self._graph_enabled = _is_cuda and os.environ.get("NEWTON_SAP_ADAPTIVE_GRAPH", "1") != "0"
+        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached the
+        # boundary, then force-complete the rest. 1.0 == wait for every world (default).
+        self._quantile_stop = QuantileBoundaryStop(
+            self._world_count, self.model.device, landed_fraction=landed_fraction, graph_enabled=self._graph_enabled
+        )
         self._graph_cache: dict = {}
         # Modules/allocations must be warm before capture (a launch that triggers a lazy
         # module load syncs the stream and aborts capture). Run the first frame eagerly.
@@ -826,6 +852,7 @@ class SolverSAPAdaptive:
                 self._dt_min,
                 eff_dt_max,
                 self._divergence_threshold,
+                self._quantile_stop.force_accept,
             ],
             device=dev,
         )
@@ -869,6 +896,10 @@ class SolverSAPAdaptive:
             inputs=[self._sim_time, self._next_time, self._solve_ok, self._unfinished],
             device=dev,
         )
+        # Quantile stop: lower the flag once enough of the batch has landed. Runs AFTER
+        # _mark_unfinished so a non-converged solve (status 2) is never masked.
+        if self._quantile_stop.enabled:
+            self._quantile_stop.mark_boundary(self._sim_time, self._next_time, self._unfinished, dev)
 
     def _body_graph(self, eff_dt_max: float, dt_outer: float):
         """Return the captured single-substep-body graph, or ``None`` to run eagerly.
@@ -927,6 +958,20 @@ class SolverSAPAdaptive:
                 )
             if status == 0:
                 break
+
+        # Land every world the quantile stop abandoned. _clamp_dt_to_boundary (top of the
+        # body) hands each one exactly its remainder and gives landed worlds dt=0, so one
+        # more body with force_accept latched finishes the batch. Time becomes exact for
+        # every world; only that step's local error exceeds tol.
+        if self._quantile_stop.enabled:
+            self._quantile_stop.force_accept.fill_(1)
+            try:
+                if graph is not None:
+                    wp.capture_launch(graph)
+                else:
+                    self._substep_body(eff_dt_max)
+            finally:
+                self._quantile_stop.force_accept.fill_(0)
 
     # ------------------------------------------------------------------- integrate
     def integrate(self, state, control, dt_outer: float):
