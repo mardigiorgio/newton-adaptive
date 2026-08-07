@@ -440,27 +440,6 @@ def _boundary_reset(flag: wp.array[wp.int32]):
 
 
 @wp.kernel
-def _boundary_check(
-    sim_time: wp.array[wp.float32],
-    target: wp.array[wp.float32],
-    iter_count: wp.array[wp.int32],
-    max_iters: int,
-    flag: wp.array[wp.int32],
-):
-    """Set flag to 1 if any world has not yet reached target.
-
-    The flag stays 0 once ``max_iters`` attempts ran this boundary, so the
-    device-side conditional loop (``wp.capture_while``) honors the
-    ``max_substeps`` safety cap without any host involvement.
-    """
-    i = wp.tid()
-    if iter_count[0] >= max_iters:
-        return
-    if sim_time[i] < target[i]:
-        wp.atomic_max(flag, 0, 1)
-
-
-@wp.kernel
 def _boundary_count_unfinished(
     sim_time: wp.array[wp.float32],
     target: wp.array[wp.float32],
