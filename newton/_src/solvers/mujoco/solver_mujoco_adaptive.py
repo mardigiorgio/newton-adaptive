@@ -778,6 +778,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             raise ValueError(f"landed_fraction must be in (0, 1], got {landed_fraction!r}")
         self._landed_fraction = float(landed_fraction)
         self._force_accept = wp.zeros(1, dtype=wp.int32, device=device)
+        self._force_graph = None
+        self._force_graph_failed = False
         self._max_unfinished = int(world_count * (1.0 - self._landed_fraction))
 
         # ---- step-doubling scratch buffers, in MuJoCo space ([nworld, nq]/[nworld, nv]) ----
@@ -1396,13 +1398,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # whole remaining span in ONE unchecked step, so it lands at the correct TIME
         # with degraded accuracy instead of silently sitting at the wrong instant.
         if self._max_unfinished > 0:
-            # ONE more iteration of the SAME captured body, with force-accept latched:
-            # _clamp_dt_to_boundary hands each unfinished world exactly its remainder and
-            # gives landed worlds dt=0. Costs one replayed iteration, not an eager eval
-            # (eager is ~78x captured at 2048 worlds).
-            self._force_accept.fill_(1)
-            self._run_ragged_iteration(effective_dt_max)
-            self._force_accept.fill_(0)
+            # A force-accepted step needs NO error estimate, so it costs ONE eval rather
+            # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
+            # replayed one at these world counts.
+            self._force_complete()
 
         # Convert the final committed state back to Newton coordinates ONCE per boundary
         # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
@@ -1411,6 +1410,41 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._copy_state(state_0, self._state_cur)
 
         return state_0, state_1
+
+    def _force_complete(self) -> None:
+        """Land every world abandoned by the quantile stop exactly on its boundary.
+
+        Each such world takes its whole remaining span in one unchecked step; landed
+        worlds get ``dt = 0`` and no-op. Time becomes exact for every world -- only this
+        one step's local error exceeds ``tol``. Replayed from a cached graph when capture
+        is available, since an eager eval costs orders of magnitude more at scale.
+        """
+        n = self.model.world_count
+        dev = self.model.device
+
+        def body():
+            wp.launch(_force_complete_dt, dim=n, inputs=[self._sim_time, self._next_time, self._dt], device=dev)
+            self._mjw_eval(self._dt)
+            wp.launch(_force_complete_land, dim=n, inputs=[self._sim_time, self._next_time], device=dev)
+
+        if self._force_graph is not None:
+            wp.capture_launch(self._force_graph)
+            return
+        if not self._graph_enabled or self._force_graph_failed or self._external_capture_active():
+            body()
+            return
+        try:
+            with wp.ScopedCapture(device=dev) as cap:
+                body()
+            self._force_graph = cap.graph
+            wp.capture_launch(self._force_graph)
+        except Exception as exc:
+            self._force_graph_failed = True
+            warnings.warn(
+                f"SolverMuJoCoAdaptive: forced-completion capture failed ({exc}); running it eagerly.",
+                stacklevel=2,
+            )
+            body()
 
     def _iteration_graph(self, effective_dt_max: float):
         """Return the captured iteration-body graph (keyed by effective_dt_max), or ``None``
