@@ -20,6 +20,28 @@ each remaining world its whole boundary remainder in one unchecked step, so ever
 lands at the exact right TIME and only that step's local error exceeds tolerance. Worlds
 abandoned repeatedly are the ones already stuck in a pathological contact state; consumers
 should latch them for termination rather than let them keep contributing.
+
+Adopting this in another adaptive solver
+----------------------------------------
+
+:class:`~newton.solvers.SolverMuJoCoAdaptive` is wired up; ``SolverSAPAdaptive`` is not
+yet. Four hook points are needed, and the third is the only one carrying real risk:
+
+1. Construct a :class:`QuantileBoundaryStop` once the solver knows whether CUDA-graph
+   capture is available, passing ``landed_fraction`` through from the constructor.
+2. Replace the solver's "is any world short of the boundary" test with
+   :meth:`~QuantileBoundaryStop.mark_boundary`, called AFTER any failure status has been
+   written into the flag -- :func:`apply_quantile_threshold` deliberately leaves
+   ``flag[0] >= 2`` alone so abandoning stragglers can never mask a non-converged solve.
+   Any ``max_substeps`` safety cap must be applied AFTER the quantile test so the cap wins.
+3. Call :meth:`~QuantileBoundaryStop.force_complete` once the march returns, passing an
+   ``eval_fn`` that performs ONE unchecked evaluation at the per-world ``dt`` this class
+   writes, and that commits its result for the forced worlds. For a solver whose commit is
+   masked by a per-world accept flag, ``eval_fn`` must force that flag for the worlds being
+   completed -- otherwise they advance ``sim_time`` without their state being written,
+   which is silently worse than the under-advance this whole mechanism exists to prevent.
+4. Count the abandoned worlds (per world, not just in aggregate) so chronically abandoned
+   ones can be latched for termination.
 """
 
 from __future__ import annotations
