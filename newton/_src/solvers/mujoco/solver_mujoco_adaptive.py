@@ -306,13 +306,11 @@ def _calc_adjusted_step(
             # NaN guard (NEWTON_ADAPTIVE_NAN_GUARD=1, default): never commit a non-finite
             # state at the floor -- hold the last-good (finite) state, freeze this world
             # to its frame boundary, and latch `diverged` so env-side terminations can
-            # reset it. The 1e3*tol sanity bound extends the same treatment to
-            # catastrophic-but-FINITE floor errors: a dt_min step that still moves a
-            # coordinate by >1000x tol is a blow-up in progress; committing it would
-            # poison the world before the NaN appears.
-            if nan_guard == 1 and (
-                wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold or e > wp.float32(1000.0) * tol
-            ):
+            # reset it. Only genuine non-finiteness (or the error kernel's divergence
+            # sentinel) triggers this: a large-but-finite error is a legitimately hard
+            # step, not a blow-up, and the constraint solve already runs at MuJoCo's
+            # default 1e-8 residual tolerance rather than leaning on a heuristic bound.
+            if nan_guard == 1 and (wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold):
                 commit[world] = False
                 diverged[world] = True
                 sim_time[world] = next_time[world]

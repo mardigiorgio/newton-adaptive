@@ -5,10 +5,12 @@ A world there with ``e > tol`` always ACCEPTS (advancing ``sim_time`` avoids a
 boundary-loop hang) and pins ``ideal_dt`` to ``dt_min``; what differs is whether the
 state is committed:
 
-  * ``nan_guard == 1`` (default) -- a non-finite error, an error at/above the
-    divergence sentinel, or a catastrophic-but-finite error (``e > 1000 * tol``)
-    refuses the commit, latches ``diverged`` for the env to consume as a termination,
-    and freezes the world at its boundary (``sim_time = next_time``).
+  * ``nan_guard == 1`` (default) -- a non-finite error, or one at/above the divergence
+    sentinel, refuses the commit, latches ``diverged`` for the env to consume as a
+    termination, and freezes the world at its boundary (``sim_time = next_time``).
+    A large-but-FINITE error does not trigger it: that is a legitimately hard step, not
+    a blow-up, and the constraint solve already runs at MuJoCo's default 1e-8 residual
+    tolerance rather than leaning on a heuristic bound.
   * ``nan_guard == 0`` -- the legacy path: commit anyway, never latch.
 
 Above the floor, a diverged (sentinel-error) world REJECTS and retries smaller -- the
@@ -95,12 +97,13 @@ def test_floor_diverged_commits_without_nan_guard():
     assert bool(diverged[0]) is False, "the latch is written only by the guard path"
 
 
-def test_floor_catastrophic_but_finite_is_also_guarded():
-    """A finite error > 1000*tol at the floor is a blow-up in progress: guard it too."""
+def test_floor_large_finite_error_still_commits():
+    """A large but FINITE error at the floor is a hard step, not a divergence: it must
+    still commit. Only non-finiteness (or the divergence sentinel) trips the guard."""
     accepted, commit, diverged, _ = _run([1.0e4 * TOL], [DT_MIN], nan_guard=1)
     assert bool(accepted[0]) is True
-    assert bool(commit[0]) is False
-    assert bool(diverged[0]) is True
+    assert bool(commit[0]) is True, "a finite floor step must make committed progress"
+    assert bool(diverged[0]) is False, "finite error is not a blow-up; do not latch"
 
 
 def test_floor_finite_over_tol_commits_progress():
@@ -108,7 +111,7 @@ def test_floor_finite_over_tol_commits_progress():
     accepted, commit, diverged, _ = _run([10.0 * TOL], [DT_MIN], nan_guard=1)
     assert bool(accepted[0]) is True
     assert bool(commit[0]) is True, "finite floor step must still make committed progress"
-    assert bool(diverged[0]) is False, "10x tol is under the 1000x catastrophe bound"
+    assert bool(diverged[0]) is False, "a finite error never latches the guard"
 
 
 def test_normal_within_tol_commits():
