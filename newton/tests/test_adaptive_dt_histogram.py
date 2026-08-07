@@ -344,6 +344,36 @@ def test_saturation_depth_nonzero_when_floor_is_hit():
     )
 
 
+def test_landed_fraction_validation():
+    """landed_fraction must lie in (0, 1]."""
+    if _skip_without_gpu("test_landed_fraction_validation"):
+        return
+    for bad in (0.0, -0.1, 1.5):
+        try:
+            _one_sphere_solver(dt_inner_init=1e-3, dt_inner_min=1e-5, landed_fraction=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"landed_fraction={bad} should have raised ValueError")
+
+
+def test_quantile_stop_leaves_no_world_behind():
+    """The quantile stop abandons the slow tail, but forced completion must still land
+    EVERY world exactly on the boundary -- degraded accuracy is acceptable, wrong
+    simulation time is not."""
+    if _skip_without_gpu("test_quantile_stop_leaves_no_world_behind"):
+        return
+    for frac in (1.0, 0.5):
+        solver, s0, s1, control = _one_sphere_solver(
+            dt_inner_init=1e-3, dt_inner_min=1e-5, landed_fraction=frac, dt_histogram=True
+        )
+        for _ in range(3):
+            s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+        behind = solver.sim_time.numpy() - solver._next_time.numpy()
+        assert np.all(behind >= -1e-6), (
+            f"landed_fraction={frac}: worlds left short of the boundary by {behind.min():.3e} s"
+        )
+
+
 if __name__ == "__main__":
     import sys
 

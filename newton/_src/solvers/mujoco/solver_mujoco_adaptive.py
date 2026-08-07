@@ -260,6 +260,7 @@ def _calc_adjusted_step(
     nan_guard: int,
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
+    force_accept: wp.array[wp.int32],
 ):
     """Per-world Drake CalcAdjustedStepSize for step doubling (err_order=2).
 
@@ -346,6 +347,11 @@ def _calc_adjusted_step(
     new_step = wp.clamp(new_step, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
 
     acc = e <= tol or new_step >= step
+    # Forced-completion pass: the quantile stop abandoned this world, so take the
+    # boundary-clamped remainder unconditionally. Time becomes exact; only this one
+    # step's local error exceeds tol. Never forces a non-finite state.
+    if force_accept[0] == 1 and not is_diverged:
+        acc = True
     accepted[world] = acc
     commit[world] = acc
     if acc:
@@ -452,6 +458,60 @@ def _boundary_check(
         return
     if sim_time[i] < target[i]:
         wp.atomic_max(flag, 0, 1)
+
+
+@wp.kernel
+def _boundary_count_unfinished(
+    sim_time: wp.array[wp.float32],
+    target: wp.array[wp.float32],
+    iter_count: wp.array[wp.int32],
+    max_iters: int,
+    flag: wp.array[wp.int32],
+):
+    """Accumulate the NUMBER of worlds short of the boundary into ``flag[0]``."""
+    i = wp.tid()
+    if iter_count[0] >= max_iters:
+        return
+    if sim_time[i] < target[i]:
+        wp.atomic_add(flag, 0, 1)
+
+
+@wp.kernel
+def _boundary_threshold(flag: wp.array[wp.int32], max_unfinished: int):
+    """Keep marching only while MORE than ``max_unfinished`` worlds are short.
+
+    ``max_unfinished = 0`` reproduces the wait-for-everyone behavior. A positive value
+    abandons the slowest tail: the loop length becomes a QUANTILE of the per-world
+    attempt distribution rather than its MAXIMUM, which is what makes the cost
+    independent of world count.
+    """
+    if flag[0] <= max_unfinished:
+        flag[0] = 0
+    else:
+        flag[0] = 1
+
+
+@wp.kernel
+def _force_complete_dt(
+    sim_time: wp.array[wp.float32],
+    target: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+):
+    """Give every world still short of the boundary its whole remaining span."""
+    i = wp.tid()
+    r = target[i] - sim_time[i]
+    if r > wp.float32(0.0):
+        dt[i] = r
+    else:
+        dt[i] = wp.float32(0.0)
+
+
+@wp.kernel
+def _force_complete_land(sim_time: wp.array[wp.float32], target: wp.array[wp.float32]):
+    """Land the forced worlds exactly on the boundary (time is exact; accuracy is not)."""
+    i = wp.tid()
+    if sim_time[i] < target[i]:
+        sim_time[i] = target[i]
 
 
 @wp.kernel
@@ -618,6 +678,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         tiling: str = "ragged",
         max_substeps: int = 256,
         use_newton_contacts: bool = False,
+        landed_fraction: float = 1.0,
         dt_histogram: bool = False,
         dt_histogram_bins_per_decade: int = 4,
         **kwargs,
@@ -711,6 +772,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_mode = dt_mode  # "per_world" only (global removed: a shared dt couples worlds)
         self._tiling = tiling  # "ragged" only ("even" removed)
         self._max_substeps = int(max_substeps)
+        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached
+        # the boundary, then force-complete the rest. 1.0 == wait for every world.
+        if not (0.0 < float(landed_fraction) <= 1.0):
+            raise ValueError(f"landed_fraction must be in (0, 1], got {landed_fraction!r}")
+        self._landed_fraction = float(landed_fraction)
+        self._force_accept = wp.zeros(1, dtype=wp.int32, device=device)
+        self._max_unfinished = int(world_count * (1.0 - self._landed_fraction))
 
         # ---- step-doubling scratch buffers, in MuJoCo space ([nworld, nq]/[nworld, nv]) ----
         # The inner loop marches mjw_data.qpos/qvel directly; these hold the rollback
@@ -1185,6 +1253,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._nan_guard_flag,
                 self._sim_time,
                 self._next_time,
+                self._force_accept,
             ],
             device=dev,
         )
@@ -1208,7 +1277,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         )
         wp.launch(_boundary_reset, dim=1, inputs=[self._boundary_flag], device=dev)
         wp.launch(
-            _boundary_check,
+            _boundary_count_unfinished,
             dim=n,
             inputs=[
                 self._sim_time,
@@ -1219,6 +1288,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             ],
             device=dev,
         )
+        wp.launch(_boundary_threshold, dim=1, inputs=[self._boundary_flag, self._max_unfinished], device=dev)
 
     # =====================================================================
     # The boundary call: march every world to dt_outer
@@ -1321,6 +1391,18 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
                 device=device,
             )
+
+        # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
+        # whole remaining span in ONE unchecked step, so it lands at the correct TIME
+        # with degraded accuracy instead of silently sitting at the wrong instant.
+        if self._max_unfinished > 0:
+            # ONE more iteration of the SAME captured body, with force-accept latched:
+            # _clamp_dt_to_boundary hands each unfinished world exactly its remainder and
+            # gives landed worlds dt=0. Costs one replayed iteration, not an eager eval
+            # (eager is ~78x captured at 2048 worlds).
+            self._force_accept.fill_(1)
+            self._run_ragged_iteration(effective_dt_max)
+            self._force_accept.fill_(0)
 
         # Convert the final committed state back to Newton coordinates ONCE per boundary
         # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
