@@ -442,11 +442,14 @@ def _count_boundary_truncation(
     max_iters: int,
     out: wp.array[wp.int64],
 ):
-    """Record one boundary, and whether ``max_substeps`` truncated it (dim=1).
+    """Record one boundary, and whether it used the full ``max_substeps`` budget (dim=1).
 
-    ``out[0]`` counts boundaries, ``out[1]`` counts truncated ones. A truncated boundary
-    exits with worlds still short of their target time -- silent under-advance in
-    simulated time, the failure mode a collapsing dt actually produces.
+    ``out[0]`` counts boundaries. ``out[1]`` counts boundaries that consumed the entire
+    ``max_substeps`` budget -- this INCLUDES the case where every world happened to land
+    exactly on the final permitted iteration, so it is not on its own proof that any world
+    is short of its target time. It is still a genuine saturation signal: the boundary had
+    no iterations to spare. For actual under-advance, see ``out[2]`` (``unfinished_worlds``,
+    written by :func:`_count_unfinished_worlds`).
     """
     out[0] = out[0] + wp.int64(1)
     if iter_count[0] >= max_iters:
@@ -1576,7 +1579,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_hist_sat.fill_(_DT_HIST_SENTINEL)
         self._dt_hist_trunc.zero_()
 
-    def dt_histogram_stats(self) -> dict[str, float]:
+    def dt_histogram_stats(self) -> dict[str, float | int]:
         """Scalar summary of floor occupancy. Host sync; call outside the hot path.
 
         Returns:
@@ -1584,9 +1587,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             ``floor_fraction`` (0..1), ``saturation_depth`` -- the smallest
             ``ideal_dt`` [s] the controller asked for while clamped to the floor, or
             ``0.0`` if the floor was never hit -- ``boundaries`` (``step`` calls
-            counted), ``capped_boundaries`` (boundaries truncated by
-            ``max_substeps``), and ``unfinished_worlds`` (world-boundaries that
-            ended with ``sim_time < next_time``, i.e. silently under-advanced).
+            counted), ``capped_boundaries`` (boundaries that used the full
+            ``max_substeps`` budget; this includes boundaries where every world
+            happened to land exactly on the final permitted iteration, so it is not
+            on its own proof of under-advance), and ``unfinished_worlds``
+            (world-boundaries that ended with ``sim_time < next_time``, i.e. the
+            actual under-advance measure).
 
         Raises:
             RuntimeError: If the solver was not constructed with ``dt_histogram=True``.
