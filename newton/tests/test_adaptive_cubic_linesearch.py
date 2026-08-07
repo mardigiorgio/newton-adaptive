@@ -17,12 +17,17 @@ on failure. The oracle test prefers cuda:0 and skips if the asset is unavailable
 
 import math
 import os
+import pathlib
 import sys
 
 import numpy as np
 import warp as wp
 
-sys.path.insert(0, os.environ.get("SAP_WARP_PATH", "/home/mdigiorgio/Documents/code/sap_warp"))
+# sap_warp is a sibling checkout of this repo; SAP_WARP_PATH overrides for other layouts.
+sys.path.insert(
+    0,
+    os.environ.get("SAP_WARP_PATH", str(pathlib.Path(__file__).resolve().parents[3] / "sap_warp")),
+)
 
 wp.init()
 
@@ -71,6 +76,7 @@ def test_cubic_minimizer_degenerate_falls_back():
 
 def build_allegro_grasp(device):
     from newton import JointTargetMode
+
     asset_path = newton.utils.download_asset("wonik_allegro")
     f = str(asset_path / "usd" / "allegro_left_hand_with_cube.usda")
     b = newton.ModelBuilder()
@@ -79,8 +85,13 @@ def build_allegro_grasp(device):
     b.default_shape_cfg.kd = 1.0e2
     b.default_shape_cfg.margin = 0.005
     b.default_shape_cfg.gap = 0.015
-    b.add_usd(f, xform=wp.transform(wp.vec3(0, 0, 0.5)), enable_self_collisions=False,
-              ignore_paths=[".*Dummy", ".*CollisionPlane"], hide_collision_shapes=True)
+    b.add_usd(
+        f,
+        xform=wp.transform(wp.vec3(0, 0, 0.5)),
+        enable_self_collisions=False,
+        ignore_paths=[".*Dummy", ".*CollisionPlane"],
+        hide_collision_shapes=True,
+    )
     for i in range(b.joint_dof_count - 6):
         b.joint_target_ke[i] = 150
         b.joint_target_kd[i] = 5
@@ -118,8 +129,14 @@ def test_exact_root_cubic_converges_finite_on_oracle():
     s1.assign(s0)
     control.joint_target_q = wp.array(np.tile(tgt, 2), dtype=wp.float32, device=device)
     solver = SolverSAPAdaptive(
-        model, mode="adaptive", tol=1e-3, dt_inner_init=0.01, dt_inner_min=1e-6,
-        max_substeps=256, max_iterations=200, line_search_variant="exact_root",
+        model,
+        mode="adaptive",
+        tol=1e-3,
+        dt_inner_init=0.01,
+        dt_inner_min=1e-6,
+        max_substeps=256,
+        max_iterations=200,
+        line_search_variant="exact_root",
     )
     cs = solver._sap.contact_solve
     for _ in range(12):

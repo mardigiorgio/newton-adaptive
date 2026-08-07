@@ -15,12 +15,17 @@ prints PASS/FAIL per test, exits nonzero on any failure.
 """
 
 import os
+import pathlib
 import sys
 
 import numpy as np
 import warp as wp
 
-sys.path.insert(0, os.environ.get("SAP_WARP_PATH", "/home/mdigiorgio/Documents/code/sap_warp"))
+# sap_warp is a sibling checkout of this repo; SAP_WARP_PATH overrides for other layouts.
+sys.path.insert(
+    0,
+    os.environ.get("SAP_WARP_PATH", str(pathlib.Path(__file__).resolve().parents[3] / "sap_warp")),
+)
 
 wp.init()
 
@@ -57,8 +62,7 @@ def _single_solve(device, **solver_kw):
     # fixed mode + dt_inner_init == dt_outer + max_substeps=1 => exactly ONE inner
     # convex solve, so the factorization count is for a single solve, not a sum.
     solver_kw.setdefault("max_iterations", 80)
-    solver = SolverSAPAdaptive(model, mode="fixed", dt_inner_init=DT_OUTER,
-                               max_substeps=1, **solver_kw)
+    solver = SolverSAPAdaptive(model, mode="fixed", dt_inner_init=DT_OUTER, max_substeps=1, **solver_kw)
     cs = solver._sap.contact_solve
     cs.factorization_count.zero_()
     solver.step_dt(DT_OUTER, s0, s1, control)
@@ -79,6 +83,7 @@ def build_allegro_grasp(device):
     contact-rich shadow-hand difficulty class. The oracle for how many Newton iterations
     the inner convex SAP solve actually takes on a hard manipulation contact problem."""
     from newton import JointTargetMode
+
     asset_path = newton.utils.download_asset("wonik_allegro")
     f = str(asset_path / "usd" / "allegro_left_hand_with_cube.usda")
     b = newton.ModelBuilder()
@@ -87,8 +92,13 @@ def build_allegro_grasp(device):
     b.default_shape_cfg.kd = 1.0e2
     b.default_shape_cfg.margin = 0.005
     b.default_shape_cfg.gap = 0.015
-    b.add_usd(f, xform=wp.transform(wp.vec3(0, 0, 0.5)), enable_self_collisions=False,
-              ignore_paths=[".*Dummy", ".*CollisionPlane"], hide_collision_shapes=True)
+    b.add_usd(
+        f,
+        xform=wp.transform(wp.vec3(0, 0, 0.5)),
+        enable_self_collisions=False,
+        ignore_paths=[".*Dummy", ".*CollisionPlane"],
+        hide_collision_shapes=True,
+    )
     for i in range(b.joint_dof_count - 6):
         b.joint_target_ke[i] = 150
         b.joint_target_kd[i] = 5
@@ -126,8 +136,9 @@ def test_allegro_grasp_iteration_oracle():
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     s1.assign(s0)
     control.joint_target_q = wp.array(tgt, dtype=wp.float32, device=device)
-    solver = SolverSAPAdaptive(model, mode="adaptive", tol=1e-3, dt_inner_init=DT_OUTER,
-                               dt_inner_min=1e-6, max_substeps=16, max_iterations=200)
+    solver = SolverSAPAdaptive(
+        model, mode="adaptive", tol=1e-3, dt_inner_init=DT_OUTER, dt_inner_min=1e-6, max_substeps=16, max_iterations=200
+    )
     cs = solver._sap.contact_solve
     peak_iters = 0
     for _ in range(15):  # settle into the grasp so fingertip contacts develop
@@ -145,7 +156,7 @@ def _run(test):
     name = test.__name__
     try:
         test()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"FAIL {name}: {e}")
         return False
     print(f"PASS {name}")
@@ -154,8 +165,7 @@ def _run(test):
 
 if __name__ == "__main__":
     ok = True
-    for t in [test_factorization_count_equals_iterations_when_reuse_off,
-              test_allegro_grasp_iteration_oracle]:
+    for t in [test_factorization_count_equals_iterations_when_reuse_off, test_allegro_grasp_iteration_oracle]:
         ok = _run(t) and ok
     print(f"\n{'all passed' if ok else 'FAILURES'}")
     sys.exit(0 if ok else 1)

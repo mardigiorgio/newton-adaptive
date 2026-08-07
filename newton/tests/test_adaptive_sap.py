@@ -13,12 +13,17 @@ test_adaptive_*.py files (prints PASS/FAIL, exits nonzero on failure).
 """
 
 import os
+import pathlib
 import sys
 
 import numpy as np
 import warp as wp
 
-sys.path.insert(0, os.environ.get("SAP_WARP_PATH", "/home/mdigiorgio/Documents/code/sap_warp"))
+# sap_warp is a sibling checkout of this repo; SAP_WARP_PATH overrides for other layouts.
+sys.path.insert(
+    0,
+    os.environ.get("SAP_WARP_PATH", str(pathlib.Path(__file__).resolve().parents[3] / "sap_warp")),
+)
 
 wp.init()
 
@@ -48,8 +53,17 @@ def build_cartpole(device, worlds=1):
     return builder.finalize(device=device)
 
 
-def _fresh(device, worlds=1, **kw):
+def _fresh(device, worlds=1, spread=0.0, **kw):
     model = build_cartpole(device, worlds)
+    if spread > 0.0:
+        # Replicas are identical, so they would all land on the same iteration and the
+        # quantile stop would never abandon anyone. Spread the pole angles so the
+        # per-world step sizes -- and therefore the attempt counts -- genuinely differ.
+        q = model.joint_q.numpy()
+        per = q.size // worlds
+        for w in range(worlds):
+            q[w * per + per - 2] += spread * (w + 1)
+        model.joint_q.assign(q)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
@@ -160,7 +174,7 @@ def test_quantile_stop_leaves_no_world_behind():
     wrong simulation time is not."""
     device = wp.get_device(DEV)
     for frac in (1.0, 0.5):
-        _, s0, s1, control, solver = _fresh(device, worlds=8, tol=1e-3, landed_fraction=frac)
+        _, s0, s1, control, solver = _fresh(device, worlds=8, spread=0.35, tol=1e-5, landed_fraction=frac)
         for _ in range(3):
             solver.step_dt(DT_OUTER, s0, s1, control)
         # sim_time is rebased per boundary, so compare against next_time rather than

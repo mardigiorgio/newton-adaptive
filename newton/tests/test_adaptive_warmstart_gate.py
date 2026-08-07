@@ -31,12 +31,17 @@ prints PASS/FAIL per test, exits nonzero on any failure.
 """
 
 import os
+import pathlib
 import sys
 
 import numpy as np
 import warp as wp
 
-sys.path.insert(0, os.environ.get("SAP_WARP_PATH", "/home/mdigiorgio/Documents/code/sap_warp"))
+# sap_warp is a sibling checkout of this repo; SAP_WARP_PATH overrides for other layouts.
+sys.path.insert(
+    0,
+    os.environ.get("SAP_WARP_PATH", str(pathlib.Path(__file__).resolve().parents[3] / "sap_warp")),
+)
 
 wp.init()
 
@@ -71,8 +76,7 @@ def _settle_capture_resolve(device, perturb):
     s0, s1, control = model.state(), model.state(), model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     s1.assign(s0)
-    solver = SolverSAPAdaptive(model, mode="fixed", dt_inner_init=DT_OUTER,
-                               max_substeps=1, max_iterations=80)
+    solver = SolverSAPAdaptive(model, mode="fixed", dt_inner_init=DT_OUTER, max_substeps=1, max_iterations=80)
     cs = solver._sap.contact_solve
 
     for _ in range(8):  # settle into a near-static resting contact
@@ -135,7 +139,7 @@ def _run(test):
     name = test.__name__
     try:
         test()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"FAIL {name}: {e}")
         return False
     print(f"PASS {name}")
@@ -144,8 +148,7 @@ def _run(test):
 
 if __name__ == "__main__":
     ok = True
-    for t in [test_warmstart_at_solution_skips_all_factorizations,
-              test_perturbed_warmstart_factorizes_and_converges]:
+    for t in [test_warmstart_at_solution_skips_all_factorizations, test_perturbed_warmstart_factorizes_and_converges]:
         ok = _run(t) and ok
     print(f"\n{'all passed' if ok else 'FAILURES'}")
     sys.exit(0 if ok else 1)
