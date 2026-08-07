@@ -17,6 +17,8 @@ The ragged ``step`` machine (one iteration = :meth:`_run_iteration_body`)::
     update_mjc_data(state_0)                             # Newton -> qpos/qvel, ONCE
     next_time[w] = sim_time[w] + dt_outer                # boundary target per world
     for _ in range(max_substeps):                        # max_substeps is a SAFETY cap
+        dt_histogram_accum(dt, ...)                      # optional; MUST precede the clamp below (dt is
+                                                          # still the controller's chosen step here)
         clamp_dt_to_boundary(dt, sim_time, next_time)    # done worlds -> dt=0; never overshoot
         snapshot qpos/qvel                               # rollback target on reject
         full   = mjw_eval(dt);   save qpos_full          # \
@@ -87,8 +89,11 @@ def _apply_dt_cap(
 def _dt_hist_layout(dt_min: float, dt_init: float, bins_per_decade: int) -> tuple[int, float]:
     """Bin count and low edge for the dt-occupancy histogram.
 
-    One extra decade above ``dt_init`` is included because the controller may grow the
-    step beyond its initial value, up to the outer boundary period.
+    One extra decade above ``dt_init`` is included as headroom for configurations where
+    ``dt_outer > dt_init`` (the controller can then grow the step past ``dt_init``, up to
+    ``effective_dt_max = min(dt_max, dt_outer)``). ``dt_max`` defaults to ``inf``, so for
+    the common case ``dt_outer <= dt_init`` the step can never exceed ``dt_init`` and the
+    bins above ``min(dt_max, dt_outer)`` are simply never populated.
 
     Args:
         dt_min: Adaptive timestep floor [s].
@@ -144,6 +149,19 @@ def _dt_histogram_accum(
     Bin 0 counts exact floor hits; ``_apply_dt_cap`` produces bitwise ``dt_min`` on clamp,
     so the equality test is reliable. ``saturation`` accumulates ``min(ideal_dt)`` over
     floor-clamped worlds, showing how far below the floor the controller wanted to go.
+
+    Precondition: ``dt`` must be finite here. ``NaN`` and ``+inf`` both fail the ``h <=
+    dt_min`` test (NaN comparisons are always false; ``+inf > dt_min``), so they fall
+    through to the ``b = ...`` branch below -- but casting an ``inf``/``NaN``-derived
+    ``wp.log10`` result to ``int`` does not saturate to a large positive index the way the
+    overflow bin needs; it lands ``b`` near or below the valid range, which ``wp.clamp``
+    then floors up to bin 1 (near-floor) instead of the last (overflow) bin -- the
+    INVERTING direction. This is safe only because the caller
+    (:meth:`SolverMuJoCoAdaptive._run_iteration_body`) launches this kernel on ``self._dt``
+    AFTER ``_apply_dt_cap`` has already sanitized it that same iteration (NaN -> ``dt_min``,
+    ``+inf`` -> ``dt_max``), so a non-finite ``dt`` never actually reaches this kernel. No
+    runtime finiteness branch is added here to avoid the per-iteration cost of guarding an
+    otherwise-unreachable case.
     """
     i = wp.tid()
     if sim_time[i] >= next_time[i]:
@@ -643,6 +661,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             )
         if int(max_substeps) < 1:
             raise ValueError(f"max_substeps must be >= 1, got {max_substeps!r}")
+        if int(dt_histogram_bins_per_decade) < 1:
+            raise ValueError(f"dt_histogram_bins_per_decade must be >= 1, got {dt_histogram_bins_per_decade!r}")
         # Contact source is selectable: with ``use_newton_contacts=True`` the externally
         # provided Newton CollisionPipeline contacts (full non-convex mesh/SDF fidelity)
         # are injected ONCE per boundary and held across the step-doubling march —
@@ -1087,8 +1107,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._convert_contacts_to_mjwarp(model, st, self._refresh_contacts)
 
     def _run_iteration_body(self, effective_dt_max: float) -> None:
-        """ONE ragged adaptive iteration: clamp -> step-double -> error -> Drake controller ->
-        masked rollback -> advance -> dt cap -> boundary check. All in MuJoCo qpos/qvel space.
+        """ONE ragged adaptive iteration: histogram sample (if enabled) -> clamp -> step-double
+        -> error -> Drake controller -> masked rollback -> advance -> dt cap -> boundary check.
+        All in MuJoCo qpos/qvel space.
+
+        The histogram sample MUST run before the clamp: it bins the controller's chosen
+        step, and after ``_clamp_dt_to_boundary`` runs, ``dt`` may instead hold a
+        boundary-landing sliver, binning the sample into the wrong bucket (see
+        :func:`_dt_histogram_accum`).
 
         This is the body the device-side conditional loop replays (see :meth:`_march_ragged`).
         Every phase is a flat kernel-launch sequence, so it records cleanly inside a CUDA
@@ -1547,12 +1573,17 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     @property
     def dt_histogram(self) -> wp.array | None:
-        """Per-bin counts of attempted inner steps, shape ``[n_bins]``, int64, on device.
+        """Per-bin counts of the inner timestep SELECTED per iteration, shape ``[n_bins]``,
+        int64, on device.
 
-        ``None`` unless the solver was constructed with ``dt_histogram=True``. Bin 0 counts
-        steps taken at the ``dt_inner_min`` floor, bins ``1 .. n_bins - 2`` are log-spaced
-        (see :attr:`dt_histogram_edges`), and the last bin absorbs everything above the
-        range. Read with ``.numpy()`` OUTSIDE the inner loop only (it is a device sync).
+        ``None`` unless the solver was constructed with ``dt_histogram=True``. Each sample is
+        the controller's chosen step for that iteration, taken BEFORE the boundary-landing
+        clamp (see :func:`_dt_histogram_accum`); on a landing iteration the step actually
+        integrated is smaller than what is binned here. Bin 0 counts iterations where the
+        selected step was already at/below the ``dt_inner_min`` floor, bins ``1 .. n_bins - 2``
+        are log-spaced (see :attr:`dt_histogram_edges`), and the last bin absorbs everything
+        above the range. Read with ``.numpy()`` OUTSIDE the inner loop only (it is a device
+        sync).
         """
         return self._dt_hist
 

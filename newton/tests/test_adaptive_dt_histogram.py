@@ -137,6 +137,25 @@ def test_saturation_stays_sentinel_when_floor_never_hit():
     assert sat == expected, f"expected untouched sentinel, got {sat}"
 
 
+def test_bins_per_decade_below_one_raises():
+    """dt_histogram_bins_per_decade <= 0 would ZeroDivisionError in _dt_hist_edges and
+    produce degenerate binning; reject it at construction, mirroring how max_substeps
+    is already validated. This check runs before the GPU-only MuJoCo-Warp setup in
+    __init__, so it needs no CUDA device."""
+    builder = newton.ModelBuilder()
+    builder.begin_world()
+    b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_sphere(b, radius=0.1)
+    builder.end_world()
+    builder.add_ground_plane()
+    model = builder.finalize()
+    try:
+        SolverMuJoCoAdaptive(model, dt_histogram=True, dt_histogram_bins_per_decade=0)
+    except ValueError:
+        return
+    raise AssertionError("dt_histogram_bins_per_decade=0 should raise ValueError")
+
+
 _GPU = wp.get_cuda_device_count() > 0
 
 
@@ -192,6 +211,7 @@ def test_enabled_accumulates_over_a_boundary():
         return
     solver, s0, s1, control = _one_sphere_solver(dt_inner_init=1e-3, dt_inner_min=1e-5, dt_histogram=True)
     solver.reset_dt_histogram()
+    solver.reset_compute_counter()
     s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
 
     counts = solver.dt_histogram.numpy()
@@ -200,6 +220,57 @@ def test_enabled_accumulates_over_a_boundary():
     assert len(edges) == len(counts) - 1, "edges must be one shorter than bins"
     stats = solver.dt_histogram_stats()
     assert stats["total_samples"] == int(counts.sum())
+    # Cross-check against the solver's own iteration counter: for a single-world scene
+    # every counted iteration attempts exactly one step, and the histogram kernel's
+    # sim_time >= next_time skip predicate should agree exactly with what the boundary
+    # loop itself counted as an iteration (_iter_count_increment / _cum_iters).
+    assert stats["total_samples"] == int(solver.cumulative_iterations.numpy()[0]), (
+        f"total_samples ({stats['total_samples']}) must equal cumulative_iterations "
+        f"({int(solver.cumulative_iterations.numpy()[0])}) for a single-world scene"
+    )
+
+
+def test_histogram_samples_before_boundary_clamp():
+    """Load-bearing placement: ``_dt_histogram_accum`` must launch BEFORE
+    ``_clamp_dt_to_boundary`` in ``_run_iteration_body``. After the clamp, ``dt`` may
+    instead hold a boundary-landing sliver, binning the sample into the wrong bucket.
+
+    Pin the controller's step by setting ``dt_inner_max == dt_inner_init``:
+    ``effective_dt_max = min(dt_inner_max, dt_outer) == dt_inner_init``, so every
+    iteration's ``_apply_dt_cap`` clamps ``dt`` back to exactly ``dt_inner_init``
+    regardless of how the controller wants to grow it, and a smooth free-fall at the
+    default tol never rejects (so dt never shrinks below the pin either). Every
+    iteration therefore ATTEMPTS the identical dt -- except the final iteration of each
+    boundary, whose dt is instead a landing sliver truncated by the boundary target,
+    strictly smaller than the pin.
+
+    With the launch correctly BEFORE the clamp, every sample records the pinned
+    dt_inner_init, landing all samples in exactly one bin. With the launch moved to
+    AFTER the clamp (mutation), the landing-sliver iterations record a smaller value,
+    splitting the samples across (at least) two bins -- see task-45-report.md for the
+    measured counts both ways.
+    """
+    if _skip_without_gpu("test_histogram_samples_before_boundary_clamp"):
+        return
+    solver, s0, s1, control = _one_sphere_solver(
+        dt_inner_init=1e-3, dt_inner_min=1e-5, dt_inner_max=1e-3, dt_histogram=True
+    )
+    solver.reset_dt_histogram()
+    solver.reset_compute_counter()
+    for _ in range(10):
+        s0, s1 = solver.step_dt(1.0 / 120.0, s0, s1, control)
+
+    counts = solver.dt_histogram.numpy()
+    nonzero_bins = np.count_nonzero(counts)
+    assert nonzero_bins == 1, (
+        f"expected all samples in exactly one bin (dt pinned at dt_inner_init via "
+        f"dt_inner_max == dt_inner_init), got {nonzero_bins} nonzero bins: {counts}"
+    )
+    stats = solver.dt_histogram_stats()
+    assert stats["total_samples"] == int(solver.cumulative_iterations.numpy()[0]), (
+        f"total_samples ({stats['total_samples']}) must equal cumulative_iterations "
+        f"({int(solver.cumulative_iterations.numpy()[0])}) for a single-world scene"
+    )
 
 
 def test_reset_zeroes_the_accumulators():
