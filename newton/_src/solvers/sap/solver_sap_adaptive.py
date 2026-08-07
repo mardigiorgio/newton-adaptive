@@ -963,7 +963,7 @@ class SolverSAPAdaptive:
         # body) hands each one exactly its remainder and gives landed worlds dt=0, so one
         # more body with force_accept latched finishes the batch. Time becomes exact for
         # every world; only that step's local error exceeds tol.
-        if self._quantile_stop.enabled:
+        if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
             self._quantile_stop.force_accept.fill_(1)
             try:
                 if graph is not None:

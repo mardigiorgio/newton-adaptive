@@ -160,6 +160,16 @@ class QuantileBoundaryStop:
         wp.launch(count_unfinished, dim=self.world_count, inputs=[sim_time, next_time, self.count], device=device)
         wp.launch(apply_quantile_threshold, dim=1, inputs=[self.count, flag, self.max_unfinished], device=device)
 
+    def any_abandoned(self) -> bool:
+        """Whether the last :meth:`mark_boundary` left any world short of its boundary.
+
+        Reads the 4-byte counter the threshold kernel already computed, so a march that
+        ended with every world landed -- the common case in scenes whose per-world attempt
+        counts are tightly clustered -- can skip :meth:`force_complete` entirely instead of
+        paying a full batched evaluation to complete nobody.
+        """
+        return int(self.count.numpy()[0]) > 0
+
     def force_complete(self, sim_time, next_time, dt, dt_half, eval_fn: Callable[[], None], device) -> None:
         """Land every abandoned world on its boundary with one unchecked step.
 

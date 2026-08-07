@@ -1323,7 +1323,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
         # whole remaining span in ONE unchecked step, so it lands at the correct TIME
         # with degraded accuracy instead of silently sitting at the wrong instant.
-        if self._quantile_stop.max_unfinished > 0:
+        if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
             # A force-accepted step needs NO error estimate, so it costs ONE eval rather
             # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
             # replayed one at these world counts.
