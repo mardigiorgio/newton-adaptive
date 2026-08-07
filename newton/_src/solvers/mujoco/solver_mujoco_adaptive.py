@@ -62,6 +62,7 @@ import warp as wp
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ...utils.benchmark import event_scope
+from ..adaptive_boundary import QuantileBoundaryStop
 from .kernels import convert_mj_coords_to_warp_kernel, eval_articulation_fk
 from .mjw_alloc_cache import MjwStepAllocCache
 from .solver_mujoco import SolverMuJoCo
@@ -440,57 +441,14 @@ def _boundary_reset(flag: wp.array[wp.int32]):
 
 
 @wp.kernel
-def _boundary_count_unfinished(
-    sim_time: wp.array[wp.float32],
-    target: wp.array[wp.float32],
-    iter_count: wp.array[wp.int32],
-    max_iters: int,
-    flag: wp.array[wp.int32],
-):
-    """Accumulate the NUMBER of worlds short of the boundary into ``flag[0]``."""
-    i = wp.tid()
-    if iter_count[0] >= max_iters:
-        return
-    if sim_time[i] < target[i]:
-        wp.atomic_add(flag, 0, 1)
+def _iters_exhausted_stop(iter_count: wp.array[wp.int32], max_iters: int, flag: wp.array[wp.int32]):
+    """Latch the boundary loop closed once ``max_substeps`` attempts have run.
 
-
-@wp.kernel
-def _boundary_threshold(flag: wp.array[wp.int32], max_unfinished: int):
-    """Keep marching only while MORE than ``max_unfinished`` worlds are short.
-
-    ``max_unfinished = 0`` reproduces the wait-for-everyone behavior. A positive value
-    abandons the slowest tail: the loop length becomes a QUANTILE of the per-world
-    attempt distribution rather than its MAXIMUM, which is what makes the cost
-    independent of world count.
+    Runs AFTER the quantile test so the cap wins: the safety bound must stop the loop
+    regardless of how many worlds are still short.
     """
-    if flag[0] <= max_unfinished:
+    if iter_count[0] >= max_iters:
         flag[0] = 0
-    else:
-        flag[0] = 1
-
-
-@wp.kernel
-def _force_complete_dt(
-    sim_time: wp.array[wp.float32],
-    target: wp.array[wp.float32],
-    dt: wp.array[wp.float32],
-):
-    """Give every world still short of the boundary its whole remaining span."""
-    i = wp.tid()
-    r = target[i] - sim_time[i]
-    if r > wp.float32(0.0):
-        dt[i] = r
-    else:
-        dt[i] = wp.float32(0.0)
-
-
-@wp.kernel
-def _force_complete_land(sim_time: wp.array[wp.float32], target: wp.array[wp.float32]):
-    """Land the forced worlds exactly on the boundary (time is exact; accuracy is not)."""
-    i = wp.tid()
-    if sim_time[i] < target[i]:
-        sim_time[i] = target[i]
 
 
 @wp.kernel
@@ -751,15 +709,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_mode = dt_mode  # "per_world" only (global removed: a shared dt couples worlds)
         self._tiling = tiling  # "ragged" only ("even" removed)
         self._max_substeps = int(max_substeps)
-        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached
-        # the boundary, then force-complete the rest. 1.0 == wait for every world.
-        if not (0.0 < float(landed_fraction) <= 1.0):
-            raise ValueError(f"landed_fraction must be in (0, 1], got {landed_fraction!r}")
         self._landed_fraction = float(landed_fraction)
-        self._force_accept = wp.zeros(1, dtype=wp.int32, device=device)
-        self._force_graph = None
-        self._force_graph_failed = False
-        self._max_unfinished = int(world_count * (1.0 - self._landed_fraction))
 
         # ---- step-doubling scratch buffers, in MuJoCo space ([nworld, nq]/[nworld, nv]) ----
         # The inner loop marches mjw_data.qpos/qvel directly; these hold the rollback
@@ -891,6 +841,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             _is_cuda = False
         self._is_cuda = _is_cuda
         self._graph_enabled = _is_cuda and os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
+        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached the
+        # boundary, then force-complete the rest. 1.0 == wait for every world (default).
+        self._quantile_stop = QuantileBoundaryStop(
+            world_count, device, landed_fraction=landed_fraction, graph_enabled=self._graph_enabled
+        )
         self._march_graph_cache: dict = {}
         self._march_warmed = False
 
@@ -1234,7 +1189,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._nan_guard_flag,
                 self._sim_time,
                 self._next_time,
-                self._force_accept,
+                self._quantile_stop.force_accept,
             ],
             device=dev,
         )
@@ -1257,19 +1212,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=dev,
         )
         wp.launch(_boundary_reset, dim=1, inputs=[self._boundary_flag], device=dev)
+        self._quantile_stop.mark_boundary(self._sim_time, self._next_time, self._boundary_flag, dev)
         wp.launch(
-            _boundary_count_unfinished,
-            dim=n,
-            inputs=[
-                self._sim_time,
-                self._next_time,
-                self._iteration_count_buf,
-                self._max_substeps,
-                self._boundary_flag,
-            ],
+            _iters_exhausted_stop,
+            dim=1,
+            inputs=[self._iteration_count_buf, self._max_substeps, self._boundary_flag],
             device=dev,
         )
-        wp.launch(_boundary_threshold, dim=1, inputs=[self._boundary_flag, self._max_unfinished], device=dev)
 
     # =====================================================================
     # The boundary call: march every world to dt_outer
@@ -1376,11 +1325,18 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
         # whole remaining span in ONE unchecked step, so it lands at the correct TIME
         # with degraded accuracy instead of silently sitting at the wrong instant.
-        if self._max_unfinished > 0:
+        if self._quantile_stop.max_unfinished > 0:
             # A force-accepted step needs NO error estimate, so it costs ONE eval rather
             # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
             # replayed one at these world counts.
-            self._force_complete()
+            self._quantile_stop.force_complete(
+                self._sim_time,
+                self._next_time,
+                self._dt,
+                self._dt_half,
+                lambda: self._mjw_eval(self._dt),
+                device,
+            )
 
         # Convert the final committed state back to Newton coordinates ONCE per boundary
         # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
@@ -1389,41 +1345,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._copy_state(state_0, self._state_cur)
 
         return state_0, state_1
-
-    def _force_complete(self) -> None:
-        """Land every world abandoned by the quantile stop exactly on its boundary.
-
-        Each such world takes its whole remaining span in one unchecked step; landed
-        worlds get ``dt = 0`` and no-op. Time becomes exact for every world -- only this
-        one step's local error exceeds ``tol``. Replayed from a cached graph when capture
-        is available, since an eager eval costs orders of magnitude more at scale.
-        """
-        n = self.model.world_count
-        dev = self.model.device
-
-        def body():
-            wp.launch(_force_complete_dt, dim=n, inputs=[self._sim_time, self._next_time, self._dt], device=dev)
-            self._mjw_eval(self._dt)
-            wp.launch(_force_complete_land, dim=n, inputs=[self._sim_time, self._next_time], device=dev)
-
-        if self._force_graph is not None:
-            wp.capture_launch(self._force_graph)
-            return
-        if not self._graph_enabled or self._force_graph_failed or self._external_capture_active():
-            body()
-            return
-        try:
-            with wp.ScopedCapture(device=dev) as cap:
-                body()
-            self._force_graph = cap.graph
-            wp.capture_launch(self._force_graph)
-        except Exception as exc:
-            self._force_graph_failed = True
-            warnings.warn(
-                f"SolverMuJoCoAdaptive: forced-completion capture failed ({exc}); running it eagerly.",
-                stacklevel=2,
-            )
-            body()
 
     def _iteration_graph(self, effective_dt_max: float):
         """Return the captured iteration-body graph (keyed by effective_dt_max), or ``None``
