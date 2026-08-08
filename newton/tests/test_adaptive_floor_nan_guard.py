@@ -26,7 +26,11 @@ This is a pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.mujoco.solver_mujoco_adaptive import _calc_adjusted_step
+from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
+    _calc_adjusted_step,
+    _forced_scan_kernel,
+    _restore_bad_rows_kernel,
+)
 
 wp.init()
 
@@ -145,6 +149,44 @@ def test_force_accept_never_commits_a_non_finite_state():
     """force_accept must not launder a diverged world into the committed state."""
     _, commit, _, _ = _run([SENTINEL], [10.0 * DT_MIN], force_accept=1)
     assert bool(commit[0]) is False, "a non-finite step must never be force-committed"
+
+
+def test_forced_completion_containment_restores_and_latches():
+    """The production forced-completion path: a world whose forced eval went non-finite
+    must be restored to its pre-forced snapshot and latched diverged; clean worlds must
+    keep their forced state untouched. (The force_accept kernel tests above cover the
+    controller branch; THIS is the path the quantile stop actually takes.)"""
+    n, nq, nv = 4, 3, 2
+    rng = np.random.default_rng(0)
+    saved_q = rng.standard_normal((n, nq)).astype(np.float32)
+    saved_v = rng.standard_normal((n, nv)).astype(np.float32)
+    forced_q = saved_q + 0.5
+    forced_v = saved_v + 0.5
+    forced_q[2, 1] = np.nan  # world 2: forced eval blew up in qpos
+    forced_v[3, 0] = np.inf  # world 3: blew up in qvel
+
+    qpos = wp.array(forced_q, dtype=wp.float32)
+    qvel = wp.array(forced_v, dtype=wp.float32)
+    qpos_saved = wp.array(saved_q, dtype=wp.float32)
+    qvel_saved = wp.array(saved_v, dtype=wp.float32)
+    diverged = wp.zeros(n, dtype=wp.bool)
+    bad = wp.zeros(n, dtype=wp.int32)
+
+    wp.launch(_forced_scan_kernel, dim=n, inputs=[qpos, qvel, nq, nv, diverged, bad])
+    for sv, out, width in ((qpos_saved, qpos, nq), (qvel_saved, qvel, nv)):
+        wp.launch(_restore_bad_rows_kernel, dim=(n, width), inputs=[sv, bad], outputs=[out])
+    wp.synchronize()
+
+    q, v = qpos.numpy(), qvel.numpy()
+    d, b = diverged.numpy(), bad.numpy()
+    assert list(b) == [0, 0, 1, 1], f"bad mask wrong: {list(b)}"
+    assert list(d) == [False, False, True, True], f"diverged latch wrong: {list(d)}"
+    # poisoned worlds: fully restored (both fields, even if only one was non-finite)
+    assert np.allclose(q[2], saved_q[2]) and np.allclose(v[2], saved_v[2])
+    assert np.allclose(q[3], saved_q[3]) and np.allclose(v[3], saved_v[3])
+    # clean worlds: forced state kept, snapshot NOT leaked back
+    assert np.allclose(q[:2], forced_q[:2]) and np.allclose(v[:2], forced_v[:2])
+    assert np.isfinite(q).all() and np.isfinite(v).all()
 
 
 if __name__ == "__main__":

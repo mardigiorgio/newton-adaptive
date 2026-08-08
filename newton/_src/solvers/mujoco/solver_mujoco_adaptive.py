@@ -537,6 +537,51 @@ def _clamp_dt_to_boundary(
 
 
 @wp.kernel
+def _forced_scan_kernel(
+    qpos: wp.array2d[wp.float32],
+    qvel: wp.array2d[wp.float32],
+    nq: int,
+    nv: int,
+    diverged: wp.array[wp.bool],
+    bad: wp.array[wp.int32],
+):
+    """NaN containment for the forced-completion eval.
+
+    The quantile stop's forced remainder step is unchecked BY DESIGN (one eval, no
+    error estimate) and lands precisely on straggler worlds -- the ones the controller
+    kept rejecting. A non-finite result must never commit: flag the world in ``bad``
+    (gates the row restores below) and latch ``diverged`` so the caller can terminate
+    it, mirroring the NaN-guard floor path.
+    """
+    w = wp.tid()
+    bad_w = int(0)
+    for i in range(nq):
+        x = qpos[w, i]
+        if wp.isnan(x) or wp.isinf(x):
+            bad_w = 1
+    for i in range(nv):
+        x = qvel[w, i]
+        if wp.isnan(x) or wp.isinf(x):
+            bad_w = 1
+    bad[w] = bad_w
+    if bad_w == 1:
+        diverged[w] = True
+
+
+@wp.kernel
+def _restore_bad_rows_kernel(
+    saved: wp.array2d[wp.float32],
+    bad: wp.array[wp.int32],
+    out: wp.array2d[wp.float32],
+):
+    """Restore the pre-forced-step snapshot row for worlds flagged by
+    ``_forced_scan_kernel``; clean worlds keep the forced state already in ``out``."""
+    w, i = wp.tid()
+    if bad[w] == 1:
+        out[w, i] = saved[w, i]
+
+
+@wp.kernel
 def _iter_count_increment(count: wp.array[wp.int32]):
     """Increment iteration counter (dim=1, single thread)."""
     count[0] = count[0] + 1
@@ -743,6 +788,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # per-world boundary-limited flag + consecutive-rejection counter, and the two
         # opt-in fix switches (baked into the captured graph at construction).
         self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
+        self._forced_bad = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._order_aware_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ORDER_AWARE", "0") == "1" else 0
         self._sliver_fix_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_SLIVER_FIX", "0") == "1" else 0
@@ -1324,6 +1370,16 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # whole remaining span in ONE unchecked step, so it lands at the correct TIME
         # with degraded accuracy instead of silently sitting at the wrong instant.
         if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
+            # Snapshot the committed state first: the forced step below is unchecked, and
+            # a non-finite result reaching mjw_data reaches the observations (= training
+            # death). The step-doubling snapshot buffers are free between boundaries
+            # (re-seeded at the top of every iteration), so reuse them.
+            d = self.mjw_data
+            wp.copy(self._qpos_saved, d.qpos)
+            wp.copy(self._qvel_saved, d.qvel)
+            wp.copy(self._warmstart_saved, d.qacc_warmstart)
+            if self._na > 0:
+                wp.copy(self._act_saved, d.act)
             # A force-accepted step needs NO error estimate, so it costs ONE eval rather
             # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
             # replayed one at these world counts.
@@ -1335,6 +1391,36 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 lambda: self._mjw_eval(self._dt),
                 device,
             )
+            # Containment: restore last-good state and latch ``diverged`` for any world
+            # the forced eval sent non-finite. sim_time stays at the boundary (already
+            # stamped by force_complete), matching the NaN-guard floor semantics:
+            # hold state, advance time, flag.
+            wp.launch(
+                _forced_scan_kernel,
+                dim=n,
+                inputs=[d.qpos, d.qvel, self._nq, self._nv, self._diverged, self._forced_bad],
+                device=device,
+            )
+            for saved, out, width in (
+                (self._qpos_saved, d.qpos, self._nq),
+                (self._qvel_saved, d.qvel, self._nv),
+                (self._warmstart_saved, d.qacc_warmstart, self._nv),
+            ):
+                wp.launch(
+                    _restore_bad_rows_kernel,
+                    dim=(n, width),
+                    inputs=[saved, self._forced_bad],
+                    outputs=[out],
+                    device=device,
+                )
+            if self._na > 0:
+                wp.launch(
+                    _restore_bad_rows_kernel,
+                    dim=(n, self._na),
+                    inputs=[self._act_saved, self._forced_bad],
+                    outputs=[d.act],
+                    device=device,
+                )
 
         # Convert the final committed state back to Newton coordinates ONCE per boundary
         # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
