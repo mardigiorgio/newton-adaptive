@@ -255,10 +255,8 @@ def _calc_adjusted_step(
     tol: float,
     dt_min: float,
     divergence_threshold: float,
-    limited: wp.array[wp.int32],
     consec_rej: wp.array[wp.int32],
     order_aware: int,
-    sliver_fix: int,
     nan_guard: int,
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
@@ -281,10 +279,9 @@ def _calc_adjusted_step(
     world = wp.tid()
     e = err[world]
     step = dt[world]
-    # NOTE: ``step`` here is the post-boundary-clamp dt, so by default an accepted
-    # landing sliver rewrites ideal_dt relative to the remainder (<= 5x it),
-    # collapsing the carried dt. The Drake "artificially limited" exemption is
-    # opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1 (see the sliver branch below).
+    # NOTE: ``step`` is the post-boundary-clamp dt: an accepted landing sliver
+    # rewrites ideal_dt relative to the remainder (Drake resizing on the step
+    # actually taken).
     is_diverged = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
 
     # Boundary-stalled worlds (dt clamped to 0): no-op step; accept+commit the
@@ -356,12 +353,6 @@ def _calc_adjusted_step(
     commit[world] = acc
     if acc:
         consec_rej[world] = 0
-        # Sliver exemption (NEWTON_ADAPTIVE_SLIVER_FIX=1): an accepted step that was
-        # artificially shortened by the boundary clamp says nothing about the error-limited
-        # step size, so keep the carried ideal_dt instead of collapsing it to ~the sliver
-        # (Drake's artificially-limited rule).
-        if sliver_fix == 1 and limited[world] == 1:
-            return
     else:
         consec_rej[world] = consec_rej[world] + 1
     ideal_dt[world] = new_step
@@ -516,25 +507,19 @@ def _clamp_dt_to_boundary(
     dt_half: wp.array[wp.float32],
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
-    limited: wp.array[wp.int32],
 ):
     """Clamp dt so worlds don't overshoot their boundary target.
 
-    Worlds already at or past the boundary get dt=0 (no-op step). ``limited[i]=1``
-    marks a step artificially shortened by the boundary (a "landing sliver"), so the
-    controller can exempt it from step-size resizing (Drake's artificially-limited
-    rule, opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1).
+    Worlds already at or past the boundary get dt=0 (no-op step).
     """
     i = wp.tid()
     remaining = next_time[i] - sim_time[i]
-    limited[i] = 0
     if remaining <= wp.float32(0.0):
         dt[i] = wp.float32(0.0)
         dt_half[i] = wp.float32(0.0)
     elif dt[i] > remaining:
         dt[i] = remaining
         dt_half[i] = remaining * wp.float32(0.5)
-        limited[i] = 1
 
 
 @wp.kernel
@@ -793,14 +778,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._status_scalars = wp.zeros(6, dtype=wp.float32, device=device)
 
         self._iteration_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
-        # Controller-fix state (see _clamp_dt_to_boundary / _calc_adjusted_step):
-        # per-world boundary-limited flag + consecutive-rejection counter, and the two
-        # opt-in fix switches (baked into the captured graph at construction).
-        self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
+        # Controller state: consecutive-rejection counter and the opt-in
+        # order-aware rejection switch (baked into the captured graph).
         self._forced_bad = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._order_aware_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ORDER_AWARE", "0") == "1" else 0
-        self._sliver_fix_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_SLIVER_FIX", "0") == "1" else 0
         # Non-finite (or catastrophic) state at the dt floor: NEVER commit it. Hold
         # the last valid state for this ONE frame and latch ``diverged``; the env
         # consumes the latch as a termination and resets the world the same step.
@@ -1214,7 +1196,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         wp.launch(
             _clamp_dt_to_boundary,
             dim=n,
-            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time, self._limited],
+            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time],
             device=dev,
         )
 
@@ -1240,10 +1222,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._tol,
                 self._dt_min,
                 self._divergence_threshold,
-                self._limited,
                 self._consec_rej,
                 self._order_aware_flag,
-                self._sliver_fix_flag,
                 self._nan_guard_flag,
                 self._sim_time,
                 self._next_time,
