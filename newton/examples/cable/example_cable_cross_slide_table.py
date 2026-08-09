@@ -5,15 +5,22 @@
 # Example Cable Cross-Slide Table
 #
 # Demonstrates a cable-driven cross-slide table inspired by the Simscape
-# Multibody cable-driven XY table example https://www.mathworks.com/help/sm/ug/cable-driven-xy-table-with-cross-base.html.
-# The mechanism is laid out on the ground plane: the blue base is fixed, the green carriage moves horizontally,
-# and the beige carriage moves vertically on the green carriage. The cable is
-# driven only by the two blue input pulleys.
+# Multibody cable-driven XY table example:
+# https://www.mathworks.com/help/sm/ug/cable-driven-xy-table-with-cross-base.html
+# The mechanism is laid out on the ground plane: the blue base is fixed, the
+# green carriage moves horizontally, and the beige carriage moves vertically on
+# the green carriage. The cable is driven only by the two blue input pulleys.
 #
 # The sample combines passive revolute pulleys, a closed cable loop, and two
 # commanded input pulleys. The input rotations trace a rectangle with the
 # beige table marker while the solver resolves cable wrapping and contact
 # against the guides.
+#
+# Run interactively:
+#   uv run --extra examples python -m newton.examples.cable.example_cable_cross_slide_table
+#
+# Run as a test:
+#   uv run --extra examples python -m newton.examples.cable.example_cable_cross_slide_table --test --viewer null
 #
 ###########################################################################
 
@@ -35,6 +42,8 @@ TABLE_TRACKING_RMS_ERROR_TOLERANCE = 0.0025
 CABLE_XY_ABS_BOUND = 0.30
 JOINT_LIMIT_TOLERANCE = 0.003
 START_RAMP_DURATION = 1.2
+MOUSE_PICK_STIFFNESS = 0.01
+MOUSE_PICK_DAMPING = 0.001
 
 
 @wp.kernel
@@ -410,6 +419,7 @@ def add_visual_bar(
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         # Store viewer and configure simulation cadence.
         self.viewer = viewer
 
@@ -689,15 +699,21 @@ class Example:
             bend_damping=1.0e-2,
             wrap_in_articulation=False,
             label="xy_table_cable",
+            body_frame_origin="com",
         )
-        initial_cable_xforms = [wp.transform(cable_points[i], cable_quats[i]) for i in range(len(self.cable_bodies))]
+        initial_cable_xforms = [
+            wp.transform(cable_points[i] + (cable_points[i + 1] - cable_points[i]) * 0.5, cable_quats[i])
+            for i in range(len(self.cable_bodies))
+        ]
         filter_body_group_collisions(builder, self.cable_bodies)
 
         # Ball joints close the cable loop at the table anchors.
         first_cable_body = self.cable_bodies[0]
         last_cable_body = self.cable_bodies[-1]
-        first_cable_anchor_xform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-        last_cable_anchor_xform = wp.transform(wp.vec3(0.0, 0.0, cable_segment_length), wp.quat_identity())
+        first_endpoint_local = wp.vec3(0.0, 0.0, -0.5 * cable_segment_length)
+        last_endpoint_local = wp.vec3(0.0, 0.0, 0.5 * cable_segment_length)
+        first_cable_anchor_xform = wp.transform(first_endpoint_local, wp.quat_identity())
+        last_cable_anchor_xform = wp.transform(last_endpoint_local, wp.quat_identity())
         for i, (body, xform) in enumerate(
             (
                 (first_cable_body, first_cable_anchor_xform),
@@ -747,6 +763,7 @@ class Example:
         self.model = builder.finalize(device=sim_device)
         self.model.set_gravity((0.0, 0.0, 0.0))
 
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
         self.solver = newton.solvers.SolverVBD(
             self.model,
             iterations=sim_iterations,
@@ -757,10 +774,9 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.model.contacts(collision_pipeline=pipeline)
+        self.contacts = self.collision_pipeline.contacts()
 
-        # Device arrays used by kernels during simulation and CUDA graph replay.
+        # Device arrays used by kernels during simulation and captured replay.
         self.kinematic_body_indices = wp.array(
             kinematic_body_indices,
             dtype=wp.int32,
@@ -803,6 +819,13 @@ class Example:
 
         # Viewer setup.
         self.viewer.set_model(self.model)
+        picking = getattr(self.viewer, "picking", None)
+        if picking is not None:
+            pick_state = picking.pick_state.numpy()
+            pick_state[0]["pick_stiffness"] = MOUSE_PICK_STIFFNESS
+            pick_state[0]["pick_damping"] = MOUSE_PICK_DAMPING
+            picking.pick_state.assign(pick_state)
+
         self.viewer.set_camera(
             pos=wp.vec3(0.0, 0.0, 0.8),
             pitch=-90.0,
@@ -812,13 +835,10 @@ class Example:
         self.capture()
 
     def capture(self):
-        """Capture the simulation update when running on CUDA."""
-        if self.solver.device.is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        """Capture the simulation update into a graph for replay."""
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         """Advance the XY table simulation by one rendered frame."""
@@ -842,7 +862,7 @@ class Example:
             )
 
             self.viewer.apply_forces(self.state_0)
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 

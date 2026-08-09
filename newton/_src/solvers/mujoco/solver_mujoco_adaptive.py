@@ -60,10 +60,11 @@ import numpy as np
 import warp as wp
 
 from ...core.types import override
-from ...sim import Contacts, Control, Model, State
+from ...sim import BodyFlags, Contacts, Control, Model, State
+from ...sim.articulation import eval_articulation_fk
 from ...utils.benchmark import event_scope
 from ..adaptive_boundary import QuantileBoundaryStop
-from .kernels import convert_mj_coords_to_warp_kernel, eval_articulation_fk
+from .kernels import convert_mj_coords_to_warp_kernel
 from .mjw_alloc_cache import MjwStepAllocCache
 from .solver_mujoco import SolverMuJoCo
 
@@ -712,6 +713,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # convexifies meshes and only instantiates env_0's static geoms — unusable
         # for multi-env non-convex scenes.
         self._use_newton_contacts = bool(use_newton_contacts)
+        # Sleeping cannot coexist with the adaptive march: the step-doubling
+        # rollback restores only qpos/qvel/warmstart/act, so sleep bookkeeping
+        # mutated by a trial eval would survive a reject, and the shared-forward
+        # suffix eval skips the wake/sleep stages entirely. Force it off here --
+        # the base otherwise inherits model.mujoco.enable_sleeping.
+        if kwargs.get("enable_sleeping"):
+            raise ValueError("SolverMuJoCoAdaptive does not support enable_sleeping=True.")
+        kwargs["enable_sleeping"] = False
         super().__init__(
             model,
             separate_worlds=True,
@@ -1135,6 +1144,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             inputs=[
                 model.articulation_start,
                 model.articulation_end,
+                model.articulation_count,
+                None,
+                None,
                 model.joint_articulation,
                 st.joint_q,
                 st.joint_qd,
@@ -1148,6 +1160,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 model.joint_axis,
                 model.joint_dof_dim,
                 model.body_com,
+                model.body_flags,
+                int(BodyFlags.ALL),
             ],
             outputs=[st.body_q, st.body_qd],
             device=model.device,
@@ -1309,124 +1323,128 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=device,
         )
 
-        self._apply_mjc_control(self.model, state_0, control, self.mjw_data)
-        if apply_forces is not None:
-            apply_forces(state_0)
+        # The whole boundary call executes MJWarp code, so it runs under the base
+        # solver's MJWarp compilation/execution options (module options, generated-
+        # kernel invalidation, deterministic config), exactly like SolverMuJoCo.step.
+        with wp.ScopedDevice(device), self._scoped_mujoco_warp_execution():
+            self._apply_mjc_control(self.model, state_0, control, self.mjw_data)
+            if apply_forces is not None:
+                apply_forces(state_0)
 
-        self._enable_rne_postconstraint(self._state_cur)
+            self._enable_rne_postconstraint(self._state_cur)
 
-        # Load the incoming Newton state into MuJoCo coordinates ONCE per boundary;
-        # the whole inner loop then marches mjw_data.qpos/qvel directly.
-        self._update_mjc_data(self.mjw_data, self.model, state_0)
-        if self._use_newton_contacts:
-            if contacts is None:
-                raise ValueError(
-                    "SolverMuJoCoAdaptive(use_newton_contacts=True) requires contacts= at step(); "
-                    "feed the Newton CollisionPipeline contacts from the caller."
-                )
-            # Convert once with boundary-entry transforms (FULL path:
-            # frame/solref/friction/layout); the inner march refreshes dist/pos per
-            # iteration via _refresh_injected_contacts (fast path).
-            self._convert_contacts_to_mjwarp(self.model, state_0, contacts)
-            if self._contact_refresh_enabled:
-                # Seed the refresh scratch (kinematic dofs are copied from prev).
-                self._copy_state(self._refresh_state, state_0)
-                self._refresh_contacts = contacts
-                # A different Contacts object would leave stale device pointers
-                # baked into the captured iteration graphs — drop the caches.
-                key = id(contacts.contact_generation)
-                if key != self._refresh_contacts_key:
-                    self._refresh_contacts_key = key
-                    self._march_graph_cache.clear()
-                    self._conditional_graph_cache.clear()
+            # Load the incoming Newton state into MuJoCo coordinates ONCE per boundary;
+            # the whole inner loop then marches mjw_data.qpos/qvel directly.
+            self._update_mjc_data(self.mjw_data, self.model, state_0)
+            if self._use_newton_contacts:
+                if contacts is None:
+                    raise ValueError(
+                        "SolverMuJoCoAdaptive(use_newton_contacts=True) requires contacts= at step(); "
+                        "feed the Newton CollisionPipeline contacts from the caller."
+                    )
+                # Convert once with boundary-entry transforms (FULL path:
+                # frame/solref/friction/layout); the inner march refreshes dist/pos per
+                # iteration via _refresh_injected_contacts (fast path).
+                self._convert_contacts_to_mjwarp(self.model, state_0, contacts)
+                if self._contact_refresh_enabled:
+                    # Seed the refresh scratch (kinematic dofs are copied from prev).
+                    self._copy_state(self._refresh_state, state_0)
+                    self._refresh_contacts = contacts
+                    # A different Contacts object would leave stale device pointers
+                    # baked into the captured iteration graphs — drop the caches.
+                    key = id(contacts.contact_generation)
+                    if key != self._refresh_contacts_key:
+                        self._refresh_contacts_key = key
+                        self._march_graph_cache.clear()
+                        self._conditional_graph_cache.clear()
 
-        # Rebase both clocks by the per-world boundary so float32 magnitude stays bounded
-        # (prevents landing-remainder precision loss / dt jitter that grows over a run). The
-        # subtract-baseline preserves the remaining time exactly; do this BEFORE advancing next_time.
-        wp.launch(_rebase_time, dim=n, inputs=[self._sim_time, self._next_time], device=device)
-        wp.launch(_boundary_advance, dim=n, inputs=[self._next_time, dt_outer], device=device)
+            # Rebase both clocks by the per-world boundary so float32 magnitude stays bounded
+            # (prevents landing-remainder precision loss / dt jitter that grows over a run). The
+            # subtract-baseline preserves the remaining time exactly; do this BEFORE advancing next_time.
+            wp.launch(_rebase_time, dim=n, inputs=[self._sim_time, self._next_time], device=device)
+            wp.launch(_boundary_advance, dim=n, inputs=[self._next_time, dt_outer], device=device)
 
-        self._iteration_count_buf.fill_(0)
-        self._boundary_flag.fill_(1)
+            self._iteration_count_buf.fill_(0)
+            self._boundary_flag.fill_(1)
 
-        self._march_ragged(effective_dt_max)
+            self._march_ragged(effective_dt_max)
 
-        # Once per boundary, outside the captured body: no per-iteration cost.
-        if self._dt_hist_trunc is not None:
-            wp.launch(
-                _count_boundary_truncation,
-                dim=1,
-                inputs=[self._iteration_count_buf, self._max_substeps, self._dt_hist_trunc],
-                device=device,
-            )
-            wp.launch(
-                _count_unfinished_worlds,
-                dim=n,
-                inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
-                device=device,
-            )
-
-        # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
-        # whole remaining span in ONE unchecked step, so it lands at the correct TIME
-        # with degraded accuracy instead of silently sitting at the wrong instant.
-        if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
-            # Snapshot the committed state first: the forced step below is unchecked, and
-            # a non-finite result reaching mjw_data reaches the observations (= training
-            # death). The step-doubling snapshot buffers are free between boundaries
-            # (re-seeded at the top of every iteration), so reuse them.
-            d = self.mjw_data
-            wp.copy(self._qpos_saved, d.qpos)
-            wp.copy(self._qvel_saved, d.qvel)
-            wp.copy(self._warmstart_saved, d.qacc_warmstart)
-            if self._na > 0:
-                wp.copy(self._act_saved, d.act)
-            # A force-accepted step needs NO error estimate, so it costs ONE eval rather
-            # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
-            # replayed one at these world counts.
-            self._quantile_stop.force_complete(
-                self._sim_time,
-                self._next_time,
-                self._dt,
-                self._dt_half,
-                lambda: self._mjw_eval(self._dt),
-                device,
-            )
-            # Containment: restore last-good state and latch ``diverged`` for any world
-            # the forced eval sent non-finite. sim_time stays at the boundary (already
-            # stamped by force_complete), matching the NaN-guard floor semantics:
-            # hold state, advance time, flag.
-            wp.launch(
-                _forced_scan_kernel,
-                dim=n,
-                inputs=[d.qpos, d.qvel, self._nq, self._nv, self._diverged, self._forced_bad],
-                device=device,
-            )
-            for saved, out, width in (
-                (self._qpos_saved, d.qpos, self._nq),
-                (self._qvel_saved, d.qvel, self._nv),
-                (self._warmstart_saved, d.qacc_warmstart, self._nv),
-            ):
+            # Once per boundary, outside the captured body: no per-iteration cost.
+            if self._dt_hist_trunc is not None:
                 wp.launch(
-                    _restore_bad_rows_kernel,
-                    dim=(n, width),
-                    inputs=[saved, self._forced_bad],
-                    outputs=[out],
+                    _count_boundary_truncation,
+                    dim=1,
+                    inputs=[self._iteration_count_buf, self._max_substeps, self._dt_hist_trunc],
                     device=device,
                 )
-            if self._na > 0:
                 wp.launch(
-                    _restore_bad_rows_kernel,
-                    dim=(n, self._na),
-                    inputs=[self._act_saved, self._forced_bad],
-                    outputs=[d.act],
+                    _count_unfinished_worlds,
+                    dim=n,
+                    inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
                     device=device,
                 )
 
-        # Convert the final committed state back to Newton coordinates ONCE per boundary
-        # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
-        # buffers the write so state and state_prev never alias in the convert kernel.
-        self._update_newton_state(self.model, self._state_cur, self.mjw_data, state_prev=state_0)
-        self._copy_state(state_0, self._state_cur)
+            # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
+            # whole remaining span in ONE unchecked step, so it lands at the correct TIME
+            # with degraded accuracy instead of silently sitting at the wrong instant.
+            if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
+                # Snapshot the committed state first: the forced step below is unchecked, and
+                # a non-finite result reaching mjw_data reaches the observations (= training
+                # death). The step-doubling snapshot buffers are free between boundaries
+                # (re-seeded at the top of every iteration), so reuse them.
+                d = self.mjw_data
+                wp.copy(self._qpos_saved, d.qpos)
+                wp.copy(self._qvel_saved, d.qvel)
+                wp.copy(self._warmstart_saved, d.qacc_warmstart)
+                if self._na > 0:
+                    wp.copy(self._act_saved, d.act)
+                # A force-accepted step needs NO error estimate, so it costs ONE eval rather
+                # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
+                # replayed one at these world counts.
+                self._quantile_stop.force_complete(
+                    self._sim_time,
+                    self._next_time,
+                    self._dt,
+                    self._dt_half,
+                    lambda: self._mjw_eval(self._dt),
+                    device,
+                )
+                # Containment: restore last-good state and latch ``diverged`` for any world
+                # the forced eval sent non-finite. sim_time stays at the boundary (already
+                # stamped by force_complete), matching the NaN-guard floor semantics:
+                # hold state, advance time, flag.
+                wp.launch(
+                    _forced_scan_kernel,
+                    dim=n,
+                    inputs=[d.qpos, d.qvel, self._nq, self._nv, self._diverged, self._forced_bad],
+                    device=device,
+                )
+                for saved, out, width in (
+                    (self._qpos_saved, d.qpos, self._nq),
+                    (self._qvel_saved, d.qvel, self._nv),
+                    (self._warmstart_saved, d.qacc_warmstart, self._nv),
+                ):
+                    wp.launch(
+                        _restore_bad_rows_kernel,
+                        dim=(n, width),
+                        inputs=[saved, self._forced_bad],
+                        outputs=[out],
+                        device=device,
+                    )
+                if self._na > 0:
+                    wp.launch(
+                        _restore_bad_rows_kernel,
+                        dim=(n, self._na),
+                        inputs=[self._act_saved, self._forced_bad],
+                        outputs=[d.act],
+                        device=device,
+                    )
+
+            # Convert the final committed state back to Newton coordinates ONCE per boundary
+            # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
+            # buffers the write so state and state_prev never alias in the convert kernel.
+            self._update_newton_state(self.model, self._state_cur, self.mjw_data, state_prev=state_0)
+            self._copy_state(state_0, self._state_cur)
 
         return state_0, state_1
 
@@ -1778,7 +1796,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     @property
     def last_raw_error(self) -> wp.array:
-        """Inf-norm state error from the most recent attempt (accepted or rejected), shape ``[world_count]``, float32, on device."""
+        """Inf-norm state error from the most recent attempt (accepted or rejected),
+        shape ``[world_count]``, float32, on device."""
         return self._last_error
 
     @property
