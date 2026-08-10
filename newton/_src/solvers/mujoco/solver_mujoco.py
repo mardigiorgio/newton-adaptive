@@ -8078,6 +8078,12 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 ],
                 device=self.model.device,
             )
+            # The mapping is primary-sized, so the launch covers primary worlds
+            # only; mocap_pos/mocap_quat are data-side rows that mjw indexes
+            # directly by world (no modulo broadcast), so replica worlds must
+            # receive the same poses via the mirror.
+            if self._mjw_world_replicas > 1:
+                self._mirror_data_rows_to_replicas(self.mjw_data.mocap_pos, self.mjw_data.mocap_quat)
 
         # Update joint positions, joint axes, and relative body transforms
         # Iterates over MuJoCo joints [world, jnt]
@@ -8918,6 +8924,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        # eq_data is model-side (replica worlds reach it through mjw's modulo
+        # broadcast) but eq_active is data-side and indexed directly by world,
+        # so replica rows need the mirror to solve the same constraint set.
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.eq_active)
 
     def _update_mimic_eq_properties(self):
         """Update mimic constraint properties in the MuJoCo model.
@@ -8954,6 +8965,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        # Same constraint as _update_eq_properties: eq_active is data-side and
+        # indexed directly by world, so replica rows need the mirror.
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.eq_active)
 
     def _update_tendon_properties(self):
         """Update fixed tendon properties in the MuJoCo model.
