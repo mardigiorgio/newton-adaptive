@@ -2062,6 +2062,23 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         return self._iteration_count_buf
 
     @property
+    def twin_contact_overflow(self) -> bool:
+        """Whether a twin contact duplication has been truncated (latched, never cleared).
+
+        Set by ``duplicate_contact_rows_for_twins_kernel`` when the primary
+        injected-contact count exceeds ``naconmax // 2``: rows past the twin
+        headroom are dropped, so the twins integrate their full-dt estimate
+        against fewer contacts than their reals and the per-world error
+        estimate measures a contact-set discrepancy instead of truncation
+        error. Once latched, raise ``nconmax``. Always ``False`` with twin
+        mode off. Host read (device sync): call outside the march only, never
+        inside a captured region.
+        """
+        if not self._twin_eval:
+            return False
+        return bool(self._contact_dup_overflow.numpy()[0])
+
+    @property
     def cumulative_iterations(self) -> wp.array:
         """Boundary-loop iterations accumulated since the last :meth:`reset_compute_counter`,
         shape ``[1]``, int32, on device. Includes rejected attempts. Read with ``.numpy()``
