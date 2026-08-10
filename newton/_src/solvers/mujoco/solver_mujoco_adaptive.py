@@ -242,6 +242,12 @@ _DRAKE_MIN_SHRINK = wp.constant(wp.float32(0.1))
 _DRAKE_MAX_GROW = wp.constant(wp.float32(5.0))
 _DRAKE_HYSTERESIS_HIGH = wp.constant(wp.float32(1.2))
 _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
+# Ceiling memory: a rejection at step h records dt_ceiling = 0.9*h; growth is
+# clamped to the ceiling, which relaxes by 1.1x per accepted step. Handles error
+# landscapes with a knee (contact regimes) where order-2 growth sizing otherwise
+# oscillates accept-grow-reject around the acceptance boundary.
+_CEILING_MARGIN = wp.constant(wp.float32(0.9))
+_CEILING_RELAX = wp.constant(wp.float32(1.1))
 
 
 @wp.kernel
@@ -254,7 +260,10 @@ def _calc_adjusted_step(
     diverged: wp.array[wp.bool],
     tol: float,
     dt_min: float,
+    dt_max: float,
     divergence_threshold: float,
+    dt_ceiling: wp.array[wp.float32],
+    ceiling_on: int,
     limited: wp.array[wp.int32],
     consec_rej: wp.array[wp.int32],
     order_aware: int,
@@ -262,7 +271,6 @@ def _calc_adjusted_step(
     nan_guard: int,
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
-    force_accept: wp.array[wp.int32],
 ):
     """Per-world Drake CalcAdjustedStepSize for step doubling (err_order=2).
 
@@ -325,6 +333,8 @@ def _calc_adjusted_step(
     if is_diverged:
         accepted[world] = False
         commit[world] = False
+        if ceiling_on == 1:
+            dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
         ideal_dt[world] = _DRAKE_MIN_SHRINK * step
         consec_rej[world] = consec_rej[world] + 1
         return
@@ -347,11 +357,6 @@ def _calc_adjusted_step(
     new_step = wp.clamp(new_step, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
 
     acc = e <= tol or new_step >= step
-    # Forced-completion pass: the quantile stop abandoned this world, so take the
-    # boundary-clamped remainder unconditionally. Time becomes exact; only this one
-    # step's local error exceeds tol. Never forces a non-finite state.
-    if force_accept[0] == 1 and not is_diverged:
-        acc = True
     accepted[world] = acc
     commit[world] = acc
     if acc:
@@ -359,11 +364,17 @@ def _calc_adjusted_step(
         # Sliver exemption (NEWTON_ADAPTIVE_SLIVER_FIX=1): an accepted step that was
         # artificially shortened by the boundary clamp says nothing about the error-limited
         # step size, so keep the carried ideal_dt instead of collapsing it to ~the sliver
-        # (Drake's artificially-limited rule).
+        # (Drake's artificially-limited rule). It also carries no ceiling information.
         if sliver_fix == 1 and limited[world] == 1:
             return
+        if ceiling_on == 1:
+            dt_ceiling[world] = wp.min(dt_ceiling[world] * _CEILING_RELAX, dt_max)
     else:
+        if ceiling_on == 1:
+            dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
         consec_rej[world] = consec_rej[world] + 1
+    if ceiling_on == 1:
+        new_step = wp.min(new_step, dt_ceiling[world])
     ideal_dt[world] = new_step
 
 
@@ -393,6 +404,8 @@ def _reset_worlds(
     next_time: wp.array[wp.float32],
     diverged: wp.array[wp.bool],
     accepted: wp.array[wp.bool],
+    dt_ceiling: wp.array[wp.float32],
+    ceiling_init: float,
 ):
     """Restore the step-doubling controller's persistent per-world state to
     construction defaults for worlds flagged in ``mask``; leave others untouched.
@@ -409,6 +422,7 @@ def _reset_worlds(
         next_time[i] = wp.float32(0.0)
         diverged[i] = False
         accepted[i] = False
+        dt_ceiling[i] = ceiling_init
 
 
 @wp.kernel
@@ -538,51 +552,6 @@ def _clamp_dt_to_boundary(
 
 
 @wp.kernel
-def _forced_scan_kernel(
-    qpos: wp.array2d[wp.float32],
-    qvel: wp.array2d[wp.float32],
-    nq: int,
-    nv: int,
-    diverged: wp.array[wp.bool],
-    bad: wp.array[wp.int32],
-):
-    """NaN containment for the forced-completion eval.
-
-    The quantile stop's forced remainder step is unchecked BY DESIGN (one eval, no
-    error estimate) and lands precisely on straggler worlds -- the ones the controller
-    kept rejecting. A non-finite result must never commit: flag the world in ``bad``
-    (gates the row restores below) and latch ``diverged`` so the caller can terminate
-    it, mirroring the NaN-guard floor path.
-    """
-    w = wp.tid()
-    bad_w = int(0)
-    for i in range(nq):
-        x = qpos[w, i]
-        if wp.isnan(x) or wp.isinf(x):
-            bad_w = 1
-    for i in range(nv):
-        x = qvel[w, i]
-        if wp.isnan(x) or wp.isinf(x):
-            bad_w = 1
-    bad[w] = bad_w
-    if bad_w == 1:
-        diverged[w] = True
-
-
-@wp.kernel
-def _restore_bad_rows_kernel(
-    saved: wp.array2d[wp.float32],
-    bad: wp.array[wp.int32],
-    out: wp.array2d[wp.float32],
-):
-    """Restore the pre-forced-step snapshot row for worlds flagged by
-    ``_forced_scan_kernel``; clean worlds keep the forced state already in ``out``."""
-    w, i = wp.tid()
-    if bad[w] == 1:
-        out[w, i] = saved[w, i]
-
-
-@wp.kernel
 def _iter_count_increment(count: wp.array[wp.int32]):
     """Increment iteration counter (dim=1, single thread)."""
     count[0] = count[0] + 1
@@ -659,7 +628,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         tiling: str = "ragged",
         max_substeps: int = 256,
         use_newton_contacts: bool = False,
-        landed_fraction: float = 1.0,
         dt_histogram: bool = False,
         dt_histogram_bins_per_decade: int = 4,
         **kwargs,
@@ -761,7 +729,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_mode = dt_mode  # "per_world" only (global removed: a shared dt couples worlds)
         self._tiling = tiling  # "ragged" only ("even" removed)
         self._max_substeps = int(max_substeps)
-        self._landed_fraction = float(landed_fraction)
 
         # ---- step-doubling scratch buffers, in MuJoCo space ([nworld, nq]/[nworld, nv]) ----
         # The inner loop marches mjw_data.qpos/qvel directly; these hold the rollback
@@ -797,8 +764,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # per-world boundary-limited flag + consecutive-rejection counter, and the two
         # opt-in fix switches (baked into the captured graph at construction).
         self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
-        self._forced_bad = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
+        # Ceiling memory (NEWTON_ADAPTIVE_DT_CEILING=1, default on): per-world upper
+        # bound on growth, recorded at rejections, relaxed on accepts. Init above any
+        # reachable dt so it never binds until a rejection writes it.
+        _ceiling_init = self._dt_max if self._dt_max != float("inf") else 1.0e6
+        self._dt_ceiling = wp.full(world_count, wp.float32(_ceiling_init), dtype=wp.float32, device=device)
+        self._ceiling_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_DT_CEILING", "1") == "1" else 0
         self._order_aware_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ORDER_AWARE", "0") == "1" else 0
         self._sliver_fix_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_SLIVER_FIX", "0") == "1" else 0
         # Non-finite (or catastrophic) state at the dt floor: NEVER commit it. Hold
@@ -896,8 +868,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._graph_enabled = _is_cuda and os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
         # Quantile stop: march until at least ``landed_fraction`` of worlds have reached the
         # boundary, then force-complete the rest. 1.0 == wait for every world (default).
+        # Full-integrity boundary bookkeeping only: every world marches to its
+        # boundary; there is no abandonment or forced completion.
         self._quantile_stop = QuantileBoundaryStop(
-            world_count, device, landed_fraction=landed_fraction, graph_enabled=self._graph_enabled
+            world_count, device, landed_fraction=1.0, graph_enabled=self._graph_enabled
         )
         self._march_graph_cache: dict = {}
         self._march_warmed = False
@@ -1239,7 +1213,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._diverged,
                 self._tol,
                 self._dt_min,
+                self._dt_max if self._dt_max != float("inf") else 1.0e6,
                 self._divergence_threshold,
+                self._dt_ceiling,
+                self._ceiling_flag,
                 self._limited,
                 self._consec_rej,
                 self._order_aware_flag,
@@ -1247,7 +1224,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._nan_guard_flag,
                 self._sim_time,
                 self._next_time,
-                self._quantile_stop.force_accept,
             ],
             device=dev,
         )
@@ -1383,62 +1359,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
                     device=device,
                 )
-
-            # Any world abandoned by the quantile stop (or the max_substeps cap) takes its
-            # whole remaining span in ONE unchecked step, so it lands at the correct TIME
-            # with degraded accuracy instead of silently sitting at the wrong instant.
-            if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
-                # Snapshot the committed state first: the forced step below is unchecked, and
-                # a non-finite result reaching mjw_data reaches the observations (= training
-                # death). The step-doubling snapshot buffers are free between boundaries
-                # (re-seeded at the top of every iteration), so reuse them.
-                d = self.mjw_data
-                wp.copy(self._qpos_saved, d.qpos)
-                wp.copy(self._qvel_saved, d.qvel)
-                wp.copy(self._warmstart_saved, d.qacc_warmstart)
-                if self._na > 0:
-                    wp.copy(self._act_saved, d.act)
-                # A force-accepted step needs NO error estimate, so it costs ONE eval rather
-                # than a step-doubling iteration's three. Captured: an eager eval is ~78x a
-                # replayed one at these world counts.
-                self._quantile_stop.force_complete(
-                    self._sim_time,
-                    self._next_time,
-                    self._dt,
-                    self._dt_half,
-                    lambda: self._mjw_eval(self._dt),
-                    device,
-                )
-                # Containment: restore last-good state and latch ``diverged`` for any world
-                # the forced eval sent non-finite. sim_time stays at the boundary (already
-                # stamped by force_complete), matching the NaN-guard floor semantics:
-                # hold state, advance time, flag.
-                wp.launch(
-                    _forced_scan_kernel,
-                    dim=n,
-                    inputs=[d.qpos, d.qvel, self._nq, self._nv, self._diverged, self._forced_bad],
-                    device=device,
-                )
-                for saved, out, width in (
-                    (self._qpos_saved, d.qpos, self._nq),
-                    (self._qvel_saved, d.qvel, self._nv),
-                    (self._warmstart_saved, d.qacc_warmstart, self._nv),
-                ):
-                    wp.launch(
-                        _restore_bad_rows_kernel,
-                        dim=(n, width),
-                        inputs=[saved, self._forced_bad],
-                        outputs=[out],
-                        device=device,
-                    )
-                if self._na > 0:
-                    wp.launch(
-                        _restore_bad_rows_kernel,
-                        dim=(n, self._na),
-                        inputs=[self._act_saved, self._forced_bad],
-                        outputs=[d.act],
-                        device=device,
-                    )
 
             # Convert the final committed state back to Newton coordinates ONCE per boundary
             # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
@@ -1650,6 +1570,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._next_time,
                 self._diverged,
                 self._accepted,
+                self._dt_ceiling,
+                self._dt_max if self._dt_max != float("inf") else 1.0e6,
             ],
             device=self.model.device,
         )
