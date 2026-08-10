@@ -236,6 +236,57 @@ def _inf_norm_state_error_kernel(
     error_out[world] = max_err
 
 
+@wp.kernel
+def _inf_norm_state_error_indexed_kernel(
+    qpos_full: wp.array2d[wp.float32],
+    qpos_double: wp.array2d[wp.float32],
+    state_scale: wp.array2d[wp.float32],
+    nq: int,
+    kd_over_m: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    qvel_double: wp.array2d[wp.float32],
+    nv: int,
+    idx: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    slot: int,
+    error_out: wp.array[wp.float32],
+):
+    """:func:`_inf_norm_state_error_kernel` over a compacted world list: only
+    worlds in the index list get a fresh error; landed worlds keep their last
+    written value. Safe because a landed world's error never reaches a
+    decision: the controller's dt <= 0 branch returns before its value can
+    affect any write. Fixed launch dim with a device-side count guard so the
+    launch records cleanly under graph capture; the loop body must stay
+    identical to the full-dim kernel's (same fp operation order per world)."""
+    i = wp.tid()
+    if i >= counts[slot]:
+        return
+    world = idx[i]
+
+    max_err = float(0.0)
+    has_nan = int(0)
+    h = dt[world]
+    for k in range(nq):
+        d = wp.abs(qpos_double[world, k] - qpos_full[world, k])
+        # NaN must be flagged per component: wp.max is fmaxf on CUDA, which
+        # RETURNS THE NON-NAN OPERAND (see the full-dim kernel).
+        if wp.isnan(d):
+            has_nan = 1
+        else:
+            w = state_scale[world, k] / (wp.float32(1.0) + h * kd_over_m[k])
+            max_err = wp.max(max_err, w * d)
+
+    for k in range(nv):
+        v = qvel_double[world, k]
+        if wp.isnan(v) or wp.isinf(v):
+            has_nan = 1
+
+    if has_nan != 0 or wp.isnan(max_err) or wp.isinf(max_err):
+        max_err = float(1.0e10)
+
+    error_out[world] = max_err
+
+
 # Drake CalcAdjustedStepSize constants (err_order=2 for step doubling).
 _DRAKE_SAFETY = wp.constant(wp.float32(0.9))
 _DRAKE_MIN_SHRINK = wp.constant(wp.float32(0.1))
@@ -503,6 +554,43 @@ def _mirror_rows_indexed(
 
 
 @wp.kernel
+def _reset_active_counts(counts: wp.array[wp.int32]):
+    """Zero both compaction counters (dim=1): slot 0 = active set, slot 1 =
+    snapshot set. Must run before :func:`_build_active_worlds` each iteration
+    (stream order guarantees it)."""
+    counts[0] = 0
+    counts[1] = 0
+
+
+@wp.kernel
+def _build_active_worlds(
+    dt: wp.array[wp.float32],
+    prev_active: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    active_idx: wp.array[wp.int32],
+    snap_idx: wp.array[wp.int32],
+):
+    """Compact the unfinished worlds into index lists. Runs AFTER the boundary
+    clamp so post-clamp ``dt > 0`` is the single source of truth for "this
+    world attempts a step" -- the same predicate the masked restore keys on.
+    The snapshot set keeps each world for ONE extra iteration after it lands so
+    its saved rows capture the committed state; the full-dim restore then
+    rewrites landed rows from those frozen bits every iteration, keeping them a
+    true no-op. List order comes from atomics and is nondeterministic; every
+    consumer writes world-private rows only, so ordering cannot perturb any
+    floating-point result."""
+    i = wp.tid()
+    act = dt[i] > wp.float32(0.0)
+    if act or prev_active[i] != 0:
+        snap_idx[wp.atomic_add(counts, 1, 1)] = i
+    if act:
+        active_idx[wp.atomic_add(counts, 0, 1)] = i
+        prev_active[i] = 1
+    else:
+        prev_active[i] = 0
+
+
+@wp.kernel
 def _boundary_reset(flag: wp.array[wp.int32]):
     """Set flag[0] = 0 (assume all worlds reached the boundary)."""
     flag[0] = 0
@@ -755,6 +843,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # build sees the replica count.
         self._twin_eval = os.environ.get("NEWTON_ADAPTIVE_TWIN_EVAL", "0") == "1"
         self._mjw_world_replicas = 2 if self._twin_eval else 1
+        # Tail compaction (NEWTON_ADAPTIVE_TAIL_COMPACT=1): late march
+        # iterations run full-batch kernels while only a few worlds are still
+        # unfinished; a device-built index list of active worlds bounds the
+        # solver-owned snapshot/seed/gather/error work to those worlds while
+        # every launch keeps its fixed dim (graph-capture safe). Read at
+        # construction for the same reason as the twin flag; the choice is
+        # baked into the captured iteration graphs.
+        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "0") == "1"
         super().__init__(
             model,
             separate_worlds=True,
@@ -895,6 +991,22 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             # compaction absent these fixed buffers select every world.
             self._identity_idx = wp.array(np.arange(world_count, dtype=np.int32), dtype=wp.int32, device=device)
             self._full_counts = wp.array(np.full(2, world_count, dtype=np.int32), dtype=wp.int32, device=device)
+
+        # ---- tail-compaction scratch (see _build_active_worlds) ----
+        if self._tail_compact:
+            # counts[0] = active-set size (worlds attempting a step this
+            # iteration, post-boundary-clamp dt > 0); counts[1] = snapshot-set
+            # size (active OR active last iteration: a world landing at
+            # iteration k is snapshotted once more at k+1 so its saved rows
+            # freeze at the committed state, which the full-dim restore then
+            # rewrites bit-identically on every landed iteration). Rebuilt on
+            # device each iteration; every consumer keeps its FIXED launch dim
+            # and early-exits on the device-read count, so the launches record
+            # cleanly inside captured graphs.
+            self._active_counts = wp.zeros(2, dtype=wp.int32, device=device)
+            self._active_idx = wp.zeros(world_count, dtype=wp.int32, device=device)
+            self._snap_idx = wp.zeros(world_count, dtype=wp.int32, device=device)
+            self._prev_active = wp.zeros(world_count, dtype=wp.int32, device=device)
 
         # Accuracy-metric scaling S: e = || S (q - q̂) ||_inf. Default S = identity.
         # To use expert per-coordinate scales, overwrite self._state_scale
@@ -1090,13 +1202,57 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         eval starts from a different state and always runs the full pipeline.
         """
         d = self.mjw_data
-        wp.copy(self._qpos_saved, d.qpos)
-        wp.copy(self._qvel_saved, d.qvel)
-        wp.copy(self._warmstart_saved, d.qacc_warmstart)
-        if self._na > 0:
-            wp.copy(self._act_saved, d.act)
+        if self._tail_compact:
+            # Compacted snapshot (slot 1 = snapshot set): landed worlds past
+            # their one snapshot-freeze iteration stop paying the copy
+            # bandwidth; their saved rows already hold the committed bits the
+            # full restores below rewrite them from.
+            n = self.model.world_count
+            dev = self.model.device
+            for src, dst, width in (
+                (d.qpos, self._qpos_saved, self._nq),
+                (d.qvel, self._qvel_saved, self._nv),
+                (d.qacc_warmstart, self._warmstart_saved, self._nv),
+            ):
+                wp.launch(
+                    _copy_rows_indexed,
+                    dim=(n, width),
+                    inputs=[src, self._snap_idx, self._active_counts, 1, 0],
+                    outputs=[dst],
+                    device=dev,
+                )
+            if self._na > 0:
+                wp.launch(
+                    _copy_rows_indexed,
+                    dim=(n, self._na),
+                    inputs=[d.act, self._snap_idx, self._active_counts, 1, 0],
+                    outputs=[self._act_saved],
+                    device=dev,
+                )
+        else:
+            wp.copy(self._qpos_saved, d.qpos)
+            wp.copy(self._qvel_saved, d.qvel)
+            wp.copy(self._warmstart_saved, d.qacc_warmstart)
+            if self._na > 0:
+                wp.copy(self._act_saved, d.act)
         self._mjw_eval(self._dt)
-        wp.copy(self._qpos_full, d.qpos)
+        if self._tail_compact:
+            # Gather the full-step result for active worlds only (slot 0):
+            # landed worlds' _qpos_full rows go stale, which is safe because
+            # only the (equally compacted) error kernel reads them.
+            wp.launch(
+                _copy_rows_indexed,
+                dim=(n, self._nq),
+                inputs=[d.qpos, self._active_idx, self._active_counts, 0, 0],
+                outputs=[self._qpos_full],
+                device=dev,
+            )
+        else:
+            wp.copy(self._qpos_full, d.qpos)
+        # The mid-double restore stays a FULL copy in every mode: it must
+        # rewrite the real rows the full eval just advanced, and for landed
+        # worlds the frozen saved rows equal the committed bits, so the full
+        # rewrite is exact.
         wp.copy(d.qpos, self._qpos_saved)
         wp.copy(d.qvel, self._qvel_saved)
         wp.copy(d.qacc_warmstart, self._warmstart_saved)
@@ -1168,8 +1324,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         d = self.mjw_data
         n = self.model.world_count
         dev = self.model.device
-        idx = self._identity_idx
-        counts = self._full_counts
+        # Tail compaction substitutes the device-built lists for the identity
+        # list; the kernels are unchanged. Landed worlds then skip snapshot,
+        # twin seeding, and the _qpos_full gather -- their twin rows run dt=0
+        # on stale garbage, which nothing reads.
+        if self._tail_compact:
+            snap_idx, act_idx, counts = self._snap_idx, self._active_idx, self._active_counts
+        else:
+            snap_idx, act_idx, counts = self._identity_idx, self._identity_idx, self._full_counts
 
         # Snapshot the real rows (rollback target; slot 1 = snapshot set).
         for src, dst, width in (
@@ -1177,12 +1339,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             (d.qvel, self._qvel_saved, self._nv),
             (d.qacc_warmstart, self._warmstart_saved, self._nv),
         ):
-            wp.launch(_copy_rows_indexed, dim=(n, width), inputs=[src, idx, counts, 1, 0], outputs=[dst], device=dev)
+            wp.launch(
+                _copy_rows_indexed, dim=(n, width), inputs=[src, snap_idx, counts, 1, 0], outputs=[dst], device=dev
+            )
         if self._na > 0:
             wp.launch(
                 _copy_rows_indexed,
                 dim=(n, self._na),
-                inputs=[d.act, idx, counts, 1, 0],
+                inputs=[d.act, snap_idx, counts, 1, 0],
                 outputs=[self._act_saved],
                 device=dev,
             )
@@ -1191,9 +1355,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # set): both Richardson estimates must start from the same internal
         # state, including the warm start and actuator activations.
         for arr, width in ((d.qpos, self._nq), (d.qvel, self._nv), (d.qacc_warmstart, self._nv)):
-            wp.launch(_mirror_rows_indexed, dim=(n, width), inputs=[arr, idx, counts, 0, n], device=dev)
+            wp.launch(_mirror_rows_indexed, dim=(n, width), inputs=[arr, act_idx, counts, 0, n], device=dev)
         if self._na > 0:
-            wp.launch(_mirror_rows_indexed, dim=(n, self._na), inputs=[d.act, idx, counts, 0, n], device=dev)
+            wp.launch(_mirror_rows_indexed, dim=(n, self._na), inputs=[d.act, act_idx, counts, 0, n], device=dev)
 
         # Eval 1: reals take the first half step, twins take the full step.
         self._mjw_eval_twin(self._dt_half, self._dt)
@@ -1203,7 +1367,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         wp.launch(
             _copy_rows_indexed,
             dim=(n, self._nq),
-            inputs=[d.qpos, idx, counts, 0, n],
+            inputs=[d.qpos, act_idx, counts, 0, n],
             outputs=[self._qpos_full],
             device=dev,
         )
@@ -1257,7 +1421,32 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
     def _estimate_error(self) -> None:
         """Per-world local error: inf-norm ``e = max|Δq|`` between the full step and the doubled
-        half-step (NaN/inf collapse to a 1e10 sentinel). Writes ``_last_error``."""
+        half-step (NaN/inf collapse to a 1e10 sentinel). Writes ``_last_error``.
+
+        Under tail compaction only active worlds get a fresh error; landed
+        worlds keep the last written value, which never reaches a controller
+        decision (the dt <= 0 branch returns first)."""
+        if self._tail_compact:
+            wp.launch(
+                _inf_norm_state_error_indexed_kernel,
+                dim=self.model.world_count,
+                inputs=[
+                    self._qpos_full,
+                    self.mjw_data.qpos,
+                    self._state_scale,
+                    self._nq,
+                    self._kd_over_m,
+                    self._dt,
+                    self.mjw_data.qvel,
+                    self._nv,
+                    self._active_idx,
+                    self._active_counts,
+                    0,
+                ],
+                outputs=[self._last_error],
+                device=self.model.device,
+            )
+            return
         wp.launch(
             _inf_norm_state_error_kernel,
             dim=self.model.world_count,
@@ -1433,6 +1622,18 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=dev,
         )
 
+        # Compact the unfinished worlds AFTER the clamp (post-clamp dt > 0 is
+        # the single "attempts a step" predicate) and before anything consumes
+        # the lists. Fixed-dim launches; the counts live on device.
+        if self._tail_compact:
+            wp.launch(_reset_active_counts, dim=1, inputs=[self._active_counts], device=dev)
+            wp.launch(
+                _build_active_worlds,
+                dim=n,
+                inputs=[self._dt, self._prev_active, self._active_counts, self._active_idx, self._snap_idx],
+                device=dev,
+            )
+
         # Re-anchor injected contacts to the current committed state BEFORE the
         # trials: they must not push against boundary-stale penetration (energy
         # injection at footfall — the "flying robots" failure).
@@ -1598,6 +1799,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
             self._iteration_count_buf.fill_(0)
             self._boundary_flag.fill_(1)
+            if self._tail_compact:
+                # Every world starts the boundary active; the fill also forces
+                # the first iteration's snapshot set to cover all worlds, so
+                # saved rows are valid before any restore reads them.
+                self._prev_active.fill_(1)
 
             self._march_ragged(effective_dt_max)
 
