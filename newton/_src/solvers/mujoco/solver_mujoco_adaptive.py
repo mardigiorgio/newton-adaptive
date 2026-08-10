@@ -1019,6 +1019,15 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._mjw_eval_suffix(self._dt_half)
         else:
             self._mjw_eval(self._dt_half)
+        # Injected contacts: re-anchor dist/pos to the half-step state before the
+        # second half eval. All three evals sharing one contact snapshot makes the
+        # Richardson pair's contact response identical, so contact stiffness
+        # cancels out of the error estimate and the controller grows dt straight
+        # through contact (energy-pumping resting objects). The mid-double refresh
+        # restores the estimator's contact sensitivity; MuJoCo-native contacts get
+        # the same effect from re-detection inside every eval.
+        if self._contact_refresh_enabled and self._refresh_contacts is not None:
+            self._refresh_injected_contacts()
         self._mjw_eval(self._dt_half)
 
     def _estimate_error(self) -> None:
