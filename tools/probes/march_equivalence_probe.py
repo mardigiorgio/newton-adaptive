@@ -15,12 +15,18 @@ Oracle argument (why this is not a tautology or a snapshot):
 
 Assertion tiers:
     1. Vacuity guards (exit 3): the scene must actually exercise the machinery
-       -- contacts present, at least one boundary needing >= 2 iterations, the
-       per-world dt diverging across worlds, twin runs showing the 2N-world
-       data layout, and compaction runs ending some boundary with fewer active
-       worlds than N (the ragged tail actually engaged -- otherwise the
-       compacted and full paths run identical work and the compaction arms
-       prove nothing). A probe that cannot fail is not a test.
+       -- injected mjw contact rows present AND force-capable (dist <
+       includemargin) in the REFERENCE run (measured post-injection via
+       mjw_data.nacon, not at the pipeline-candidate stage, which can report
+       rows the conversion never injects), a certified rejection (boundary 0
+       needing >= 2 iterations -- dt is seeded at the cap there, so a second
+       attempt can only follow a rejection; later boundaries cannot certify
+       one because accepted steps also rewrite ideal_dt), the per-world dt
+       diverging across worlds, twin runs showing the 2N-world data layout,
+       and compaction runs ending some boundary with fewer active worlds than
+       N (the ragged tail actually engaged -- otherwise the compacted and full
+       paths run identical work and the compaction arms prove nothing). A
+       probe that cannot fail is not a test.
     2. Oracle validity (exit 2, ORACLE-DEGRADED): reference vs reference-repeat
        must match bitwise; a mismatch means the environment itself reorders
        floating-point work run-to-run and bitwise feature judgments are void.
@@ -39,8 +45,10 @@ Recorded per boundary (after step returns -- host reads are legal there):
     substeps, and the controller-state arrays that carry the trajectory across
     boundaries (_ideal_dt, _dt, _dt_ceiling, _consec_rej, _sim_time,
     _next_time, diverged). Jointly these pin the accepted-step sequence:
-    per-attempt dt records would require host reads inside the captured march,
-    which CUDA-graph capture forbids.
+    per-attempt dt records would require solver-side trace buffers (a
+    preallocated device ring buffer written inside the captured march and read
+    out afterwards -- capture-legal, but instrumentation the solver does not
+    have); the probe records only post-march state.
 
 Excluded by design: _last_error, _accepted_error, _accepted, _commit --
     attempt-transient telemetry that never feeds dynamics, the controller
@@ -58,6 +66,15 @@ Residual risk (what a clean pass does NOT establish):
       A CPU pass (sequential launches) does not cover this; a GPU pass covers
       only the tested arch. If twin fails bitwise while the repeat run passes,
       the drift is real and the fallback criterion needs the owner's sign-off.
+    * The Drake controller quantizes its output: the hysteresis deadband maps
+      any new_step inside [k_Low*dt, k_High*dt] to dt, and the MIN_SHRINK /
+      MAX_GROW clamps saturate outside it. An error-estimate corruption whose
+      wrong per-world values land in the same deadband/clamp cell as the
+      correct values on every attempt (e.g. a world permutation among worlds
+      with near-equal errors) leaves ideal_dt, dt, and the accept decisions
+      bit-identical and is masked. err ~= 0 corruptions (wrong gather offset,
+      comparing identical ranges) move ideal_dt out of its cell and are
+      caught through the recorded controller state.
     * The benign scene never reaches the dt floor, the NaN guard, the
       divergence sentinel, the ceiling knee, or max_substeps truncation; those
       paths stay unexercised.
@@ -196,17 +213,40 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
 
     device = model.device
     records = []
-    contacts_seen = 0
+    injected_seen = 0
+    active_injected_seen = 0
     final_active: list[int] | None = [] if compact_on else None
     for k in range(K_BOUNDARIES):
         pipeline.collide(state_0, contacts)
-        contacts_seen = max(contacts_seen, int(contacts.rigid_contact_count.numpy()[0]))
         wrench = wp.array(forces[k], dtype=wp.spatial_vector, device=device)
 
         def apply_forces(state, wrench=wrench):
             wp.copy(state.body_f, wrench)
 
         state_0, state_1 = solver.step(state_0, state_1, control, contacts, DT_OUTER, apply_forces=apply_forces)
+        # Contact vacuity data, measured where it matters: nacon counts the
+        # rows _convert_contacts_to_mjwarp actually injected (pipeline
+        # candidates can be dropped wholesale by a conversion-side regression
+        # and prove nothing), and a row is force-capable only when
+        # dist < includemargin (mjw assembles constraint rows under that
+        # test; margin-only candidates never produce force). Post-march host
+        # reads are legal. Twin runs count duplicated twin rows too; the
+        # guard consumes the reference run only.
+        nacon = int(solver.mjw_data.nacon.numpy()[0])
+        injected_seen = max(injected_seen, nacon)
+        if nacon > 0:
+            dist = solver.mjw_data.contact.dist.numpy()[:nacon]
+            margin = solver.mjw_data.contact.includemargin.numpy()[:nacon]
+            active_injected_seen = max(active_injected_seen, int((dist < margin).sum()))
+        if twin_on:
+            # A truncated twin duplication (primary injected rows exceeding
+            # naconmax // 2) makes twins integrate with missing contacts;
+            # tier 3 would then report an unexplained bitwise divergence and
+            # the twin-geometry note would misdirect triage toward fp
+            # reordering. Fail loudly with the real cause instead.
+            assert not solver.twin_contact_overflow, (
+                f"twin contact capacity exceeded at boundary {k}: primary injected rows > naconmax // 2 -- raise nconmax"
+            )
         records.append(
             {
                 "joint_q": state_0.joint_q.numpy().copy(),
@@ -233,7 +273,15 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
             assert counts[0] >= 1, f"compaction list build never ran (counts={counts.tolist()})"
             assert counts[1] >= counts[0], counts.tolist()
             final_active.append(int(counts[0]))
-    return forces, records, {"contacts_seen": contacts_seen, "final_active": final_active}
+    return (
+        forces,
+        records,
+        {
+            "injected_seen": injected_seen,
+            "active_injected_seen": active_injected_seen,
+            "final_active": final_active,
+        },
+    )
 
 
 def ulp_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -301,12 +349,10 @@ def main() -> int:
 
     runs = {}
     extras = {}
-    contacts_seen = ref_extras["contacts_seen"]
     for name, env in CONFIGS[1:]:
         _, rec, ext = run_config(name, env, forces)
         runs[name] = rec
         extras[name] = ext
-        contacts_seen = max(contacts_seen, ext["contacts_seen"])
 
     # --- Tier 1: vacuity guards -------------------------------------------
     iters = np.array([r["iterations"][0] for r in ref])
@@ -316,9 +362,18 @@ def main() -> int:
     # different iterations), otherwise the compacted and full paths run
     # identical work and their equality proves nothing.
     tail_engaged = all(any(c < N_WORLDS for c in extras[name]["final_active"]) for name in ("compact", "twin+compact"))
+    # Rejection certification must use boundary 0: the controller rewrites
+    # ideal_dt on ACCEPTED steps too, so from boundary 1 onward a world can
+    # carry ideal_dt < DT_OUTER and take multiple accepted sub-steps with zero
+    # rejections -- (iters >= 2).any() proves nothing about the reject path.
+    # At boundary 0 every world's dt is seeded at the cap (ideal_dt starts at
+    # dt_inner_init = DT_OUTER and _apply_dt_cap clamps to effective_dt_max =
+    # DT_OUTER), so an accepted first attempt lands the world in one
+    # iteration and a second iteration can ONLY come from a rejection.
     guards = {
-        "contacts present in some boundary": contacts_seen > 0,
-        "some boundary needed >= 2 iterations": bool((iters >= 2).any()),
+        "reference run injected mjw contact rows (nacon > 0)": ref_extras["injected_seen"] > 0,
+        "reference run had force-capable contacts (dist < includemargin)": ref_extras["active_injected_seen"] > 0,
+        "rejection exercised (boundary 0 needed >= 2 iterations)": bool(iters[0] >= 2),
         "per-world dt diverged across worlds": dt_spread,
         "compaction tail engaged (< N active at some boundary end)": tail_engaged,
     }
