@@ -243,11 +243,13 @@ _DRAKE_MAX_GROW = wp.constant(wp.float32(5.0))
 _DRAKE_HYSTERESIS_HIGH = wp.constant(wp.float32(1.2))
 _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
 # Ceiling memory: a rejection at step h records dt_ceiling = 0.9*h; growth is
-# clamped to the ceiling, which relaxes by 1.1x per accepted step. Handles error
-# landscapes with a knee (contact regimes) where order-2 growth sizing otherwise
-# oscillates accept-grow-reject around the acceptance boundary.
+# clamped to the ceiling, which relaxes per accepted step (default 1.1x,
+# override NEWTON_ADAPTIVE_CEILING_RELAX). Handles error landscapes with a knee
+# (contact regimes) where order-2 growth sizing otherwise oscillates
+# accept-grow-reject around the acceptance boundary; the relax rate sets how
+# often a world in sustained contact re-probes its knee.
 _CEILING_MARGIN = wp.constant(wp.float32(0.9))
-_CEILING_RELAX = wp.constant(wp.float32(1.1))
+_CEILING_RELAX = wp.constant(wp.float32(float(os.environ.get("NEWTON_ADAPTIVE_CEILING_RELAX", "1.1"))))
 
 
 @wp.kernel
