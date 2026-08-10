@@ -738,18 +738,21 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # doubled state left in mjw_data.qpos).
         self._nq = int(self.mjw_data.qpos.shape[1])
         self._nv = int(self.mjw_data.qvel.shape[1])
-        self._qpos_saved = wp.zeros_like(self.mjw_data.qpos)
-        self._qvel_saved = wp.zeros_like(self.mjw_data.qvel)
-        self._qpos_full = wp.zeros_like(self.mjw_data.qpos)
+        # Explicit primary-world shapes (NOT zeros_like the mjw_data fields):
+        # controller state, snapshots, and the Richardson pair are per PRIMARY
+        # world even when the data segment carries twin-replica rows.
+        self._qpos_saved = wp.zeros((world_count, self._nq), dtype=wp.float32, device=device)
+        self._qvel_saved = wp.zeros((world_count, self._nv), dtype=wp.float32, device=device)
+        self._qpos_full = wp.zeros((world_count, self._nq), dtype=wp.float32, device=device)
         # The snapshot also covers the solver warm start and actuator activations so a
         # rejected attempt is a TRUE rollback: act must not integrate on rejects (and the
         # full eval's act must not leak into the half evals -- the Richardson pair needs
         # both estimates to start from identical internal state), and a rejected/stalled
         # eval's qacc must not seed the next attempt's warm start.
-        self._warmstart_saved = wp.zeros_like(self.mjw_data.qacc_warmstart)
+        self._warmstart_saved = wp.zeros((world_count, self._nv), dtype=wp.float32, device=device)
         _act = getattr(self.mjw_data, "act", None)
         self._na = int(_act.shape[1]) if _act is not None and len(_act.shape) == 2 else 0
-        self._act_saved = wp.zeros_like(_act) if self._na > 0 else None
+        self._act_saved = wp.zeros((world_count, self._na), dtype=wp.float32, device=device) if self._na > 0 else None
 
         # Boundary output buffer: _update_newton_state writes the final committed state
         # (+ FK'd body poses) here once per boundary, then it is copied into the caller's

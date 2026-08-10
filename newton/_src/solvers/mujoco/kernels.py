@@ -1451,6 +1451,7 @@ def create_convert_mjw_contacts_to_newton_kernel():
     def convert_mjw_contacts_to_newton_kernel(
         # inputs
         mjc_geom_to_newton_shape: wp.array2d[wp.int32],
+        nworld_primary: int,
         mj_opt_cone: int,
         mj_nacon: wp.array[wp.int32],
         mj_contact_pos: wp.array[wp.vec3],
@@ -1491,6 +1492,10 @@ def create_convert_mjw_contacts_to_newton_kernel():
             return
 
         world = mj_contact_worldid[contact_idx]
+        # Rows belonging to replica (data-only) worlds have no Newton-side
+        # shape mapping; skip them.
+        if world >= nworld_primary:
+            return
         geoms_mjw = mj_contact_geom[contact_idx]
 
         normal = mj_contact_frame[contact_idx][0]
@@ -3178,6 +3183,7 @@ def update_pair_properties_kernel(
 @wp.kernel(enable_backward=False)
 def reset_world_buffers_kernel(
     world_mask: wp.array[wp.bool],
+    nworld_primary: int,
     qacc_warmstart: wp.array2d[wp.float32],
     qfrc_applied: wp.array2d[wp.float32],
     ctrl: wp.array2d[wp.float32],
@@ -3191,9 +3197,13 @@ def reset_world_buffers_kernel(
     is guarded by its own column count. ``qacc_warmstart`` and ``qfrc_applied``
     share the DOF dimension. ``qacc`` is intentionally omitted: the solver
     overwrites it from ``qacc_warmstart`` at the start of every step.
+
+    ``world_mask`` is sized for the primary worlds; when the data segment
+    carries replica worlds beyond ``nworld_primary``, each replica row clears
+    together with its primary via the modulo index.
     """
     worldid, i = wp.tid()
-    if world_mask and not world_mask[worldid]:
+    if world_mask and not world_mask[worldid % nworld_primary]:
         return
     if i < qacc_warmstart.shape[1]:
         qacc_warmstart[worldid, i] = 0.0
