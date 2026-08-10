@@ -203,7 +203,13 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
         # checked per boundary below via _active_counts.
         assert solver._tail_compact, "NEWTON_ADAPTIVE_TAIL_COMPACT did not reach construction"
 
-    pipeline = newton.CollisionPipeline(model, rigid_contact_max=solver.get_max_contact_count())
+    # deterministic=True sorts contact emission: without it the baseline march is
+    # not run-to-run bitwise reproducible (atomic-ordered contact rows feed the
+    # constraint assembly), and the reference-repeat oracle check fails before
+    # any feature comparison can be judged.
+    pipeline = newton.CollisionPipeline(
+        model, rigid_contact_max=solver.get_max_contact_count(), deterministic=True
+    )
     contacts = pipeline.contacts()
     state_0, state_1 = model.state(), model.state()
     control = model.control()
