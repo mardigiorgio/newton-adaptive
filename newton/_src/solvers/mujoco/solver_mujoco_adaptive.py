@@ -187,6 +187,7 @@ def _inf_norm_state_error_kernel(
     dt: wp.array[wp.float32],
     qvel_double: wp.array2d[wp.float32],
     nv: int,
+    quant_floor: int,
     error_out: wp.array[wp.float32],
 ):
     """Adaptive-controller accuracy metric::
@@ -218,6 +219,16 @@ def _inf_norm_state_error_kernel(
             # actuator mode is damped in the ESTIMATE by the same factor the integrator
             # damps it in the SOLUTION; undamped coords (kd=0) keep w=1, and w -> 1 as
             # h -> 0, restoring full sensitivity when the step resolves the mode.
+            if quant_floor != 0:
+                # Quantization floor: a difference within a few ulps of the
+                # coordinate's own magnitude is representation noise, not
+                # truncation error. Scoring it would pin the error just under
+                # tol for large-magnitude coordinates and freeze the
+                # controller in its deadband at whatever dt it happens to
+                # hold.
+                m = wp.max(wp.abs(qpos_double[world, i]), wp.abs(qpos_full[world, i]))
+                if d <= m * wp.float32(4.7683716e-07):
+                    d = wp.float32(0.0)
             w = state_scale[world, i] / (wp.float32(1.0) + h * kd_over_m[i])
             max_err = wp.max(max_err, w * d)
 
@@ -249,6 +260,7 @@ def _inf_norm_state_error_indexed_kernel(
     idx: wp.array[wp.int32],
     counts: wp.array[wp.int32],
     slot: int,
+    quant_floor: int,
     error_out: wp.array[wp.float32],
 ):
     """:func:`_inf_norm_state_error_kernel` over a compacted world list: only
@@ -273,6 +285,12 @@ def _inf_norm_state_error_indexed_kernel(
         if wp.isnan(d):
             has_nan = 1
         else:
+            if quant_floor != 0:
+                # Same quantization floor as the full-dim kernel; the loop
+                # body must stay identical (same fp operation order).
+                m = wp.max(wp.abs(qpos_double[world, k]), wp.abs(qpos_full[world, k]))
+                if d <= m * wp.float32(4.7683716e-07):
+                    d = wp.float32(0.0)
             w = state_scale[world, k] / (wp.float32(1.0) + h * kd_over_m[k])
             max_err = wp.max(max_err, w * d)
 
@@ -1002,6 +1020,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_init = float(dt_inner_init)
         self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
         self._debt_guard_flag = os.environ.get("NEWTON_ADAPTIVE_DEBT_GUARD", "0") == "1"
+        # Opt-in error quantization floor (see _inf_norm_state_error_kernel).
+        self._err_quant_floor_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ERR_QUANT_FLOOR", "0") == "1" else 0
 
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
         # iteration body. int64 because a long run at 4096 worlds overflows int32.
@@ -1494,6 +1514,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     self._active_idx,
                     self._active_counts,
                     0,
+                    self._err_quant_floor_flag,
                 ],
                 outputs=[self._last_error],
                 device=self.model.device,
@@ -1511,6 +1532,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._dt,
                 self.mjw_data.qvel,
                 self._nv,
+                self._err_quant_floor_flag,
             ],
             outputs=[self._last_error],
             device=self.model.device,
