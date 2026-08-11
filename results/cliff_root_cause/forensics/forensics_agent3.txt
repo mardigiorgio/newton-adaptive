@@ -1,0 +1,77 @@
+# AGING-STATE AUDIT — SolverMuJoCoAdaptive (A = newton/_src/solvers/mujoco/solver_mujoco_adaptive.py, branch march-counter-log)
+
+All paths below are under /home/mdigiorgio/Documents/code/. A = newton-adaptive/newton/_src/solvers/mujoco/solver_mujoco_adaptive.py; B = newton-adaptive/newton/_src/solvers/mujoco/solver_mujoco.py; Q = newton-adaptive/newton/_src/solvers/adaptive_boundary.py; C = newton-adaptive/newton/_src/solvers/mujoco/mjw_alloc_cache.py; MJW = IsaacLabRubato/.venv/lib/python3.12/site-packages/mujoco_warp/_src.
+
+## (1) Every persistent self._ attribute, classified
+
+### (a) Reset every boundary (or every iteration)
+- `_dt`, `_dt_half` — reseeded from `_ideal_dt` at boundary entry (A:1747-1752) and after every attempt (A:1694-1699).
+- `_next_time` — rebased to 0 then advanced by dt_outer each boundary (A:1804-1805; kernel A:650-668).
+- `_iteration_count_buf` — `fill_(0)` per boundary (A:1807).
+- `_boundary_flag` — `fill_(1)` per boundary (A:1808), lowered by quantile/cap kernels (A:1700-1707).
+- `_prev_active` — `fill_(1)` per boundary (A:1813) [tail-compact only, default off A:853].
+- `_limited` — rewritten every iteration by `_clamp_dt_to_boundary` (A:687).
+- `_accepted`, `_commit`, `_last_error`, `_accepted_error` — rewritten every iteration (A:411-414, 236, 446); note `_accepted_error`/`_last_error` are NOT cleared by `_reset_worlds` (kernel A:449-478) — stale telemetry after a world reset, no work effect.
+- `_status_scalars` — reset in `get_status_summary` only (A:2258).
+- `_refresh_contacts`, `_refresh_state` seeding — rewritten per boundary when injected contacts are on (A:1791-1792).
+- `_quantile_stop.count` — zeroed per iteration (Q:159).
+
+### (b) Carried deliberately (controller memory)
+- `_ideal_dt` — carried across boundaries by design (A:352-357 no-op branch preserves it; seeded into `_dt` at A:1747).
+- `_dt_ceiling` — per-world growth ceiling; tightened on reject/diverge, relaxed ×1.1 on accept (A:390, 424, 427); init above any reachable dt (A:936-937); reset per world by `_reset_worlds` (A:478).
+- `_consec_rej` — carried; zeroed only in-kernel on accept (A:367, 416), incremented on reject (A:392, 428). **Defect: `_reset_worlds` (A:449-478) does not reset it**, so it survives world resets. Feeds work only via `order_aware` (A:401), default off (A:939).
+- `_diverged` — NAN_GUARD latch (A:375-379, flag default on A:945); cleared ONLY by `reset(world_mask=...)` (A:476, consumer contract A:2050-2054, 2088-2096). Latched worlds accumulate if the env never calls reset with them.
+- `_sim_time` — rebased, NOT zeroed, per boundary: `sim_time -= next_time` (A:663-667, launched A:1804). A world that ended a boundary short (capped by max_substeps) carries a NEGATIVE residual = time debt into the next boundary (design intent A:654-662; unfinished counting exists at A:630-639).
+- mjw_data marching state carried across boundaries: `qpos/qvel/act/qacc_warmstart` (snapshot/restore per attempt A:1240-1267, 1481-1500; warmstart refreshed per eval by mjw at MJW/forward.py:342).
+- `_refresh_contacts_key` — `id(contacts.contact_generation)`; a change clears BOTH graph caches (A:1795-1799).
+- `_march_warmed`, `_graph_enabled`, `_conditional_enabled` — one-way latches (A:1889-1891; permanent disable on capture/launch failure A:1901-1904, 1917-1919, 1973-1981, 1985-1993).
+- `_conditional_warm_boundaries` — counts up to 2 then stops (A:2009-2013).
+
+### (c) Monotonically growing
+- `_cum_iters` — int32 device counter, +1 every iteration, never reset except explicitly (A:952, 1622, 2133-2135). At ~135k iterations by the cliff, 4 decades from int32 overflow — not the cause.
+- `_march_log_boundary` (python int, A:1868) and `_march_log_file` (file handle opened once, never closed, line-buffered appends A:1855-1868) — telemetry branch, env-gated (A:956, 1835).
+- `_dt_hist`, `_dt_hist_sat`, `_dt_hist_trunc` — monotone accumulators, opt-in only (A:963-976).
+- `_contact_dup_overflow` — latched, never cleared (A:994, 2104-2118); twin mode only (default off A:844); no feedback into work.
+- `_march_graph_cache` — dict keyed by `round(effective_dt_max, 12)` (A:1893); effective_dt_max = min(dt_max, dt_outer) (A:1744) — one key for a fixed-dt_outer training run. **Graphs-off check**: with `NEWTON_MJ_ADAPTIVE_GRAPH=0` the keying code never runs (`_iteration_graph` returns at A:1886-1887 before the key is computed). Not the cause.
+- `_conditional_graph_cache` and `_alloc_cache` (C) — gated off unless `NEWTON_MJ_ADAPTIVE_CONDITIONAL=1`/`NEWTON_MJW_ALLOC_CACHE=1` (A:1097-1099); C's dict is bounded by (call-site, occurrence, shape) with per-step occurrence counts cleared each scope (C:73, 96-98) and `full`-value excluded from the key (C:110-120).
+- Base-class per-boundary calls: `_prepare_generated_kernels` clears mjw's `_KERNEL_CACHE` only when determinism options change (B:587-598); `_enable_rne_postconstraint` flips one model flag at most once (B:4147-4158). `self._step` is never incremented by A's `step` (A:1712-1844 contains no `_step`).
+- `event_scope` wrappers (A:1712, B:3856) accumulate CUDA-event tuples ONLY when an `EventTracer` instance is active (newton-adaptive/newton/_src/utils/benchmark.py:137-153); no-op otherwise.
+
+## (2) Can each carried item change work-per-boundary?
+
+The work lever is single: per-boundary GPU work ≈ (march iterations) × (3 batched mjw evals over ALL worlds + controller kernels). Landed worlds still execute the full pipeline as dt=0 no-ops every iteration (A:493-500, Q:8-11), so ONE slow world multiplies the whole batch's cost. Iterations per boundary = min(max_substeps, max over worlds of attempts needed) (cap kernel A:600-607, launched A:1702-1707; eager loop A:2015-2018). Feedback point: `_dt` → `opt.timestep` → mjw step (A:1158-1164, 1245, 1269-1281); loop length ← `_boundary_flag` ← `sim_time < next_time` count (Q:152-161).
+
+- **`_dt_ceiling` relax/tighten dynamics**: reject sets `ceiling = min(ceiling, 0.9*step)` where `step` is the REJECTED step, not the old ceiling (A:427; diverge path A:390) — a reject cascade (each retry ×0.1, A:391, 410 with `_DRAKE_MIN_SHRINK` A:292) crushes the ceiling to ~0.9× the cascade bottom in a few iterations. Recovery is only ×1.1 per ACCEPTED step (A:424, `_CEILING_RELAX` A:303) and growth is hard-bound by the ceiling (A:429-430), so the Drake ×5 grow (A:293, 410) is disabled during climb-out: from dt_min=1e-6 to a 1e-2-scale dt takes ~log(1e4)/log(1.1) ≈ 97 accepted steps, i.e. ~100 full-batch 3-eval iterations. Additional asymmetry: BOTH floor-accept paths return before the relax line (A:375-379 and A:380-382 return before A:424), so a world stuck at the floor never relaxes its ceiling. Equilibrium is stable only while accepts outnumber rejects ~1.1:1 in log terms; recurrent cascades faster than ~100-accept recovery ratchet the ceiling down and hold per-boundary iterations high. This is an amplifier: gradual on its own, step-like only via the latches below.
+- **`consec_rej`**: no work feedback with defaults (`order_aware` off, A:939, 401). The missing reset (A:449-478) is a correctness leak, not an aging-work mechanism.
+- **`qacc_warmstart` carry**: mjw's Newton solver early-exits per world on device `done` flags (MJW/solver.py:56, 86; kernels guard on `ctx.done` e.g. MJW/solver.py:3044-3079) — launch count fixed, GPU busy varies with convergence. A degrading warmstart raises solve cost gradually, and the fixed-dt solver carries the same warmstart (B:3880, MJW/forward.py:342) yet is immune — so warmstart drift alone cannot be the adaptive-only cliff.
+- **`_diverged` latch under NAN_GUARD (default on, A:945)**: the latch itself freezes the world for ONE boundary (`sim_time = next_time`, A:378) with `ideal_dt = dt_min` (A:366). Nothing in A ever consumes the latch — only an external `reset(world_mask=solver.diverged)` clears it (A:2050-2054). If the harness never resets, the world re-marches EVERY subsequent boundary from its held state at dt_min: covering dt_outer from dt_min under the ×1.1 ceiling-bound climb takes ~80-100 iterations or pins at max_substeps; if it re-diverges mid-march it re-latches and repeats next boundary. Each world that ever trips the guard adds a permanent per-boundary iteration floor for the ENTIRE batch. Monotone set growth = ratcheting work.
+- **`_sim_time` deficit carry**: a boundary truncated by max_substeps leaves `sim_time < next_time`; rebase preserves the deficit as negative sim_time (A:663-667) and the next boundary's target is `dt_outer + deficit` (A:1805, remaining computed at A:686). If the straggler's sustainable throughput per max_substeps iterations is below dt_outer, the deficit grows every boundary and `iters` latches at max_substeps forever — positive feedback with no escape short of a world reset (`_reset_worlds` zeroes both clocks, A:474-475).
+- **Injected-contact refresh state**: `_refresh_contacts_key` change clears both graph caches (A:1795-1799) forcing recapture — a host-side cost only, and absent in graphs-off runs, so excluded by the measured graphs-off cliff.
+- **`mjw_alloc_cache`**: inert with default env (A:1097-1099).
+
+## (3) mjw_data persistent fields across boundaries
+
+- `qacc_warmstart`: refreshed per eval (MJW/forward.py:342), snapshot/rolled-back per attempt by A (A:1242, 1265, 1484), zeroed per world only on reset (B:3891-3899). Carried, does not grow.
+- `d.time`: per-world float32 (MJW/types.py:2219), advanced every eval (MJW/forward.py:322-341), NEVER rebased by A (A's rebase touches only its own `_sim_time`/`_next_time`, A:1804). Grows unbounded; ulp ≈ 1e-5 s at t≈85 s. A never reads it and the step pipeline uses it only for time advance/overflow bookkeeping — no work feedback found in the Euler/implicitfast path.
+- `d.overflow`: per-world OR-latch, never cleared (MJW/forward.py:250, 257, 264, 271) — a latch, but consumed only by warnings.
+- `d.nacon`/`ncollision`: zeroed on every injected-contact conversion (B:4336; kernel clears B:4398-4400) with the count snapshot/restore latch `_last_nacon_count` (B:3772, 4417-4427, invalidation B:4160-4170); mjw re-collides per eval in native mode. No high-water behavior; all mjw buffers are fixed-capacity (`naconmax`/`njmax`), there is no arena/heap.
+- Per-step scratch (`done` arrays etc., MJW/solver.py:56, 86) is reallocated per eval — pool-managed, not persistent.
+- Conclusion: nothing in mjw_data grows in a way that increases work; nefc/nacon are physics-driven per eval, and the fixed-dt solver's immunity excludes a contact-regime change as the cliff cause.
+
+## (4) Top 3 candidates for a deterministic ~4100-boundary step-function onset
+
+CSV columns (A:1858): `boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,resid_min,resid_max`. Shared arithmetic check: 7.7× ≈ 256/33 — post-cliff `iters` pinned at max_substeps (default 256, A:794, 893) with pre-cliff mean ≈ 33 exactly reproduces the measured multiplier, since every extra iteration re-runs the full 3-eval batch for ALL worlds (A:493-500) while landed worlds' states stay bit-exact (A:577-581) — matching "GPU busy, physics statistically unchanged".
+
+**#1 — NAN_GUARD diverged-world accumulation (A:375-379, 945; latch cleared only at A:476/2050-2054).** One world trips the guard at a deterministic (seeded-run) point ≈ training iter 87; the harness never passes `solver.diverged` to `reset`, so from then on that world re-marches from its held state at `ideal_dt = dt_min` (A:366) every boundary, ceiling-crushed to ~dt_min scale (A:390, 427) with ×1.1-only recovery (A:424, 429-430) — pinning `iters` at/near max_substeps for every subsequent boundary. Step-function onset, restart resets, fixed-dt immune (no such controller), graphs-irrelevant.
+CSV signature: `iters` jumps to max_substeps at one boundary and stays; `ideal_min` collapses to 1e-6 at the same boundary and never recovers; `resid_min` = 0 always (latched world lands exactly); `resid_max` > 0 on capped boundaries; `cum_iters` slope kink ×~7.7.
+Falsification: log `int(solver.diverged.numpy().sum())` per boundary (host read outside the march, per A:2088-2096). Zero after the cliff → dead. Positive → confirm by resetting flagged worlds (`solver.reset(state, world_mask=solver.diverged, flags=0)`, A:2039-2083) and watching `iters` recover.
+
+**#2 — sim-time deficit runaway: `_rebase_time` debt carry + max_substeps cap latch (A:663-667, 1804-1805, 600-607).** First boundary that truncates leaves a deficit; the next boundary's target is dt_outer + deficit; if the straggler cannot out-march dt_outer within max_substeps iterations the deficit grows monotonically and `iters` latches at the cap permanently. Onset is the first truncation event — deterministic in a seeded run; step-function by construction.
+CSV signature: `iters` == max_substeps every boundary after onset; `resid_max` strictly increasing boundary-over-boundary (the discriminator vs #1, where resid_max is bounded by ~dt_outer); `ideal_min` may or may not be at floor.
+Falsification: if post-cliff `resid_max` is flat/near-zero or `iters` < max_substeps, dead. Cross-check `unfinished_worlds` via `dt_histogram_stats()` (A:630-639, 2206-2214) growing linearly.
+
+**#3 — dt_ceiling down-ratchet holding a world at tiny dt without divergence (A:390, 424, 427, 429-430, floor-path relax skips A:375-382).** Recurrent reject cascades (contact knee) crush the ceiling to ~0.9× the cascade bottom faster than the ×1.1-per-accept recovery restores it; once mean recovery time exceeds mean cascade interval, the world's dt equilibrium drops an order of magnitude and per-boundary iterations rise. Weakness as the primary suspect: the mechanism is intrinsically gradual (drift of an equilibrium), so alone it predicts a ramp, not a clean step — it becomes step-like only by handing a world to #2's cap latch. Ranked third accordingly.
+CSV signature: `ideal_min`/`ideal_mean` show a declining trend over hundreds of boundaries BEFORE the cliff (vs the abrupt collapse of #1); `iters` ramps then saturates at max_substeps.
+Falsification: probe `solver._dt_ceiling.numpy().min()` per boundary (outside the march); if the ceiling stays at dt_outer scale up to the cliff, dead. Direct test: rerun with `NEWTON_ADAPTIVE_CEILING_RELAX` raised (e.g. 1.5, env read at A:303) or `NEWTON_ADAPTIVE_DT_CEILING=0` (A:938) — cliff onset unchanged → dead.
+
+Excluded by static analysis + the measured facts: graph-cache growth (keying skipped when graphs off, A:1886-1893, one key otherwise), alloc cache (inert by default, A:1097-1099), `_cum_iters` overflow (4 decades of headroom, A:952), warmstart drift alone (fixed-dt shares it and is immune, B:3880), mjw_data high-water/arena (fixed-capacity buffers, section 3), telemetry file/counter growth (env-gated, A:956, 1835), event_scope accumulation (inactive without a tracer, benchmark.py:137-138).

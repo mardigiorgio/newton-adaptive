@@ -1,0 +1,102 @@
+A = /home/mdigiorgio/Documents/code/newton-adaptive/newton/_src/solvers/mujoco/solver_mujoco_adaptive.py (branch march-counter-log, HEAD 91be9c91)
+B = /home/mdigiorgio/Documents/code/newton-adaptive/newton/_src/solvers/adaptive_boundary.py
+
+=====================================================================
+(1) EXACT READ OF THE BOUNDARY-LANDING KERNELS
+=====================================================================
+
+Dtypes — everything is float32, end to end:
+- _sim_time: wp.float32 array (A:869). _next_time: wp.float32 (A:923). _dt, _ideal_dt, _dt_half: wp.float32 (A:866-868). _dt_ceiling: wp.float32 (A:937). _last_error: wp.float32 (A:875).
+- Scalar kernel params annotated `float` (delta A:643, dt_min/dt_max/tol A:314-316, dt_min/dt_max in _apply_dt_cap A:79-80) compile as float32 inside Warp kernels; Python float64 values (dt_outer at A:1805, self._tol at A:1666) are narrowed to fp32 at launch. There is no fp64 anywhere in the clock/dt path.
+
+_apply_dt_cap (A:76-88): actual = wp.clamp(ideal_dt[i], dt_min, dt_max) (A:86); dt[i]=actual, dt_half[i]=actual*0.5f (A:87-88). It NEVER writes ideal_dt — the carried ideal survives flooring (docstring intent at A:84, but the code itself simply has no ideal_dt store). Called twice per iteration cycle: as the per-boundary seed (A:1747-1752, with effective_dt_max = min(self._dt_max, dt_outer), A:1744) and at the end of every iteration body (A:1694-1699).
+
+_clamp_dt_to_boundary (A:670-694): remaining = next_time[i] - sim_time[i] in fp32 (A:686); limited[i]=0 (A:687); if remaining <= 0.0f: dt=0, dt_half=0 (A:688-690); elif dt[i] > remaining: dt[i]=remaining, dt_half[i]=remaining*0.5f, limited[i]=1 (A:691-694). Runs at the top of every iteration (A:1625-1630), BEFORE _calc_adjusted_step (A:1656).
+
+_advance_sim_time (A:434-446): if accepted[i]: sim_time[i] = sim_time[i] + dt[i] (fp32 add, A:444-445); also snapshots error (A:446). Runs after commit/restore (A:1686-1691). Note dt here is still the post-clamp step: nothing rewrites _dt between the clamp (A:1625) and this add — _apply_dt_cap runs only AFTER it (A:1694).
+
+_rebase_time (A:649-667): base = next_time[i]; sim_time[i] -= base; next_time[i] -= base (A:665-667). Called once at the top of step, BEFORE _boundary_advance (A:1804).
+
+_boundary_advance (A:642-646): arr[i] = arr[i] + delta (fp32). Called on _next_time with delta=dt_outer (A:1805).
+
+The landing predicate: the march loop's stop condition is NOT in A. A:1700 zeroes the flag (_boundary_reset, A:593-596 "assume landed"), then _quantile_stop.mark_boundary (A:1701) launches count_unfinished (B:56-64): `if sim_time[i] < next_time[i]: atomic_add(count)` — STRICT less-than, fp32 compare. apply_quantile_threshold (B:67-83) sets flag=1 iff count > max_unfinished; with landed_fraction=1.0 hardcoded at construction (A:1081-1083), max_unfinished = int(n*(1-1.0)) = 0 (B:140), so the march runs until NO world has sim_time < next_time. "Landed" therefore means sim_time >= next_time exactly as fp32 compares. _iters_exhausted_stop (A:599-607, launched A:1702-1707) then force-closes the flag at max_substeps (default 256, A:772/A:893); the host loop is also bounded by range(max_substeps) (A:2015-2018). Same predicate reappears in the histogram skip (sim_time>=next_time returns, A:169), the clamp (remaining<=0, A:688), and _count_unfinished_worlds (A:638).
+
+Per-iteration order (A:1582-1707): hist(A:1601) -> counters(A:1621-1622) -> clamp(A:1625) -> [compaction A:1635-1642] -> [contact refresh A:1647] -> step-double(A:1651-1654) -> error(A:1655) -> _calc_adjusted_step(A:1656-1681) -> commit/restore(A:1684) -> _advance_sim_time(A:1686) -> _apply_dt_cap(A:1694) -> flag reset/quantile/cap(A:1700-1707).
+
+_calc_adjusted_step (A:306-431), exact branch order per world:
+1. e = err[world]; step = dt[world] — the POST-boundary-clamp dt (A:343-344; the comment at A:345-348 says so, and the launch order proves it).
+2. is_diverged = isnan(e) or isinf(e) or e >= divergence_threshold (A:349; threshold 1e9, A:887; error kernel sentinel 1e10, A:234).
+3. step <= 0 (boundary-stalled): accepted=commit=True, RETURN — ideal_dt untouched (A:354-357).
+4. Floor branch, step <= dt_min*1.001 (A:360): if e > tol: accepted=True, ideal_dt=dt_min, consec_rej=0 (A:364-367); if additionally nan_guard==1 and non-finite/diverged: commit=False, diverged=True, sim_time=next_time, RETURN (A:375-379); else commit=True, RETURN (A:381-382). If e <= tol at the floor: fall through to the normal path (A:383).
+5. Above-floor diverged: accepted=commit=False; if ceiling_on: dt_ceiling=min(dt_ceiling, 0.9*step) (A:389-390); ideal_dt = 0.1*step; consec_rej++ ; RETURN (A:391-393).
+6. Drake rule: new_step = 0.9 * step * sqrt(tol / max(e, 1e-30)) (A:395; constants _DRAKE_SAFETY=0.9 A:291).
+7. Order-aware override (flag, default off A:939): first-order rule tol/e on 2nd+ consecutive rejection (A:401-402).
+8. Deadband: if 0.9*step < new_step < 1.2*step: new_step = step (A:407-408; constants A:294-295).
+9. new_step = clamp(new_step, 0.1*step, 5*step) (A:410; MIN_SHRINK=0.1 A:292, MAX_GROW=5 A:293).
+10. acc = (e <= tol) or (new_step >= step) (A:412); accepted=commit=acc (A:413-414).
+11. If acc: consec_rej=0 (A:416); if sliver_fix==1 and limited==1: RETURN — keeps prior ideal_dt, skips ceiling relax (A:421-422); else if ceiling_on: dt_ceiling = min(dt_ceiling*1.1, dt_max) (A:423-424; relax factor A:303, default 1.1).
+12. If not acc: if ceiling_on: dt_ceiling = min(dt_ceiling, 0.9*step) (A:426-427); consec_rej++ (A:428).
+13. if ceiling_on: new_step = min(new_step, dt_ceiling) (A:429-430); ideal_dt[world] = new_step (A:431).
+
+Ceiling default ON (A:938, env NEWTON_ADAPTIVE_DT_CEILING default "1"); ceiling init = dt_max or 1e6 (A:936-937). sliver_fix default OFF (A:940). nan_guard default ON (A:945).
+
+=====================================================================
+(2) FP32 ROUNDING, SYMBOLICALLY
+=====================================================================
+
+Notation: N = fl32(dt_outer) — for dt_outer=0.02 this is the single fp32 value 0.019999999552965164..., with ulp(N) = 2^-29 * 2^... precisely: 0.02 ∈ [2^-6, 2^-5) so ulp = 2^-6-23 = 2^-29 ≈ 1.86e-9; a rounding of a result near N errs by ≤ ½ulp ≈ 9.3e-10.
+
+Boundary entry arithmetic (A:1804-1805): rebase computes next_time = b − b = 0.0 EXACTLY (IEEE x−x=0, A:667), then boundary_advance computes next_time = fl32(0 + dt_outer) = N EXACTLY (A:646, A:1805). Consequence: next_time is the IDENTICAL fp32 constant N at every boundary of the process's life. There is no accumulation channel in next_time at all — the growth the rebase exists to prevent (A:656-662) is prevented exactly, by construction, not approximately.
+
+sim_time entry value: rebase gives fl32(s_end − b) (A:666). At a normal march end s_end ≥ b = N and s_end ≤ N + 1ulp (shown below), so N/2 ≤ s_end ≤ 2N and Sterbenz's lemma applies: the subtraction is EXACT. So sim_time starts each boundary at exactly the previous boundary's landing overshoot, which is either 0 or ~1-2 ulp(N).
+
+Landing arithmetic within a boundary. sim_time accumulates 10-30 fp32 adds (A:445); each add rounds, but intermediate rounding is irrelevant because the clamp re-targets the exact representable N each iteration: r = fl32(N − s) (A:686), then on the clamped accepted step s' = fl32(s + r) (A:445).
+- Case s ≥ N/2 (final step spans less than half the boundary — the typical case when carried dt < dt_outer/2): Sterbenz ⇒ r = N − s exactly; then s + r = N exactly and N is representable, so s' = N EXACTLY. The world lands bit-exactly; the strict-< predicate (B:63) sees it landed; rebase yields sim_time = 0.0 exactly. Residual: ZERO, exactly cancelled.
+- Case s < N/2 (carried dt > dt_outer/2, so one wide clamped step crosses more than half the boundary): r = fl32(N − s) rounds by ≤ ½ulp(N).
+  - If r rounded UP: s' = fl32(s + r) can exceed N by ≤ 1 ulp. World lands; the overshoot (≤ ~3.7e-9) survives the rebase exactly (Sterbenz) and merely shortens the next boundary by that ulp. It is OVERWRITTEN, not accumulated: the next landing recomputes r against N from the current s, so the carried residual after any boundary equals only that boundary's own landing error.
+  - If r rounded DOWN, or s+r rounded down: s' < N by ~1 ulp. The world is NOT landed (strict <, B:63). The next iteration's clamp produces remaining ≈ 1-2 ulp(N) ≈ 2-4e-9 — THIS IS THE SLIVER SOURCE. That sliver step then lands exactly (Sterbenz regime), same boundary, +1 iteration.
+
+Conclusion: the residual carried across boundaries is bounded by ~1 ulp(N) ≈ 3.7e-9, has one-boundary memory, and CANNOT grow linearly in boundary count. The clocks' magnitudes never grow (next_time reconstructed exactly; sim_time ∈ [~0, N+ulp]). The only unbounded channel is the max_substeps truncation path: if the flag is force-closed with sim_time < next_time (A:600-607, A:2015), rebase leaves sim_time NEGATIVE (a deficit), and since next_time is re-advanced by the full dt_outer regardless (A:1805), a chronically truncated world's deficit accumulates boundary over boundary — linear growth, but directly visible as resid_max > 0 in telemetry and as unfinished_worlds (A:630-639). Also note env resets zero both clocks together (_reset_worlds A:469-475, called from reset A:2066-2083), wiping any residual.
+
+=====================================================================
+(3) THE SLIVER PATH: ideal_dt POISONING
+=====================================================================
+
+Setup: _clamp_dt_to_boundary clamps dt to remainder r and sets limited=1 (A:691-694). The attempt is accepted. In _calc_adjusted_step, step = r (post-clamp, A:344).
+
+First, the floor-branch interception: a sub-floor sliver (r < dt_min*1.001) enters the branch at A:360; with e ≤ tol (certain for r ~ 1e-9: step-doubling error scales ~r², r² ≈ 3.5e-18, astronomically under tol=1e-3) it FALLS THROUGH to the normal path (A:383). So the Drake rule runs with step=r either way:
+- new_step = 0.9 * r * sqrt(tol / max(e, 1e-30)) (A:395). For e→0 the guard makes sqrt(1e-3/1e-30) ≈ 3.2e13, so raw new_step is huge.
+- Deadband does not fire (new_step ≫ 1.2r, A:407).
+- Growth clamp bites: new_step = 5r (A:410, MAX_GROW=5 A:293).
+- acc = True (e ≤ tol, A:412). consec_rej=0 (A:416).
+
+NEWTON_ADAPTIVE_SLIVER_FIX=0 (default; flag read A:940, passed A:1675, baked into the captured graph): no exemption. dt_ceiling relaxes ×1.1 (A:423-424, harmless), new_step=min(5r, ceiling)=5r (A:429-430), and ideal_dt[world] = 5r (A:431). ONE sliver-accept rewrites the carried ideal_dt to 5× the sliver. For an ulp-sliver r ≈ 1.9-3.7e-9, ideal_dt ≈ 1-2e-8.
+
+Same iteration, _apply_dt_cap floors the working dt: dt = clamp(5r, dt_min, eff_max) = dt_min = 1e-6 (A:86, A:1694-1699) — but ideal_dt itself keeps 5r (the cap kernel never writes it, A:76-88). The world has just landed, so every remaining iteration of this boundary takes the dt≤0 stall branch, which explicitly preserves ideal_dt (A:354-357, comment A:352-354 — that preservation is exactly what makes the poisoned value survive to the next boundary).
+
+Next boundary: the seed cap gives dt = max(5r, dt_min) = dt_min (A:1747-1752). So YES: one sliver-accept poisons the NEXT boundary, forcing the world to restart its march from dt_min = 1e-6 instead of its earned carried dt.
+
+NEWTON_ADAPTIVE_SLIVER_FIX=1: the accepted-and-limited world RETURNS at A:421-422 before A:431 — ideal_dt keeps its pre-sliver value; the sliver cannot poison. Side effects of the early return: the ceiling relax (A:423-424) is also skipped on limited accepts (intended per A:420 "carries no ceiling information"), so a world whose every boundary ends in a clamped landing relaxes its ceiling only on its unclamped accepts. Rejected limited steps are NOT exempted (the check is inside `if acc:`), but a sub-floor sliver cannot reach the reject path at all — the floor branch at A:360 accepts it (ideal_dt=dt_min, A:366) or NaN-guards it; so the fix closes the only real poisoning route.
+
+Un-poisoning and recovery cost (fix=0): the only in-band repair is growth on subsequent accepted attempts. First attempt of the next boundary runs at step=dt_min (floored), so with e ≤ tol it falls through the floor branch and writes ideal_dt = min(5*dt_min, ceiling) (A:395,410,429-431) — recovery compounds from dt_min, ignoring the sub-floor 5r. Growth is ×5 per accepted attempt (A:410), additionally capped by dt_ceiling which relaxes only ×1.1 per accept (A:424,430).
+- Ceiling not binding (never rejected recently, ceiling ≈ dt_max/1e6): attempts to recover from dt_min to a healthy h* is ceil(log5(h*/dt_min)): h*=5e-3 → 6 attempts; h*=eff_dt_max=0.02 → 7 attempts. The poisoned boundary itself takes roughly 8-10 iterations (1e-6+5e-6+2.5e-5+1.25e-4+6.25e-4+3.1e-3+... to cover 0.02) versus ~2-4 healthy — and since the march length is the MAX over worlds (flag stays 1 while ANY world is short, B:63/B:80-83 with max_unfinished=0), ONE poisoned world stretches the whole boundary for all worlds.
+- Ceiling binding (a prior small-step rejection wrote ceiling = 0.9*step_small, A:427 or A:390): growth is throttled to ×1.1 per accept (A:429-430); recovering a decade of dt takes log1.1(10) ≈ 24 accepted attempts, i.e. tens of boundaries. This is the distinct "ceiling collapse" mechanism; note it requires a REJECTION at a small step (only above-floor rejections lower the ceiling), not a sliver-accept.
+- Out-of-band: reset() restores ideal_dt=dt_init and ceiling=ceiling_init for masked worlds (A:471,478, A:2066-2083).
+
+Can poisoning be self-sustaining? The chain needs the boundary's FINAL landing step to be a tiny sliver, which per section (2) requires an earlier wide clamped step (s < N/2 at clamp time, i.e. dt > dt_outer/2) whose landing missed by an ulp. Recovery via ×5 growth tends to produce exactly such wide late steps (dt reaching eff_dt_max=dt_outer), so a poisoned world has elevated odds of re-poisoning — a plausible recurrent limp, but each event costs O(6-10) iterations, not a 7.7× multiplier on its own unless most boundaries are poisoned.
+
+=====================================================================
+(4) CSV DISCRIMINATION PREDICTIONS
+=====================================================================
+
+CSV writer: _log_march_boundary (A:1846-1870), header "boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,resid_min,resid_max" (A:1858). Semantics: logged POST-march, PRE-next-rebase; iters = this boundary's iteration count (A:1859), cum = lifetime (A:1860); ideal_* summarize _ideal_dt AS CARRIED INTO THE NEXT BOUNDARY (A:1861) — so a poisoning event on row k predicts elevated iters on row k+1 (one-row lag); resid = next_time − sim_time in numpy float32 (A:1862): landed worlds give exactly 0.0 (Sterbenz-exact landing) or ~ −1.9e-9..−3.7e-9 (ulp overshoot); positive resid means max_substeps truncation.
+
+(a) Residual-driven slivers alone (no poisoning, e.g. with SLIVER_FIX=1): iters up by +1..+2 on affected boundaries (one extra ~2e-9 sliver iteration each), ideal_min/mean/max unchanged and healthy (≥ dt_min, near carried values), resid_min occasionally −ulp, resid_max ≈ 0. Pre vs post cliff: NO signature capable of 7.7×; if the CSV looks like this across the cliff, slivers are exonerated.
+
+(b) ideal_dt poisoning (fix=0 sliver-accepts): the smoking gun is ideal_min BELOW dt_min=1e-6 — values in ~1e-8..2e-8 (5×ulp-sliver) can ONLY be written by the Drake rewrite at A:431 with step=sliver (floor-accepts write exactly dt_min, A:366; reject-shrink from small steps is the only other sub-dt_min writer). Expect: sporadic rows with ideal_min ≈ 5r ≪ 1e-6, followed (next row) by iters elevated by ~+5..+8, then ideal_min back to normal — pre-cliff. Post-cliff, if this is the mechanism, nearly EVERY row shows ideal_min < dt_min and iters sits at a plateau ≈ healthy+6..10; Δcum_iters/Δboundary rises by the same factor as wall time (~7.7×) — iterations are where this mechanism's cost lives. resid stays ≈ 0. ideal_mean barely moves (one world of 48+ poisoned); ideal_min is the sensitive column.
+
+(c) Ceiling collapse: dt_ceiling is not logged, but every controller write is min'd with it (A:429-431), so its shadow is ideal_max/ideal_mean DEPRESSED (10-100×) and creeping back up by ≈ ×1.1 per accepted attempt — a slow exponential ramp spanning tens-to-hundreds of rows (≈24 accepts per decade), utterly distinct from (b)'s within-one-row 5×-per-attempt recovery. iters ∝ dt_outer/ideal (marching 0.02 s at dt≈ceiling), so iters and ideal_mean move as near-perfect inverses along the ramp. Post-cliff persistent form: ideal_max pinned far below eff_dt_max forever, iters permanently high, cum slope up ~7.7×.
+
+(d) Truncation/deficit (from section 2, the only linear-in-boundary residual): iters pinned EXACTLY at max_substeps=256, resid_max > 0 and growing row over row (deficit accrues because next_time advances by full dt_outer regardless, A:1804-1805). Given the measured fact that physics is statistically unchanged, this should be absent — but it is the one mechanism the resid columns detect instantly.
+
+The decisive overall read: the measured cliff is ~7.7× wall cost with physics unchanged. Every mechanism above spends its cost through ITERATION COUNT. If the CSV shows Δcum_iters/Δboundary and iters FLAT across boundary ~4100 while wall time jumps 7.7×, then the entire float/controller path — slivers, poisoning, ceiling — is exonerated in one glance, and the regression must live below the iteration count (per-launch/per-replay cost growing with process age), consistent with the observed graphs-on/graphs-off invariance. If instead iters jumps ~7.7× at the cliff, columns ideal_min (sub-dt_min ⇒ (b)) vs ideal_max ramp shape (slow 1.1× creep ⇒ (c)) vs resid_max>0 at iters=256 (⇒ (d)) discriminate the cause on sight.

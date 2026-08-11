@@ -1,0 +1,91 @@
+# Fork delta map — newton-adaptive (N = /home/mdigiorgio/Documents/code/newton-adaptive)
+
+## 1. Upstream identity and merge-base
+
+- Remotes: `origin` = https://github.com/mardigiorgio/newton-adaptive.git, `newton-upstream` = https://github.com/newton-physics/newton.git (git remote -v).
+- `git merge-base march-counter-log newton-upstream/main` = `git merge-base dev newton-upstream/main` = **c336b7ae6054a2992930e81e2fa752fbd799998e** ("Fixed Cross Slide Table Stability... (#3126)", 2026-06-15).
+- **That merge-base is misleading.** dev's tip IS the merge commit **582f6efc** ("Merge march throughput work"), and further down first-parent history sits **ecf4d017** "Merge upstream newton main into the adaptive fork" (2026-08-09), whose second parent **c1b2dc2c** ("Speed up MuJoCo collision mask compilation (#3839)") is a *rewritten/grafted* copy of the upstream tip: `git diff 71fe5e63 c1b2dc2c` is **empty** (identical trees), where **71fe5e63889e1368e186882dfb000623b4c9a434** is the real `newton-upstream/main` tip (#3839, 2026-08-07). Because the grafted history has different hashes, git's merge-base stays at June's c336b7ae, and `diff c336b7ae..dev` (1492 files, ~1.06M insertions) is dominated by replayed upstream work — it is NOT our delta.
+- **Effective baseline for "what the fork carries": c1b2dc2c ≙ upstream 71fe5e63 (#3839).** All fork-delta claims below are from `git diff c1b2dc2c..dev`.
+- Tips: dev = **582f6efc7d4c5d0e5fe3b05c81ba62eefb2b8d17**; march-counter-log = **8963c760455f13a4eef28bef77f3ba909cf872d0** (dev + 3 commits).
+
+## 2. Everything the fork carries beyond upstream (diff c1b2dc2c..dev)
+
+Delta in `newton/`: 20 files, 5636 insertions / 24 deletions. Plus scripts/tools/assets (720 files, ~902K insertions, mostly binary assets).
+
+### (a) The adaptive solver family — files entirely ours
+- `newton/_src/solvers/mujoco/solver_mujoco_adaptive.py` — 2235 lines at dev (SolverMuJoCoAdaptive, step-doubling march).
+- `newton/_src/solvers/sap/__init__.py` (35 lines) — imports SolverSAP from an EXTERNAL `sap_warp` checkout via a sys.path shim, default root `/home/mdigiorgio/Documents/code/sap_warp`, overridable with `SAP_WARP_PATH` (newton/_src/solvers/sap/__init__.py:14-16); re-exports the four `sap_*_from_newton` converters.
+- `newton/_src/solvers/sap/solver_sap_adaptive.py` (1075 lines) — SolverSAPAdaptive.
+- `newton/_src/solvers/adaptive_boundary.py` (203 lines) — `QuantileBoundaryStop`, the shared quantile boundary-stop; wired into SolverMuJoCoAdaptive, explicitly NOT yet into SolverSAPAdaptive (newton/_src/solvers/adaptive_boundary.py:29-30).
+- `newton/_src/solvers/mujoco/mjw_alloc_cache.py` (176 lines) — makes an mjw step allocation-free after warmup by monkeypatching `wp.empty/zeros/full/clone` for the duration of one step, because conditional body graphs (`wp.capture_while`) reject memory-allocation nodes (newton/_src/solvers/mujoco/mjw_alloc_cache.py:1-13); cache keyed by (fn, call-site file:line, occurrence, shape/dtype/device) (:23-27); known blind spot: C++-core allocations on the SAP-broadphase path (:30-34).
+- Registration: `newton/_src/solvers/mujoco/__init__.py` exports SolverMuJoCoAdaptive; `newton/_src/solvers/__init__.py` adds SolverMuJoCoAdaptive + SolverSAP/SolverSAPAdaptive + the sap converters to `__all__` and `_LAZY_IMPORTS` (lazy so a missing sap_warp checkout stays harmless until first use).
+- Tests (all ours): test_adaptive_cubic_linesearch.py (163), test_adaptive_dt_histogram.py (390), test_adaptive_floor_nan_guard.py (205), test_adaptive_hessian_reuse.py (171), test_adaptive_reset_worlds.py (142), test_adaptive_sap.py (210), test_adaptive_time_rebase.py (90), test_adaptive_warmstart_gate.py (154), test_mjw_alloc_cache.py (135).
+
+### (b) Modifications to upstream files — exhaustive
+
+**solver_mujoco.py (116 lines changed vs upstream).** Two independent layers:
+
+*Layer 1 — carried by the upstream merge ecf4d017 itself (24 lines, authored pre-merge):*
+1. **joint_label pre-registration guard** (solver_mujoco.py:744-749): in path-target resolution, return `[]` silently when `builder.joint_label` is empty — USD parsing can call this in a pre-registration pass where no lookup can succeed; resolution re-runs once labels exist. Originated in **1e6c70d0** "Quiet the model-build warning wall for cloned multi-world scenes" (2026-07-01).
+2. **Duplicate-actuator skip** (solver_mujoco.py:3164-3171 and 3276-3283): reads `model.joint_target_mode` and skips a native CTRL_DIRECT joint actuator whose DOF is already driven by a JOINT_TARGET (PD) actuator — otherwise its ctrl stays 0 and an affine position actuator acts as a spring-to-zero fighting the PD drive. Escape hatch `NEWTON_KEEP_DUPLICATE_ACTUATORS=1` (solver_mujoco.py:3169). Originated in **5691cd9c** "Skip native actuators duplicating PD joint targets" (2026-07-01).
+
+*Layer 2 — the `_mjw_world_replicas` twin-world plumbing (commits 17edd496 "Derive per-world dims from Newton world count" and b1674820 "Mirror mocap and eq_active rows to twin worlds", both 2026-08-10, merged via 582f6efc). Mechanism: mjw_data is built with `nworld * replicas` worlds while every Newton-side mapping and mjw model field stays primary-sized (model fields broadcast via `field[worldid % shape[0]]`); a subclass sets `self._mjw_world_replicas` BEFORE `super().__init__()`, default 1 leaves every derived dimension unchanged (solver_mujoco.py:3754-3761). Hunk inventory:*
+3. `put_data` called with `nworld=nworld * self._mjw_world_replicas` (solver_mujoco.py:7530); nconmax is per-world so naconmax scales with the replicated count.
+4. `reset_world_buffers_kernel` launch passes `d.nworld // replicas` as `nworld_primary` so a primary-sized world mask clears replica rows via modulo (solver_mujoco.py:4008; kernel side kernels.py:3248, 3268).
+5. `_sync_worldbody_geom_xposes` and `_sync_site_xposes` launch over primary worlds only, then mirror geom_xpos/geom_xmat and site_xpos/site_xmat rows to replicas (solver_mujoco.py:4629-4644, 4654-4671).
+6. New helper `_mirror_data_rows_to_replicas` — `wp.copy` of primary rows into each replica block, construction/notify time only, never inside capture (solver_mujoco.py:4676-4681).
+7. Three apply/update paths divide `nworld` by replicas so per-world divisors and Newton-facing launch dims see only primary worlds (solver_mujoco.py:4725, 4855, 4954).
+8. Contact capacity: `rigid_contact_max` property and the `update_contacts` naconmax-vs-rigid_contact_max check both use `naconmax // replicas` (solver_mujoco.py:5220, 5234); the mjw→Newton contact conversion launch passes primary world count (solver_mujoco.py:5247).
+9. Mocap: after mocap_pos/mocap_quat writes, mirror to replicas — mjw indexes those data-side arrays directly by world, no modulo broadcast (solver_mujoco.py:8085).
+10. `update_site_properties_kernel`, `update_pair_properties_kernel`, `update_model_properties_kernel` launches divide by replicas (solver_mujoco.py:8579, 8818, 8852).
+11. `eq_active` mirrored to replicas in both `_update_eq_properties` and `_update_mimic_eq_properties` — eq_data is model-side (modulo broadcast) but eq_active is data-side (solver_mujoco.py:8930, 8970; commit b1674820).
+
+**kernels.py (74 lines changed):**
+- New `duplicate_contact_rows_for_twins_kernel` (kernels.py:759): appends a twin-world copy of every injected contact row (row r → n0+r, worldid += nworld), because mjw constraint assembly contributes a contact row only to its `worldid`; resets efc_address to -1; sets `nacon[0] = min(2*n0, naconmax)`; latches an `overflow` flag instead of writing past capacity (overflow latch exposed by commit 33f6d47f).
+- `convert_mjw_contacts_to_newton_kernel` gains `nworld_primary` and skips rows whose world >= primary count — replica rows have no Newton-side shape mapping (kernels.py:1516, 1559).
+- `reset_world_buffers_kernel` gains `nworld_primary` + modulo mask indexing (kernels.py:3248, 3268).
+
+**viewer_gl.py (52 lines) and gl/gui.py (4 lines):**
+- ViewerGL tracks `_last_sim_time`/`_sim_dt`; `begin_frame(sim_time)` computes the sim-time delta and `_update` integrates camera/wind with it instead of wall-clock (falls back to wall-clock when sim_dt==0) — camera speed follows sim time when physics runs slower than real time (diff c1b2dc2c..dev hunks at viewer_gl.py:265-278, 1683-1700, 1757-1768).
+- New convenience `ViewerGL.render(state, sim_time)` wrapping begin_frame/log_state/end_frame, documented against `solver.step_dt` (viewer_gl.py:1712-1738 in the dev diff).
+- gui.py: the imgui-bundle ImportError message now prints the actual exception instead of a fixed install hint.
+
+### (c) Probes / tools
+- `tools/probes/march_equivalence_probe.py` (418 lines) — the committed march flag-equivalence probe (added 2351517f, extended 477ff094, hardened 9888c689, determinism-pinned 9ffe0fec).
+- `scripts/bench/` — benchmark package (runner, infra, plotting, benchmarks/{_single_iter, accuracy, dt_comparison, initial_conditions, scaling, timeline}).
+- `scripts/rl/adaptive_expts/` (11 experiment scripts), `scripts/rl/anymal_study/` (13 files incl. STUDY_LOG.md), `scripts/rl/archive/adaptive_isaac/` (archived Isaac overlay + patches), `scripts/rl/setup.sh`, `scripts/rl/README.md`.
+- `scripts/scenes/{contact_objects.py, dish_rack.py}`, `scripts/tune_dish_rack.py`, `scripts/verify_kernel_fixes.py`, `scripts/make_deck.py`.
+
+### (d) Everything else
+- `pyproject.toml`: new `rl` extra — rsl-rl @ git v1.0.2, tensorboard, rliable, matplotlib, torch-cu12 (pyproject.toml:109-118); `uv.lock` regenerated (+836/-145).
+- `CHANGELOG.md` +124 lines; `docs/conf.py` drops a "superpowers" exclude; `.gitignore` adds egg-info/logs/wandb/integrator_base.cc.
+- Deleted: `AGENTS.md`, `CLAUDE.md` (commit 98f67216 "Remove per-repo agent instruction files").
+- Committed data (large): `scripts/assets/` coacd/gso/lbm/dishrack meshes, `runs/cenic_dr-off_s1/`, `results/`, and `logs/rsl_rl/shadow_hand/2026-06-29_22-10-54/` including a 12.25 MB `model_0.pt` checkpoint (diff --stat c1b2dc2c..dev).
+
+## 3. Tonight's delta: dev..march-counter-log (3 commits, all in solver_mujoco_adaptive.py; line refs = march-counter-log worktree)
+
+**91be9c91** "Add opt-in per-boundary march telemetry log" (+39):
+- Ctor: `_march_log_path` from env `NEWTON_ADAPTIVE_MARCH_LOG` (None when unset keeps the hot path to one attribute check), `_march_log_file/_march_log_boundary`, `_march_log_hist_every` from `NEWTON_ADAPTIVE_MARCH_LOG_EVERY` default 48 (solver_mujoco_adaptive.py:1011-1016).
+- In `step_dt`, after the march and outside capture: `if self._march_log_path is not None: self._log_march_boundary()` (solver_mujoco_adaptive.py:1928-1930).
+- New `_log_march_boundary` (solver_mujoco_adaptive.py:1940): opens the CSV append-mode line-buffered, writes header, then per boundary reads `_iteration_count_buf`, `_cum_iters`, `_ideal_dt` (min/mean/max), residual `_next_time - _sim_time` (min/max); every `_march_log_hist_every` boundaries appends a `HIST` line from `dt_histogram_stats()` when the histogram is enabled. Pure observer; host `.numpy()` reads occur only under the gate.
+
+**1922e393** "Add reject telemetry and opt-in boundary debt guard" (+72/-3):
+- New kernel `_count_rejects` (solver_mujoco_adaptive.py:468): atomic-adds this iteration's not-accepted worlds into `_reject_count_buf`; launched in the iteration body only when the march log is enabled (solver_mujoco_adaptive.py:1749-1750), i.e. telemetry-on changes the captured graph contents.
+- New kernel `_debt_guard` (solver_mujoco_adaptive.py:476): for worlds with `sim_time < next_time` after the march, clamps sim_time to `next_time - dt_outer` (debt capped at one boundary) and reissues fresh controller state — `ideal_dt = dt_init`, `dt_ceiling = ceiling_init`, `consec_rej = 0` — counting hits in `_guard_hits`.
+- Wiring: `_dt_init = float(dt_inner_init)`, `_guard_hits`, gate `NEWTON_ADAPTIVE_DEBT_GUARD=1` default off (solver_mujoco_adaptive.py:1019-1022); per-boundary zeroing of reject/guard buffers; guard launch after the march, before telemetry, device-only ("legal graphs on or off"); ceiling_init passed as `self._dt_max` with an inf→1.0e6 substitution (1922e393 diff, step_dt hunk).
+- CSV row extended with `rejects, err_max (max of _last_error), n_debt (count resid>0), n_subfloor (count ideal_dt < _dt_min), n_guard` (solver_mujoco_adaptive.py:1959-1964).
+
+**8963c760** "Add opt-in quantization floor to march error metric" (+27):
+- Both error kernels — `_inf_norm_state_error_kernel` and `_inf_norm_state_error_indexed_kernel` — gain an int `quant_floor` param; when nonzero, a per-coordinate difference `d <= max(|qpos_double|, |qpos_full|) * 4.7683716e-07` (4 ulps of float32) is zeroed before weighting (solver_mujoco_adaptive.py:230, 292); loop bodies kept identical between the full-dim and compacted kernels.
+- Gate `NEWTON_ADAPTIVE_ERR_QUANT_FLOOR=1` → `_err_quant_floor_flag` (solver_mujoco_adaptive.py:1024), passed into both launches (compacted at :1517, full at :1535). Default off. Rationale in the commit message: sub-resolution differences on large-magnitude coordinates can sit just under tol and pin the controller in its hold-deadband, freezing dt.
+
+All three features are opt-in via env vars and default off; the guard and quant-floor claims about behavior are the commits' own stated intent — unmeasured in this session.
+
+## 4. Notable dev-branch history
+
+- **582f6efc** (= dev tip) — merge of the march-throughput branch (parents 397a61f3, 9ffe0fec): tail compaction merged as the production lever (claimed bitwise-equivalent via the march probe); **twin-worlds batched step-double merged as a documented NEGATIVE result** — bitwise correct but slower at production world counts, stays behind env flags default-off per the merge message (commit 582f6efc message; claims are the merge author's, not re-measured).
+- The merged side branch (397a61f3..9ffe0fec): **17edd496** derive per-world dims from Newton world count (base-solver replica plumbing), **a0a5dbfa** twin-worlds batched step-double behind env flag, **2351517f** march flag-equivalence probe, **e329fc2b** tail compaction behind env flag, **477ff094** probe tail-compaction arms, **b1674820** mirror mocap/eq_active to twin worlds (base solver), **33f6d47f** expose twin contact-duplication overflow latch, **9888c689** probe hardening, **9ffe0fec** deterministic contact emission in the probe.
+- Commits touching base `solver_mujoco.py` since the effective upstream baseline: **17edd496** and **b1674820** (only these two post-merge), plus the merge **ecf4d017** carrying the two pre-merge fixes **1e6c70d0** (joint_label guard) and **5691cd9c** (duplicate-actuator skip). Pre-merge our-author history also shows **edfd2314** (2026-03-28) and **1ed2b493** (2026-03-20) touching it, but only the two 07-01 fixes survive in the c1b2dc2c..dev delta.
+- Other first-parent commits since the upstream merge: **397a61f3** refresh injected contacts between half-step trials, **295b570f** ceiling relax rate via `NEWTON_ADAPTIVE_CEILING_RELAX`, **d9298009** ceiling memory + removal of abandonment/forced completion, **3fe5bea0**/**39a81d2e** remove-then-revert of the sliver-fix controller exemption, **98f67216** remove per-repo agent instruction files, **ecf4d017** the upstream merge itself.
+
+Caveat on residual risk: everything above is what the diffs say the code does; none of the performance/equivalence claims embedded in commit messages (compaction faster, twin slower, probe bitwise equivalence) were re-measured here, and the GPU was off-limits.

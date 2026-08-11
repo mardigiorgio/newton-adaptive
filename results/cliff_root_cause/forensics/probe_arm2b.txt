@@ -1,0 +1,80 @@
+/home/mdigiorgio/Documents/code/newton-adaptive/tools/probes/march_equivalence_probe.py:160: DeprecationWarning: The legacy DOF-shaped joint_target_q layout is deprecated for models whose joint coordinate and DOF counts differ (free/ball/distance joints). In a future release joint_target_q will always use the coordinate layout (matching joint_q) and newton.use_coord_layout_targets will be removed. Set newton.use_coord_layout_targets = True before building models and index targets via Model.joint_target_q_start.
+  return b.finalize()
+/home/mdigiorgio/Documents/code/newton-adaptive/newton/_src/solvers/mujoco/solver_mujoco.py:3522: RuntimeWarning: MuJoCo dependency version mismatch with Newton's declared requirements: mujoco==3.11.0 (requires ~=3.8.0); mujoco-warp==3.11.0 (requires ~=3.8.0,>=3.8.0.3). Reinstall Newton dependencies, for example `uv pip install -e ".[examples]"`.
+  mujoco, _ = self.import_mujoco()
+/home/mdigiorgio/Documents/code/newton-adaptive/tools/probes/march_equivalence_probe.py:160: DeprecationWarning: The legacy DOF-shaped joint_target_q layout is deprecated for models whose joint coordinate and DOF counts differ (free/ball/distance joints). In a future release joint_target_q will always use the coordinate layout (matching joint_q) and newton.use_coord_layout_targets will be removed. Set newton.use_coord_layout_targets = True before building models and index targets via Model.joint_target_q_start.
+  return b.finalize()
+Warp 1.16.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce RTX 5090" (31 GiB, sm_120, mempool enabled)
+   Kernel cache:
+     /home/mdigiorgio/.cache/warp/1.16.0
+Module validate_and_correct_inertia_kernel_5e18b3cd 5e18b3c load on device 'cuda:0' took 0.44 ms  (cached)
+Module newton._src.geometry.bvh cca3a6c load on device 'cuda:0' took 0.62 ms  (cached)
+Module newton._src.solvers.mujoco.kernels 00459fb load on device 'cuda:0' took 7.78 ms  (cached)
+Module repeat_array_kernel_132d2489 2b476ae load on device 'cuda:0' took 0.30 ms  (cached)
+Module repeat_array_kernel_132d2489 f018f4b load on device 'cuda:0' took 0.24 ms  (cached)
+Module repeat_array_kernel_132d2489 f67ebb7 load on device 'cuda:0' took 0.25 ms  (cached)
+Module repeat_array_kernel_132d2489 44fc066 load on device 'cuda:0' took 0.26 ms  (cached)
+Module repeat_array_kernel_132d2489 4e9a0aa load on device 'cuda:0' took 0.47 ms  (cached)
+Module mujoco_warp._src.io b4940be load on device 'cuda:0' took 2.04 ms  (cached)
+Module mujoco_warp._src.smooth c4020f1 load on device 'cuda:0' took 2.11 ms  (cached)
+Module _small_cholesky_factorize_block__locals__kernel_fcb84fa4 672f5d6 load on device 'cuda:0' took 0.26 ms  (cached)
+Module _small_cholesky_solve_block__locals__kernel_9ccecbd4 45aabd4 load on device 'cuda:0' took 0.26 ms  (cached)
+Module newton._src.sim.collide 4a8a6d9 load on device 'cuda:0' took 0.48 ms  (cached)
+Module newton._src.geometry.broad_phase_nxn 68fddfc load on device 'cuda:0' took 0.29 ms  (cached)
+Module narrow_phase_primitive_write_contact dd23331 load on device 'cuda:0' took 0.44 ms  (cached)
+Module narrow_phase_gjk_mpr_True_write_contact_support_map_lean_post_process_minkowski_only dc14230 load on device 'cuda:0' took 1.42 ms  (cached)
+Module newton._src.geometry.narrow_phase a137686 load on device 'cuda:0' took 0.51 ms  (cached)
+Module newton._src.geometry.contact_sort d29c88c load on device 'cuda:0' took 0.36 ms  (cached)
+Module newton._src.solvers.mujoco.solver_mujoco_adaptive 63e93a2 load on device 'cuda:0' took 1.54 ms  (cached)
+Module newton._src.sim.articulation daa0137 load on device 'cuda:0' took 4.17 ms  (cached)
+Module mujoco_warp._src.constraint 36c8060 load on device 'cuda:0' took 0.21 ms  (cached)
+Module _friction_dof__locals__kernel_a6ed3529 a6ed352 load on device 'cuda:0' took 0.28 ms  (cached)
+Module _efc_contact_init__locals__kernel_0bd15084 0bd1508 load on device 'cuda:0' took 0.26 ms  (cached)
+Module _efc_contact_jac_dense__locals__kernel_f15eda8d 1ff2125 load on device 'cuda:0' took 0.31 ms  (cached)
+Module _efc_contact_update__locals__kernel_8c34abe6 8c34abe load on device 'cuda:0' took 0.27 ms  (cached)
+Module mujoco_warp._src.passive d8c18c6 load on device 'cuda:0' took 0.74 ms  (cached)
+Module _qfrc_smooth__locals__kernel_b98573a2 b98573a load on device 'cuda:0' took 0.22 ms  (cached)
+Module mujoco_warp._src.support ca784c5 load on device 'cuda:0' took 0.26 ms  (cached)
+Module _small_cholesky_factorize_solve_block__locals__kernel_2b75aeaa 964bbb9 load on device 'cuda:0' took 0.28 ms  (cached)
+Module _solve_init_dof__locals__kernel_befe379c befe379 load on device 'cuda:0' took 0.22 ms  (cached)
+Module mujoco_warp._src.solver 3a105a0 load on device 'cuda:0' took 1.03 ms  (cached)
+Module _solve_init_jaref_kernel__locals__kernel_3128196f 3128196 load on device 'cuda:0' took 0.23 ms  (cached)
+Module mul_m_kernel__locals___mul_m_dc7994af dc7994a load on device 'cuda:0' took 0.30 ms  (cached)
+Module _update_constraint_efc__locals__kernel_64b75440 64b7544 load on device 'cuda:0' took 0.25 ms  (cached)
+Module _update_constraint_init_qfrc_constraint_dense__locals__kernel_88a8869f 88a8869 load on device 'cuda:0' took 0.24 ms  (cached)
+Module _update_gradient_zero_grad_dot__locals__kernel_817148e6 817148e load on device 'cuda:0' took 0.22 ms  (cached)
+Module _update_gradient_grad__locals__kernel_00c9ca8d 00c9ca8 load on device 'cuda:0' took 0.24 ms  (cached)
+Module _update_gradient_JTDAJ_dense_tiled__locals__kernel_19f9684e 28ab0e2 load on device 'cuda:0' took 0.58 ms  (cached)
+Module _update_gradient_cholesky__locals__kernel_98bf149a a3a6759 load on device 'cuda:0' took 21.39 ms  (cached)
+Module _linesearch_iterative_kernel__locals__kernel_2e1c0e7d 2e65bde load on device 'cuda:0' took 0.41 ms  (cached)
+Module _update_constraint_efc__locals__kernel_dc2dbb33 dc2dbb3 load on device 'cuda:0' took 0.27 ms  (cached)
+Module _update_constraint_init_qfrc_constraint_dense__locals__kernel_175b3165 175b316 load on device 'cuda:0' took 0.25 ms  (cached)
+Module _update_gradient_zero_grad_dot__locals__kernel_932c92ad 932c92a load on device 'cuda:0' took 0.24 ms  (cached)
+Module _update_gradient_grad__locals__kernel_4c37eb70 4c37eb7 load on device 'cuda:0' took 0.23 ms  (cached)
+Module _update_gradient_cholesky__locals__kernel_e232c2c9 aead4ad load on device 'cuda:0' took 21.56 ms  (cached)
+Module mujoco_warp._src.sensor de892d8 load on device 'cuda:0' took 1.30 ms  (cached)
+Module mujoco_warp._src.derivative 833f5d0 load on device 'cuda:0' took 0.57 ms  (cached)
+Module mujoco_warp._src.forward b068ad6 load on device 'cuda:0' took 0.68 ms  (cached)
+Module _next_time_builder__locals___next_time_a67f49d6 a67f49d load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.solvers.adaptive_boundary 939f625 load on device 'cuda:0' took 0.48 ms  (cached)
+guard: reference run injected mjw contact rows (nacon > 0): ok
+guard: reference run had force-capable contacts (dist < includemargin): ok
+guard: rejection exercised (boundary 0 needed >= 2 iterations): ok
+guard: per-world dt diverged across worlds: ok
+guard: compaction tail engaged (< N active at some boundary end): ok
+FAIL[compact]: first divergence at boundary 2, field 'joint_q', row 78 (row=world for per-world fields)
+  element 0: ref=np.float32(0.005994214) cand=np.float32(0.0059942147)
+  bits: ref=0x3bc46b1d cand=0x3bc46b1e ulp=1
+  note: this configuration changes no mjw launch and no fp operation order by construction -- this mismatch is a real bug, not drift.
+FAIL[twin]: first divergence at boundary 1, field 'joint_q', row 71 (row=world for per-world fields)
+  element 0: ref=np.float32(0.0015687143) cand=np.float32(0.001568714)
+  bits: ref=0x3acd9d51 cand=0x3acd9d4f ulp=2
+  note: twin mode changes every mjw launch geometry (nworld=2N); on GPU, atomic-arrival order in contact-cid / efc assembly can reorder fp reductions, so ulp-level drift here is the known suspect (see docstring).
+FAIL[twin+compact]: first divergence at boundary 1, field 'joint_q', row 71 (row=world for per-world fields)
+  element 0: ref=np.float32(0.0015687143) cand=np.float32(0.001568714)
+  bits: ref=0x3acd9d51 cand=0x3acd9d4f ulp=2
+  note: twin mode changes every mjw launch geometry (nworld=2N); on GPU, atomic-arrival order in contact-cid / efc assembly can reorder fp reductions, so ulp-level drift here is the known suspect (see docstring).

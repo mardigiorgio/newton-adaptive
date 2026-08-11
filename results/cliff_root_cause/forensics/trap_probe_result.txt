@@ -1,0 +1,3 @@
+trap_probe.py run 2026-08-11 ~06:40, RTX 5090, branch march-counter-log 8963c760
+offset=0 floor=off: 25.35 | offset=0 floor=on: 24.75 | offset=8192 floor=off: 146.98 | offset=8192 floor=on: 23.90
+PASS (T1 trap armed 5.8x, T2 fix restores invariance, T3 free near origin)

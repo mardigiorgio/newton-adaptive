@@ -1,0 +1,165 @@
+# SolverMuJoCoAdaptive — per-boundary march spec AS BUILT
+
+Repo N = /home/mdigiorgio/Documents/code/newton-adaptive, branch march-counter-log, HEAD 8963c760 (= dev 582f6efc + 91be9c91 telemetry + 1922e393 reject-telemetry/debt-guard + 8963c760 quantization floor).
+File abbreviations: **A** = N/newton/_src/solvers/mujoco/solver_mujoco_adaptive.py (2377 lines), **B** = N/newton/_src/solvers/adaptive_boundary.py.
+All claims are from code at HEAD; where a behavior rests on a code comment rather than executable logic I say so explicitly.
+
+Constructor invariants: `dt_mode` must be "per_world" (A:862), `tiling` must be "ragged" (A:868), `max_substeps >= 1` (A:872), `enable_sleeping=True` rejected and forced off (A:889-891). Base is constructed with `separate_worlds=True, use_mujoco_cpu=False, use_mujoco_contacts = not use_newton_contacts` (A:911-917). Divergence sentinel written by error kernels is 1e10 (A:245, A:304); divergence threshold compared against is `self._divergence_threshold = 1e9` (A:944).
+
+---
+
+## 1. Boundary entry (`step()`, A:1781-1938; `step_dt` is a thin argument-reorder alias, A:2124-2137)
+
+Order of operations per call:
+
+1. **dt required.** `dt=None` raises (A:1805-1806); `dt_outer = float(dt)` (A:1809). `effective_dt_max = min(self._dt_max, dt_outer)` (A:1813).
+2. **Seed the working dt vector** from the carried `ideal_dt`: launch `_apply_dt_cap` (A:1816-1821); kernel per world: `dt[i] = clamp(ideal_dt[i], dt_min, effective_dt_max)`, `dt_half[i] = dt[i] * 0.5` (A:86-88). So the per-world dt carried across boundaries is `ideal_dt`; `dt` itself is a derived clamp.
+3. **Enter MJWarp execution scope**: `wp.ScopedDevice(device)` + `self._scoped_mujoco_warp_execution()` wrap the entire boundary (A:1826).
+4. **Control conversion**: `self._apply_mjc_control(self.model, state_0, control, self.mjw_data)` (A:1827); then the optional `apply_forces(state_0)` callback (A:1828-1829). Twin mode then mirrors `ctrl`, `qfrc_applied`, `xfrc_applied` rows [0,N) into twin rows [N,2N) once per boundary, outside any capture (A:1830-1834, `_mirror_rows_to_twins` A:1348-1358 — skips zero-size arrays A:1356-1358).
+5. `self._enable_rne_postconstraint(self._state_cur)` (A:1836).
+6. **State conversion in, ONCE**: `self._update_mjc_data(self.mjw_data, self.model, state_0)` (A:1840); twin mode mirrors `qpos`,`qvel` to twin rows (A:1841-1845).
+7. **Contact injection** (only when constructed with `use_newton_contacts=True`, A:883): `contacts=None` raises (A:1847-1851). `self._convert_contacts_to_mjwarp(self.model, state_0, contacts)` runs the FULL conversion path with boundary-entry transforms (A:1855); twin mode appends duplicated contact rows via `_duplicate_injected_contacts_for_twins` (A:1856-1857; helper A:1456-1492: launch dim `min(rigid_contact_max, naconmax // 2)`, kernel latches `self._contact_dup_overflow` instead of writing out of range, A:1462-1468 + property A:2207-2221). If the per-iteration refresh is enabled, the refresh scratch state is seeded (`_copy_state(self._refresh_state, state_0)`, A:1858-1860), `self._refresh_contacts = contacts` (A:1861), and a change of `id(contacts.contact_generation)` clears BOTH graph caches (stale device pointers would be baked into captures) (A:1862-1868).
+8. **Clock rebase — exact fp semantics** (`_rebase_time`, launched A:1873; kernel A:706-724): per world, `base = next_time[i]`; `sim_time[i] = sim_time[i] - base`; `next_time[i] = next_time[i] - base`. So `next_time` becomes exactly 0.0 (x−x) and `sim_time` becomes the signed residual `sim_time − next_time` computed as a single float32 subtraction — the baseline is subtracted, not zeroed, so any overshoot residual is carried forward. (The docstring's "bit-exact remainder" claim, A:717-719, is prose; what the code guarantees is the single-subtraction form above.)
+9. **Clock advance**: `_boundary_advance` adds `dt_outer` to `next_time` (A:1874; kernel A:699-703). Since `next_time` was just zeroed, `next_time[i]` = float32(dt_outer) exactly.
+10. **Buffer zeroing** (A:1876-1886): `_iteration_count_buf.fill_(0)`; `_boundary_flag.fill_(1)`; if march log enabled `_reject_count_buf.fill_(0)` (A:1878-1879, from 1922e393); if debt guard enabled `_guard_hits.fill_(0)` (A:1880-1881, from 1922e393); if tail compaction `_prev_active.fill_(1)` so the first iteration's snapshot set covers every world (A:1882-1886).
+11. `self._march_ragged(effective_dt_max)` — the march (A:1888; see §2, §4). Boundary exit follows (§3).
+
+---
+
+## 2. One march iteration end-to-end (`_run_iteration_body`, A:1649-1776)
+
+Every phase is a flat kernel-launch sequence (graph-capture safe, A:1660-1661). Execution order:
+
+### 2.1 dt histogram (opt-in, constructor `dt_histogram=True`, A:831/1034-1041)
+Launched FIRST, before the boundary clamp, so it bins the controller's chosen step, not a landing sliver (A:1666-1685; ordering rationale A:1654-1657). Kernel `_dt_histogram_accum` (A:132-177): worlds with `sim_time >= next_time` return (A:169-170); if `h = dt[i] <= dt_min`: `atomic_add(counts, 0, 1)` and `atomic_min(saturation, 0, ideal_dt[i])` (A:172-175); else `b = 1 + int(floor((log10(h) − lo_log10) * bins_per_decade))`, `atomic_add(counts, clamp(b, 1, n_bins−1), 1)` (A:176-177). Layout (A:91-111): `n_bins = 1 + (ceil(log10(dt_init/dt_min)) + 1) * bpd + 1` (floor bin + log bins + overflow bin), `lo_log10 = log10(dt_min)`; edges `dt_min * 10^(k/bpd)` (A:114-120). Saturation sentinel 1e38, which float32-rounds to 9.9999997e37 — the "never hit" comparison must use the float32 round-trip (A:123-129, A:2303-2307). The kernel's NaN/inf safety rests on `_apply_dt_cap` having clamped `dt` the same iteration (per the precondition comment A:155-166 — comment, not a runtime branch).
+
+### 2.2 Counters
+`_iter_count_increment` on `_iteration_count_buf` (per-boundary) and `_cum_iters` (cumulative, never auto-reset; `reset_compute_counter()` zeroes it, A:2236-2238) (A:1687-1689; kernel A:754-757). A rejection is just another iteration (A:1687, A:1003-1008); `cumulative_substeps() = cum_iters * 3` (A:2230-2234).
+
+### 2.3 Clamp-to-boundary
+`_clamp_dt_to_boundary` (A:1691-1697; kernel A:727-752): `remaining = next_time[i] − sim_time[i]`; `limited[i] = 0`; if `remaining <= 0`: `dt = dt_half = 0` (no-op world); elif `dt > remaining`: `dt = remaining`, `dt_half = remaining*0.5`, `limited[i] = 1` (landing-sliver marker consumed by the sliver exemption, §2.7).
+
+### 2.4 Tail compaction (opt-in, `NEWTON_ADAPTIVE_TAIL_COMPACT=1`, A:910)
+`_reset_active_counts` zeroes both counters (A:1703; kernel A:613-619), then `_build_active_worlds` (A:1704-1709; kernel A:622-647) runs AFTER the clamp so post-clamp `dt > 0` is the single "attempts a step" predicate: `act = dt[i] > 0`; snapshot set (slot 1) = `act OR prev_active[i] != 0` (a landed world stays in the snapshot set for ONE extra iteration so its saved rows freeze at the committed state, A:641-642 + rationale A:1070-1077); active set (slot 0) = `act`; `prev_active` updated to act. List order is atomic-nondeterministic; every consumer writes world-private rows only (A:636-638).
+
+### 2.5 Injected-contact refresh, pre-trial
+If `self._contact_refresh_enabled and self._refresh_contacts is not None` (enabled = `use_newton_contacts` AND `NEWTON_ADAPTIVE_NO_CONTACT_REFRESH != "1"`, A:1122-1124): `_refresh_injected_contacts()` (A:1712-1715; body A:1572-1647) — mjw `qpos/qvel` → Newton joint coords via `convert_mj_coords_to_warp_kernel` (A:1592-1616, primary worlds only A:1584-1587), FK via `eval_articulation_fk` (A:1617-1644), then `_convert_contacts_to_mjwarp` fast path re-anchoring only `dist`/`pos` to the current marching state (frame/solref/friction/layout stay from the boundary full pass — per docstring A:1573-1579 and injection design comment A:1112-1124), plus twin contact re-duplication (A:1646-1647).
+
+### 2.6 Step doubling — 3 evals (or 2 batched in twin mode)
+
+**Sequential `_step_double`** (default; A:1261-1346):
+1. **Snapshot** `qpos`, `qvel`, `qacc_warmstart`, and `act` (if `na>0`) into `_qpos_saved/_qvel_saved/_warmstart_saved/_act_saved`. Full `wp.copy` normally (A:1305-1309); under tail compaction, indexed row copies over the snapshot set (slot 1) with fixed launch dim and device-side count guard (A:1277-1303; kernel `_copy_rows_indexed` A:576-593). The snapshot covers warmstart+act so a reject is a true rollback and the full eval's internal state does not leak into the half evals (A:965-969, A:1266-1270).
+2. **Full eval** at `dt`: `_mjw_eval(self._dt)` (A:1310) — `wp.copy(opt.timestep, dt_array)` then `self._mujoco_warp_step()` inside the alloc-cache scope when active (A:1216-1229). `opt.timestep` is a stable per-world buffer sized `world_count * replicas`, installed at construction (A:1047-1050).
+3. **Save full-step result**: `_qpos_full ← mjw_data.qpos` (full copy A:1323, or indexed over the active set slot 0 A:1311-1321 — landed rows go stale, safe because only the equally-compacted error kernel reads them, A:1312-1314).
+4. **Restore** the snapshot into `qpos/qvel/qacc_warmstart/act` — ALWAYS full-dim copies even under compaction (frozen saved rows equal the committed bits for landed worlds, so the full rewrite is exact) (A:1324-1332).
+5. **First half eval** at `dt/2`: with the shared forward prefix (default on) `_mjw_eval_suffix(self._dt_half)` (A:1333-1334); else full `_mjw_eval` (A:1336). The suffix runs only `mjw.make_constraint`, `mjw.solve`, and the integrator (`mjw.euler` for EULER, `mjw.implicit` for IMPLICITFAST; A:1184-1190) — the dt-dependent stages — reusing the state-dependent prefix (kinematics, contacts, mass matrix, forces, `qacc_smooth`) the full eval left in `mjw_data`, which is valid because that eval's integrator advanced only qpos/qvel/act, all just restored (A:1231-1259). Sensors skipped (A:1244-1245). RK4 (or any other integrator) silently falls back to full evals; a warning fires only if the env flag was set explicitly (A:1191-1198).
+6. **Mid-double contact refresh**: re-anchor injected dist/pos to the half-step state before the second half eval, restoring the estimator's contact sensitivity (all three evals sharing one contact snapshot would make contact stiffness cancel out of the Richardson difference) (A:1337-1345).
+7. **Second half eval** at `dt/2`, always the full pipeline (different starting state) (A:1346, A:1273-1274). `mjw_data` now holds the doubled state; `_qpos_full` vs `mjw_data.qpos` is the Richardson pair (A:1263-1265).
+
+**Twin variant `_step_double_twin`** (`NEWTON_ADAPTIVE_TWIN_EVAL=1`, A:901; selected at A:1718-1719; body A:1378-1454): data segment carries 2N worlds (`_mjw_world_replicas = 2`, A:902). Index lists: compacted lists under tail compaction, else identity list + full counts (A:1399-1406, buffers A:1060-1065). Steps: snapshot real rows (indexed, slot 1, A:1408-1424); seed twin rows [N,2N) from the pre-attempt state — qpos/qvel/warmstart/act — via `_mirror_rows_indexed` (A:1426-1432; kernel A:595-610); **eval 1**: reals integrate `dt/2`, twins integrate `dt`, in ONE 2N-world eval via `_scatter_twin_timestep` (`ts[i]=first[i]; ts[nworld+i]=second[i]`, A:560-573) + `_mjw_eval_twin` (A:1360-1376, A:1434-1435); gather `_qpos_full` from the twin rows (`src_row_off = n`, A:1437-1445); mid-double refresh (A:1447-1451); **eval 2**: reals complete the double at `dt/2`, twins no-op at `dt=0` (`self._zero_dt`, A:1053-1056, A:1453-1454). Twin rows end holding dt=0-eval garbage; nothing reads them before reseeding, no export touches rows >= N (A:1386-1389). Shared-forward does not apply in twin mode (no restore point between the full and first-half evals, A:1392-1394).
+
+### 2.7 Error estimate (`_estimate_error`, A:1494-1539)
+Full-dim kernel `_inf_norm_state_error_kernel` (A:180-247), or the indexed variant `_inf_norm_state_error_indexed_kernel` under tail compaction (A:250-305; guard `i >= counts[0]` returns, so landed worlds keep their last written error, which never reaches a decision — the controller's `dt <= 0` branch returns first, A:266-270, A:1498-1500).
+
+Exact per-world math (loop body identical between both kernels by requirement, A:271-272, 289-290):
+- For each qpos coordinate i: `d = |q_double[w,i] − q_full[w,i]|` (A:209).
+- If `isnan(d)`: `has_nan = 1` (NaN must be flagged per component because CUDA `fmaxf` returns the non-NaN operand, so NaN would silently drop out of the running max) (A:210-214).
+- Else, **quantization floor** (new in 8963c760, gated `quant_floor != 0` = `NEWTON_ADAPTIVE_ERR_QUANT_FLOOR=1`, A:1024): `m = max(|q_double[w,i]|, |q_full[w,i]|)`; if `d <= m * 4.7683716e-07` then `d = 0` (A:222-231). The constant 4.7683716e-07 = 4 × 2^-23, i.e. **4 ulp at unit magnitude** — a relative threshold: differences within ~4 ulps of the coordinate's own magnitude are treated as representation noise (rationale: for large-magnitude coordinates the noise floor can sit just under tol and pin the controller in its deadband, A:223-228).
+- Weight: `w_i = state_scale[w,i] / (1 + h * kd_over_m[i])` with `h = dt[w]` (A:232). `state_scale` defaults to all-ones (A:1083-1090); `kd_over_m` is all-zero (weight exactly `state_scale`) unless `NEWTON_ADAPTIVE_FILTERED_ERR=1`, which fills hinge/slide coords with `(dof_damping + implicit-actuator kv)/dof_M0` at construction (A:1092-1110).
+- `max_err = max(max_err, w_i * d)` (A:233).
+- Then a full `qvel` finiteness scan over nv: any NaN/inf velocity sets `has_nan` (velocity is excluded from the NORM but committed states must be finite) (A:236-242).
+- If `has_nan` or `max_err` non-finite: `max_err = 1e10` (sentinel) (A:244-245). Write `error_out[world] = max_err` (A:247).
+
+So: **e = ||S·(q_double − q_full)||_∞ over qpos only**, quaternions in MuJoCo wxyz components (A:193-201), with optional per-coordinate damping filter and optional 4-ulp relative quantization floor.
+
+### 2.8 Controller (`_calc_adjusted_step`, launched A:1723-1748; kernel A:324-449) — branch by branch, in kernel order
+
+Inputs of note: `step = dt[world]` is the POST-clamp dt (a landing sliver if clamped; A:361-366); `dt_max` argument is `self._dt_max` (or 1e6 when inf) — NOT `effective_dt_max` (A:1735) — so the ceiling-relax cap uses the constructor dt_max while the actual step cap (§2.11) uses `min(dt_max, dt_outer)`. Constants: SAFETY=0.9, MIN_SHRINK=0.1, MAX_GROW=5.0, HYST_HIGH=1.2, HYST_LOW=0.9, CEILING_MARGIN=0.9 (A:309-320); CEILING_RELAX = env `NEWTON_ADAPTIVE_CEILING_RELAX`, default 1.1, baked at **module import** as a wp.constant (A:321).
+
+1. `is_diverged = isnan(e) or isinf(e) or e >= divergence_threshold` (1e9) (A:367).
+2. **Boundary-stalled branch** (`step <= 0`): `accepted = commit = True`, return — no-op step, `ideal_dt` untouched so the next interval inherits the carried dt (A:369-375). *(Skips everything below, including ceiling relax.)*
+3. **Floor branch** (`step <= dt_min * 1.001`, A:377-401): if `e > tol`: `accepted = True`, `ideal_dt = dt_min`, `consec_rej = 0` (A:383-385); then the **NaN guard** (`nan_guard == 1`, default on): if `isnan(e) or isinf(e) or e >= divergence_threshold` → `commit = False`, `diverged[world] = True` (the only writer of `diverged`, A:355-356), `sim_time[world] = next_time[world]` (freeze to the frame boundary), return (A:393-397). Otherwise (finite but can't meet tol at the floor): `commit = True`, return (A:398-400). If `e <= tol` at the floor, fall through to the normal path (A:401). *(All floor-branch returns skip ceiling relax and the deadband/clamp; the accepted-at-floor-over-tol path pins `ideal_dt` to `dt_min`.)*
+4. **Divergence-above-floor branch** (`is_diverged`, A:404-411): `accepted = False`, `commit = False`; if ceiling on: `dt_ceiling = min(dt_ceiling, 0.9*step)`; `ideal_dt = 0.1*step`; `consec_rej += 1`; return. *(Skips deadband, growth clamp, and relax; hard 10x shrink.)*
+5. **Drake rule** (order 2): `new_step = 0.9 * step * sqrt(tol / max(e, 1e-30))` (A:413).
+6. **Order-aware rejection sizing** (`order_aware == 1` and `e > tol` and `consec_rej >= 1`): overwrite with the FIRST-order rule `new_step = 0.9 * step * (tol / max(e, 1e-30))` (A:415-420).
+7. **Deadband** (symmetric hold): if `0.9*step < new_step < 1.2*step`: `new_step = step` (A:422-426).
+8. **Growth clamp**: `new_step = clamp(new_step, 0.1*step, 5.0*step)` (A:428).
+9. **Accept test**: `acc = (e <= tol) or (new_step >= step)`; `accepted = commit = acc` (A:430-432).
+10. **On accept** (A:433-442): `consec_rej = 0`; **sliver exemption** (`sliver_fix == 1 and limited == 1`): return immediately — keeps the carried `ideal_dt` (an accepted boundary-shortened step says nothing about the error-limited step size) AND skips ceiling relax (A:435-440); otherwise ceiling relax: `dt_ceiling = min(dt_ceiling * CEILING_RELAX, dt_max)` (A:441-442).
+11. **On reject** (A:443-446): `dt_ceiling = min(dt_ceiling, 0.9*step)` (ceiling tighten); `consec_rej += 1`.
+12. **Ceiling application + final write**: if ceiling on, `new_step = min(new_step, dt_ceiling)`; `ideal_dt[world] = new_step` (A:447-449). dt_max clamping is deferred to `_apply_dt_cap` so `ideal_dt` is preserved un-clamped (A:358).
+
+**Branches that skip the ceiling relax**: stalled (returns, step 2), all three floor-branch returns (step 3), diverged (tightens instead, step 4), reject (tightens, step 11), and the sliver-exempt accept (returns, step 10). Only an ordinary un-exempted accept relaxes.
+
+### 2.9 Reject telemetry (opt-in, 1922e393)
+If `NEWTON_ADAPTIVE_MARCH_LOG` is set: `_count_rejects` accumulates `!accepted` worlds into `_reject_count_buf` (A:1749-1750; kernel A:467-472). Inside the captured body — device accumulator only.
+
+### 2.10 Commit / restore, then time advance
+`_commit_or_restore` (A:1752-1753; body A:1541-1567): `_restore_uncommitted_rows_kernel` over qpos/qvel/warmstart/act; predicate: restore the snapshot row iff `(not commit[world]) or dt[world] <= 0` (A:555-557). Note the mask is `_commit`, NOT `_accepted` — a floor-diverged world advances time but holds its last good state (A:547-549) — and boundary-stalled dt=0 worlds are restored even though they "commit", making their dt=0 evals true no-ops (comment rationale: MuJoCo's dt=0 pipeline can produce NaN qacc, A:551-554).
+`_advance_sim_time` (A:1755-1760; kernel A:452-464): if `accepted[i]`: `sim_time[i] += dt[i]`; `accepted_error[i] = error[i]` (exposed as `last_error`, A:2340-2343; raw attempt error as `last_raw_error`, A:2345-2349).
+
+### 2.11 dt re-cap
+`_apply_dt_cap(ideal_dt → dt, dt_half)` with bounds `[dt_min, effective_dt_max]` sizes the NEXT attempt (A:1762-1768; kernel A:76-88).
+
+### 2.12 Landing test
+Three launches, in order (A:1769-1776):
+1. `_boundary_reset`: `flag[0] = 0` (assume everyone landed) (A:1769; kernel A:650-654).
+2. `self._quantile_stop.mark_boundary(sim_time, next_time, boundary_flag, dev)` (A:1770; B:152-161): `count.zero_()`; `count_unfinished` atomically counts worlds with `sim_time[i] < next_time[i]` (the **strict** predicate; B:55-64); `apply_quantile_threshold`: if `flag[0] >= 2` return (never mask a solver-failure status); `flag[0] = 0 if count <= max_unfinished else 1` (B:67-83). This solver constructs the stop with **`landed_fraction=1.0` hard-coded** (A:1146-1148), so `max_unfinished = int(world_count * 0.0) = 0` (B:139) — the test degenerates to "any world short ⇒ flag=1", `enabled` is False (B:147-150), and **`force_complete`/abandonment is never invoked** (no call site in A; comment A:1144-1145: full-integrity bookkeeping only).
+3. `_iters_exhausted_stop`: if `iter_count[0] >= max_substeps`: `flag[0] = 0` — runs AFTER the quantile test so the safety cap wins regardless of stragglers (A:1771-1776; kernel A:656-665).
+
+---
+
+## 3. Boundary exit (`step()` after `_march_ragged`, A:1890-1938)
+
+In order:
+
+1. **Truncation counters** (only when `dt_histogram=True`; once per boundary, outside the captured body, A:1890-1903): `_count_boundary_truncation` (kernel A:667-685): `trunc[0] += 1` (boundaries); `trunc[1] += 1` if `iter_count >= max_substeps` — which includes the "everyone landed exactly on the last permitted iteration" case, so it is a saturation signal, not proof of under-advance (A:676-680). `_count_unfinished_worlds` (kernel A:687-697): `trunc[2] += 1` per world with `sim_time < next_time` (the actual under-advance measure). Read back via `dt_histogram_stats()` as `boundaries`/`capped_boundaries`/`unfinished_worlds` (A:2308-2317).
+2. **Debt guard** (opt-in `NEWTON_ADAPTIVE_DEBT_GUARD=1`, A:1022; from 1922e393; launched A:1905-1923; kernel `_debt_guard` A:475-503). Exact semantics per world, only when `sim_time[i] < next_time[i]` (i.e. the march ended short): `floor_t = next_time[i] − dt_outer`; if `sim_time[i] < floor_t`: `sim_time[i] = floor_t` — carried time debt is capped at exactly ONE boundary period; then unconditionally (for any short world) `ideal_dt[i] = dt_init` (constructor `dt_inner_init`, A:1020), `dt_ceiling[i] = ceiling_init` (passed as `dt_max` or 1e6 when inf, A:1916), `consec_rej[i] = 0`, and `atomic_add(guard_hits, 0, 1)`. Note the controller reissue happens for EVERY short world, not just debt-capped ones; `guard_hits` counts short worlds, not clamps. Device-only work, legal with graphs on or off (A:1905-1906).
+3. **Telemetry readout** (opt-in `NEWTON_ADAPTIVE_MARCH_LOG=<path>`, A:1013; from 91be9c91/1922e393; gated call A:1929-1930, body `_log_march_boundary` A:1940-1973): host `.numpy()` reads — only legal outside an active capture, hence gated (A:1925-1928). Runs AFTER the guard so `resid` reflects the bounded carry while `n_guard` reports the touched worlds (A:1927-1928). Opens the CSV lazily, line-buffered append, header `boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard` (A:1949-1955). Row values: `iters` = per-boundary iteration count, `cum` = cumulative, ideal_dt min/mean/max, `resid = next_time − sim_time` min/max, `rejects` = device reject accumulator, `err_max = max(_last_error)`, `n_debt = (resid > 0).sum()`, `n_subfloor = (ideal_dt < dt_min).sum()`, `n_guard = guard_hits` (0 when guard off) (A:1956-1970). Every `NEWTON_ADAPTIVE_MARCH_LOG_EVERY` boundaries (default 48, A:1016) appends a `HIST {dt_histogram_stats()}` line when the histogram is on (A:1972-1973).
+4. **State conversion out, ONCE**: `_update_newton_state(model, self._state_cur, mjw_data, state_prev=state_0)` — includes the FK pass for body poses — into the solver-owned `_state_cur` buffer so state and state_prev never alias in the convert kernel (A:1932-1935, buffer A:974-977); then `_copy_state(state_0, self._state_cur)` (A:1936). Returns `(state_0, state_1)`: `state_in` is advanced in place, `state_out` is untouched scratch (A:1795-1797, A:1938).
+
+**Reset path** (for completeness): `reset()` (A:2142-2186) calls the base reset, re-mirrors twin qpos/qvel rows (A:2163-2167), and launches `_reset_worlds` over the mask (default all-True): `ideal_dt=dt=dt_init`, `dt_half=dt_init/2`, `sim_time=next_time=0` (clean interval + bounds float32 growth), `diverged=False`, `accepted=False`, `dt_ceiling=ceiling_init` (A:506-535, A:2168-2186). The `diverged` latch's consumer: pass `world_mask=self.diverged` (A:2155-2157, property A:2191-2199).
+
+---
+
+## 4. The three execution tiers (`_march_ragged`, A:2098-2121; first applicable wins)
+
+**Tier 1 — conditional node into an OUTER capture** (A:2109-2111): when `_conditional_enabled` and an external CUDA-graph capture is recording on the current stream (`_external_capture_active`: `dev.captures.get(wp.get_stream(dev)) is not None`, A:2030-2040), call `_march_conditional` directly: `wp.capture_while(self._boundary_flag, lambda: self._run_iteration_body(effective_dt_max))` records ONE conditional while-node into the outer graph (A:2042-2047). The body must be allocation-free — the `MjwStepAllocCache` shim provides per-call-site buffer reuse for mujoco_warp's per-step allocations (A:1153-1164, cache use inside `_mjw_eval*` A:1225-1227, 1251-1255, 1372-1374).
+
+**Tier 2 — self-captured whole-march conditional graph** (A:2112-2114): when `_conditional_enabled` and `_conditional_warm_boundaries >= 2` (`_CONDITIONAL_WARM_BOUNDARIES = 2`, A:2025-2028 — warmup boundaries run tier 3 so module loads / mjw lazy init / alloc-cache population happen outside capture): `_launch_conditional_march` (A:2064-2096) captures `_march_conditional` under `wp.ScopedCapture`, caches the graph keyed by `round(effective_dt_max, 12)` (A:2067), and replays it — **zero host syncs per boundary**. Any capture failure calls `_abort_active_capture` (best-effort `wp.capture_end` so the stream is never left mid-capture recording an orphan graph, A:2049-2062), sets `_conditional_enabled = False` **permanently**, clears the cache, warns, and returns False (A:2075-2084); launch failure downgrades the same way (A:2088-2096). During warmup, `_conditional_warm_boundaries` increments and control falls through to tier 3 (A:2115-2116).
+
+**Tier 3 — default per-iteration graph replay with host flag polls** (A:2118-2121): `for _ in range(max_substeps): _run_ragged_iteration(...); if boundary_flag.numpy()[0] == 0: break` — ONE 4-byte host read per iteration. `_run_ragged_iteration` (A:2010-2023) asks `_iteration_graph` (A:1975-2008) for the captured body: returns None (eager) when graphs are disabled; the FIRST call after construction returns None once to warm lazily-initialized allocations outside capture (`_march_warmed`, A:1992-1994); otherwise captures `_run_iteration_body` as ONE REGULAR graph keyed by `round(effective_dt_max, 12)` (A:1996-2003) — regular graphs tolerate mujoco_warp's allocation nodes, which CUDA forbids inside conditional bodies (A:1981-1987). Capture or launch failure permanently disables graphs and falls back to eager (A:2004-2007, A:2018-2023). Eager mode (graphs off / CPU / post-failure) runs the identical body per iteration with the same flag poll loop.
+
+**What each capture contains**: tier-3 graph = exactly one `_run_iteration_body` (§2 in full — histogram, counters, clamp, compaction, refresh, 3 evals, error, controller, reject count, restore, advance, cap, boundary/quantile/exhaustion kernels). Tier-1/2 = the `capture_while` conditional node whose body is that same iteration; the loop condition is the device `_boundary_flag`, and the `max_substeps` cap is enforced on device by `_iters_exhausted_stop` inside the body (A:2044-2046, A:1771-1776).
+
+**Selection**: `NEWTON_MJ_ADAPTIVE_GRAPH` (default on; "0" disables; requires CUDA, A:1137-1141) gates ALL capture including the quantile-stop's (A:1146-1148, B:143). `NEWTON_MJ_ADAPTIVE_CONDITIONAL=1` (requires graph tier on) selects tiers 1/2 and implies the alloc cache (A:1162-1164).
+
+---
+
+## 5. Env-knob table (adaptive solver, HEAD 8963c760)
+
+All read at CONSTRUCTION except `NEWTON_ADAPTIVE_CEILING_RELAX` (module import, baked into a `wp.constant`) and all baked into the captured graphs thereafter.
+
+| Env var | Default | Effect | Read at |
+|---|---|---|---|
+| `NEWTON_ADAPTIVE_CEILING_RELAX` | `1.1` | Multiplier relaxing `dt_ceiling` per ordinary accepted step (`min(ceiling*relax, dt_max)`, A:442) | A:321 (module import) |
+| `NEWTON_ADAPTIVE_TWIN_EVAL` | `0` | 2N-world twin step doubling: 2 batched evals instead of 3 sequential (§2.6); doubles mjw data worlds | A:901 |
+| `NEWTON_ADAPTIVE_TAIL_COMPACT` | `0` | Device-built active/snapshot world lists bound snapshot/seed/gather/error work to unfinished worlds; fixed launch dims (§2.4) | A:910 |
+| `NEWTON_ADAPTIVE_DT_CEILING` | `1` (on) | Per-world growth ceiling: tightened to 0.9·step on reject/divergence, relaxed on accept, applied `new_step = min(new_step, ceiling)` (A:407-408, 441-448) | A:995 |
+| `NEWTON_ADAPTIVE_ORDER_AWARE` | `0` | From the 2nd consecutive rejection, size with first-order `tol/e` instead of `sqrt(tol/e)` (A:415-420) | A:996 |
+| `NEWTON_ADAPTIVE_SLIVER_FIX` | `0` | Accepted boundary-clamped slivers keep the carried `ideal_dt` (skip resize + relax) (A:435-440) | A:997 |
+| `NEWTON_ADAPTIVE_NAN_GUARD` | `1` (on; `0` disables) | Non-finite/sentinel error at the dt_min floor: refuse commit, hold last-good state, latch `diverged`, freeze `sim_time` to the boundary (A:386-397) | A:1002 |
+| `NEWTON_ADAPTIVE_MARCH_LOG` | unset (off) | Path for per-boundary CSV telemetry (§3.3); also enables the in-graph reject counter (A:1749-1750) | A:1013 |
+| `NEWTON_ADAPTIVE_MARCH_LOG_EVERY` | `48` | Boundaries between `HIST` dump lines in the march log (A:1972-1973) | A:1016 |
+| `NEWTON_ADAPTIVE_DEBT_GUARD` | `0` | Post-march debt guard: cap carried time debt at one `dt_outer`, reissue fresh controller state for short worlds (§3.2) | A:1022 |
+| `NEWTON_ADAPTIVE_ERR_QUANT_FLOOR` | `0` | Zero per-coordinate error differences `d <= max(|q̂|,|q|)·4.7683716e-7` (4 ulp relative) in both error kernels (§2.7) | A:1024 |
+| `NEWTON_ADAPTIVE_FILTERED_ERR` | `0` | Fill `kd_over_m` so the error weight becomes `S/(1 + h·kd/M)` per hinge/slide coord (A:1092-1110) | A:1099 |
+| `NEWTON_ADAPTIVE_NO_CONTACT_REFRESH` | `0` | `=1` freezes injected contacts at boundary-entry dist/pos (disables per-iteration + mid-double re-anchoring) (A:1122-1124) | A:1123 |
+| `NEWTON_MJ_ADAPTIVE_GRAPH` | on (`0` disables) | Per-iteration CUDA-graph tier (and gates all capture incl. conditional + quantile-stop capture); requires CUDA | A:1141 |
+| `NEWTON_MJ_ADAPTIVE_CONDITIONAL` | `0` | Whole-march `wp.capture_while` conditional tier (tiers 1/2, §4); implies alloc cache; requires graph tier | A:1162 |
+| `NEWTON_MJW_ALLOC_CACHE` | `0` | Enable the `MjwStepAllocCache` shim without the conditional tier | A:1163 |
+| `NEWTON_MJ_ADAPTIVE_SHARED_FWD` | `1` (on) | First half eval runs only make_constraint/solve/integrate, reusing the full eval's prefix; Euler/implicitfast only, silent fallback otherwise (warn only if set explicitly) (A:1181-1198) | A:1181 |
+
+**Constructor knobs** (not env, listed for completeness): `tol` (default 1e-3), `dt_inner_init` (0.01), `dt_inner_min` (1e-6), `dt_inner_max` (None → inf, then per-boundary `effective_dt_max = min(dt_max, dt_outer)`), `max_substeps` (256), `use_newton_contacts` (False), `dt_histogram` (False) + `dt_histogram_bins_per_decade` (4) (A:819-833, A:1813).
+
+**Residual observations (as-built quirks, not judgments)**: (a) the controller's ceiling-relax cap uses constructor `dt_max`, not `effective_dt_max` (A:1735 vs A:1766); (b) the debt guard reissues controller state for every short world but only clamps time for worlds more than one `dt_outer` behind, and `guard_hits` counts the former (A:496-503); (c) `_CEILING_RELAX` is process-global (import-time), unlike every other flag which is per-construction (A:321 vs A:901-1024); (d) the quantile-stop machinery is present but hard-wired inert at `landed_fraction=1.0` (A:1146-1148, B:139); (e) the march-log telemetry path performs host syncs once per boundary and is incompatible with tier 1/2's zero-sync goal only in the sense of adding syncs — it runs outside the capture, after the march (A:1925-1930).

@@ -1,0 +1,52 @@
+# The MJWarp eval (mujoco-warp 3.11.0 in V; V-src = /home/mdigiorgio/Documents/code/IsaacLabRubato/.venv/lib/python3.12/site-packages/mujoco_warp/_src)
+
+## 1. mujoco_warp.step — the full stage list
+
+Entry: `step(m, d)` at V-src/forward.py:1363-1375 = `forward(m, d)` then one integrator dispatched on `m.opt.integrator` (forward.py:1368-1375). `forward` (forward.py:1327-1360) runs, in order:
+
+1. **Sleep wake/update** — only if `EnableBit.SLEEP` (forward.py:1330-1333). The adaptive solver hard-forces sleeping off (`kwargs["enable_sleeping"] = False`, N/newton/_src/solvers/mujoco/solver_mujoco_adaptive.py:890-892), so these are dead in this stack.
+2. **fwd_position** (forward.py:635-677, called with `factorize=False` at 1337):
+   - `fwd_kinematics` (forward.py:616-632): `smooth.kinematics` (FK, V-src/smooth.py:448), `smooth.com_pos` (smooth.py:825), `smooth.camlight` (985), `smooth.flex` (604), `smooth.tendon` (4194).
+   - `smooth.crb` (composite rigid-body inertia → `d.M`, smooth.py:1080), `smooth.tendon_armature` (1165); `factor_m` is SKIPPED here because forward passes `factorize=False` (forward.py:650-651,1337) — the factorization instead happens in fwd_acceleration below.
+   - **Collision** only `if m.opt.run_collision_detection:` (forward.py:652). N sets `opt.run_collision_detection = use_mujoco_contacts` (N/.../solver_mujoco.py:3829) and the task preset uses `use_mujoco_contacts=False` (I/source/isaaclab_tasks/isaaclab_tasks/contrib/g1_29_dofs/flat_env_cfg.py:65,98), so **MuJoCo's broadphase/narrowphase never runs**; contacts are injected via `_convert_contacts_to_mjwarp` (solver_mujoco.py:3878-3879; adaptive: solver_mujoco_adaptive.py:1645, 1855). (For reference the pipeline would be `collision_driver.collision`: broadphase NXN/SAP + `_narrowphase`, V-src/collision_driver.py:885-943.)
+   - `constraint.make_constraint` (forward.py:668; V-src/constraint.py:4749): builds efc rows (equality, friction/limit, contact) — Jacobians, `efc.D`, `efc.aref` with KBI terms.
+   - `smooth.transmission` (forward.py:677; smooth.py:2888): actuator moments.
+3. **sensor_pos / energy** (forward.py:1338-1344): `d.sensordata.zero_()` then `sensor.sensor_pos` (V-src/sensor.py:810); energy only if `EnableBit.ENERGY`, else `d.energy.zero_()`.
+4. **fwd_velocity** (forward.py:733-756): actuator velocity (moment·qvel, 735-741), tendon velocity (743-747), `smooth.com_vel` (751), `passive.passive` (spring/damper/gravcomp/fluid → `qfrc_passive`, V-src/passive.py:1182), `smooth.rne` (Coriolis/centrifugal/gravity bias → `qfrc_bias`, smooth.py:1500), `smooth.tendon_bias` (754).
+5. **sensor_vel** (forward.py:1347).
+6. **fwd_actuation** (forward.py:1353-1356, def at 1153): actuator force/act_dot (`_actuator_force`, forward.py:757), tendon actuator clamp, `qfrc_actuator`.
+7. **fwd_acceleration** (forward.py:1357, def 1291-1324, `factorize=True`): sums `qfrc_bias/passive/actuator/applied` → `qfrc_smooth` (1300-1313), `xfrc_accumulate` (1314), then `smooth.factor_solve_i(m, d, d.M, d.qLD, ...)` — the mass-matrix factorization + solve producing `qacc_smooth` (1321-1322).
+8. **solver.solve** (forward.py:1359; V-src/solver.py:3936-3952): the constraint solver (Newton method here) producing `d.qacc`, `qfrc_constraint` — detail in §3.
+9. **sensor_acc** (forward.py:1360).
+10. **Integrator** (forward.py:1368-1375). This stack runs **implicitfast**: preset `integrator="implicitfast"` (flat_env_cfg.py:62,95); N's default is also implicitfast (solver_mujoco.py:5522-5523). So step dispatches `implicit(m, d)` (forward.py:1372-1373), which for IMPLICITFAST takes the elif branch (forward.py:602-610): `deriv_smooth_vel` (M − dt·∂qfrc/∂qvel in M-structure), `factor_solve_i` on the modified matrix, then `_advance` (forward.py:276-351): act advance, `qvel += dt·qacc`, quaternion-correct `qpos` integrate, ctrl history, time advance + overflow check, and **`wp.copy(d.qacc_warmstart, d.qacc)`** (forward.py:343).
+
+## 2. The shared-fwd suffix (`_mjw_eval_suffix`) and its dt-legality
+
+Full eval: `_mjw_eval` sets per-world `opt.timestep` then `self._mujoco_warp.step` (solver_mujoco_adaptive.py:1216-1229 → solver_mujoco.py:3857-3858). Suffix eval runs only `mjw.make_constraint(m, d); mjw.solve(m, d); self._mjw_suffix_integrate(m, d)` (solver_mujoco_adaptive.py:1247-1259), where `_mjw_suffix_integrate` is `mjw.euler` for EULER and `mjw.implicit` for IMPLICITFAST (1187-1190); any other integrator silently disables shared-fwd (1191-1198). It is used only for the FIRST half eval of the doubling attempt, after restoring qpos/qvel/warmstart/act from the snapshot (1328-1336); the second half eval is always full (1346). Sequential mode only — twin mode has no restore point to share across (1392-1394).
+
+**Skipped stages**: fwd_position (kinematics, contacts, CRB, tendon), sensors, fwd_velocity (bias/passive forces), fwd_actuation, fwd_acceleration (qacc_smooth). **Why dt-legal** (what actually reads `opt.timestep`):
+- `make_constraint` IS dt-dependent — the KBI impedance: `timeconst = max(timeconst, 2·dt)` under refsafe, k/b from timeconst (constraint.py:117-131, timestep read per-world e.g. constraint.py:463, 1362) — so it must rerun; it reassembles efc from the stored kinematics/contacts plus restored qpos.
+- Integrator IS dt-dependent: implicitfast builds M − dt·qDeriv (derivative.py:256, 316) and `_advance` multiplies dt into qvel/qpos/act/time (forward.py:82-131, 157-209, 244).
+- The skipped prefix is dt-free for this model class: smooth.py's only timestep reads are in flex elasticity (smooth.py:596-677 region / passive.py:596-650 `_flex_elasticity`, flex only); fwd_actuation's timestep reads are confined to DCMOTOR slew (forward.py:826-828) and actearly/next_act act-projection paths (forward.py:924-953). Residual risk: a model with DCMOTOR/actearly actuators or flex would make the "prefix is dt-independent" premise false; nothing in the adaptive solver checks for that (solver_mujoco_adaptive.py:1181-1198 gates only on integrator type).
+- Validity of reuse: the preceding full eval's integrator advanced only qpos/qvel/act/warmstart/time — derived prefix outputs in mjw_data (xpos, contacts, M/qLD, qfrc_*, qacc_smooth, actuator_moment) are untouched, and the caller restored the advanced state first (1328-1332), which is the code's basis for reusing them (behavior of `_advance`, forward.py:276-351).
+
+## 3. Cost structure
+
+**Contact/constraint scaling — capacity, not count.** Contact efc assembly launches at `dim=d.naconmax` (constraint.py:5327, 5377) or `dim=(d.naconmax, nmaxdim)` (5411, 5461, 5578, 5630) with in-kernel early-exit `if conid >= nacon_in[0]` (constraint.py:2678, 2810, 3129, 3298, 4227, 4383). Solver row kernels launch at `dim=(d.nworld, d.njmax)` (solver.py:1502, 2039, 3906, 3927) gated by `d.nefc`. So per-eval launch cost scales with naconmax/njmax capacity; arithmetic scales with actual nacon/nefc. Preset: njmax=400, nconmax=200 per world (flat_env_cfg.py:58-59); adaptive twin mode halves the primary contact share (`naconmax // self._mjw_world_replicas`, solver_mujoco.py:5219-5220, 5234-5239).
+
+**Newton solve.** `solve()` (solver.py:3936-3952) → `_solve` (3955-4011): init qacc from `d.qacc_warmstart` when warmstart enabled (`_solve_init_dof`, 3957-3962, kernel 1517-1545), `init_context`, then the iteration loop. With `m.opt.iterations != 0 and m.opt.graph_conditional` (default True, io.py:435) the loop is a `wp.capture_while(nsolving, while_body=_solver_iteration, ...)` (solver.py:3984-3993) — worlds decrement `nsolving` on convergence, hard stop when `solver_niter == opt.iterations` (`_solve_done`, solver.py:3703-3733). `_solver_iteration` (3776-3874) = `_linesearch` + `_update_constraint` + gradient/Hessian update; with Newton+pyramidal cone the incremental-H fast path is active (`_use_incremental`, solver.py:3749-3752; preset cone="pyramidal", flat_env_cfg.py:60,93).
+- `iterations`: preset leaves the cfg default **100** (I/.../mjwarp_manager_cfg.py:43); enters as `m.opt.iterations` runtime cap (solver.py:3831, 3697, 3733).
+- `ls_iterations=10` (flat_env_cfg.py:63,96): a COMPILE-TIME constant of the iterative linesearch kernel (`_linesearch_iterative_kernel(ls_iterations, ...)`, solver.py:820-833, launched at 1329).
+- `ls_parallel=True` in the preset is DEAD: removed in MJWarp 3.9.1 (V-src/types.py:900-907, io.py:3736-3737); the IsaacLab manager pops it before forwarding (I/.../mjwarp_manager.py:306-307). `_linesearch` unconditionally runs the iterative path (solver.py:1460-1515).
+
+**Warmstart flow.** Every eval reads `d.qacc_warmstart` at solve init (solver.py:3959-3961) and every eval's integrator writes it back from the converged qacc (forward.py:343). Across an attempt: snapshot saves it (solver_mujoco_adaptive.py:1287/1307, twin 1412), mid-double restore rewrites it before the half evals (1330), so the full eval's warmstart never leaks into the Richardson pair; the second half eval warm-starts from the first half's result. At the boundary decision, `_commit_or_restore` keeps the doubled-state warmstart for committed worlds and restores the pre-attempt one for rejected/stalled worlds (solver_mujoco_adaptive.py:1541-1567).
+
+## 4. Per-call allocations in the step path (graph-capture-relevant sites)
+
+- `_create_solver_context`: ~20 `wp.empty/wp.zeros` workspace arrays incl. the (nworld, nv_pad, nv_pad) Newton Hessian `h`, every `solve()` call (solver.py:64-110, called at 3951).
+- `nsolving = wp.full(shape=(1,), ...)` per `_solve` (solver.py:3983).
+- `make_constraint`: `efc_nnz = wp.empty((d.nworld,), int)` (constraint.py:4752); plus zero-copy `wp.array(ptr=...)` views (no device alloc, e.g. constraint.py:5314-5321).
+- Integrator: implicitfast branch allocates `qDeriv`, `qLD`, `qLDiagInv`, `qacc` fresh each call (forward.py:604-608); IMPLICIT allocates `qH_M`, `qacc` (582, 599); euler allocates `qacc`, `damp_deriv`, `wp.clone(d.M)`, `qLD`, `qLDiagInv` (forward.py:391-405).
+- Collision (inactive here): `create_collision_context(d.naconmax)` per call (collision_driver.py:915) and, with sleep, `wp.clone(d.body_awake)` in fwd_position (forward.py:660) — both off in this stack.
+
+These are why the adaptive conditional tier requires the `MjwStepAllocCache` shim (per-call-site buffer reuse so the step records with zero allocation nodes, solver_mujoco_adaptive.py:1152-1164, 1220-1222).
