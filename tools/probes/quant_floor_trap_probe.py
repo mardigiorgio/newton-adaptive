@@ -95,7 +95,7 @@ def main() -> int:
             key = (offset, rtol_on)
             mean_iters, iters, err = run_cell(offset, rtol_on)
             cells[key] = (mean_iters, iters, err)
-            tag = f"offset={offset:>6.0f} rtol={'on ' if floor_on else 'off'}"
+            tag = f"offset={offset:>6.0f} rtol={'on ' if rtol_on else 'off'}"
             print(f"{tag}: steady iters/boundary {mean_iters:6.2f}  max {iters.max():4d}  err {err}")
 
     base_off = cells[(0.0, False)][0]
