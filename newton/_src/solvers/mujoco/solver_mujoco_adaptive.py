@@ -183,8 +183,6 @@ def _inf_norm_state_error_kernel(
     qpos_double: wp.array2d[wp.float32],
     state_scale: wp.array2d[wp.float32],
     nq: int,
-    kd_over_m: wp.array[wp.float32],
-    dt: wp.array[wp.float32],
     qvel_double: wp.array2d[wp.float32],
     nv: int,
     rtol_over_atol: float,
@@ -204,7 +202,6 @@ def _inf_norm_state_error_kernel(
 
     max_err = float(0.0)
     has_nan = int(0)
-    h = dt[world]
     for i in range(nq):
         d = wp.abs(qpos_double[world, i] - qpos_full[world, i])
         # NaN must be flagged per component: wp.max is fmaxf on CUDA, which RETURNS THE
@@ -213,7 +210,7 @@ def _inf_norm_state_error_kernel(
         if wp.isnan(d):
             has_nan = 1
         else:
-            # Filtered error estimate (NEWTON_ADAPTIVE_FILTERED_ERR=1; kd_over_m all-zero
+            # Filtered error estimate (state_scale weighting; externally writable
             # otherwise, weight == 1): discount each coordinate by the damping factor of
             # the implicit solve, w_i = 1/(1 + h*kd_i/M_ii). Error in a fast-decaying
             # actuator mode is damped in the ESTIMATE by the same factor the integrator
@@ -228,8 +225,7 @@ def _inf_norm_state_error_kernel(
                 # estimate near tol and freeze the controller's deadband.
                 m = wp.max(wp.abs(qpos_double[world, i]), wp.abs(qpos_full[world, i]))
                 d = d / (wp.float32(1.0) + rtol_over_atol * m)
-            w = state_scale[world, i] / (wp.float32(1.0) + h * kd_over_m[i])
-            max_err = wp.max(max_err, w * d)
+            max_err = wp.max(max_err, state_scale[world, i] * d)
 
     # Full-state divergence detection: the error NORM stays position-only, but the
     # committed state includes qvel, so finiteness must be checked there too. A
@@ -252,8 +248,6 @@ def _inf_norm_state_error_indexed_kernel(
     qpos_double: wp.array2d[wp.float32],
     state_scale: wp.array2d[wp.float32],
     nq: int,
-    kd_over_m: wp.array[wp.float32],
-    dt: wp.array[wp.float32],
     qvel_double: wp.array2d[wp.float32],
     nv: int,
     idx: wp.array[wp.int32],
@@ -276,7 +270,6 @@ def _inf_norm_state_error_indexed_kernel(
 
     max_err = float(0.0)
     has_nan = int(0)
-    h = dt[world]
     for k in range(nq):
         d = wp.abs(qpos_double[world, k] - qpos_full[world, k])
         # NaN must be flagged per component: wp.max is fmaxf on CUDA, which
@@ -289,8 +282,7 @@ def _inf_norm_state_error_indexed_kernel(
                 # must stay identical (same fp operation order).
                 m = wp.max(wp.abs(qpos_double[world, k]), wp.abs(qpos_full[world, k]))
                 d = d / (wp.float32(1.0) + rtol_over_atol * m)
-            w = state_scale[world, k] / (wp.float32(1.0) + h * kd_over_m[k])
-            max_err = wp.max(max_err, w * d)
+            max_err = wp.max(max_err, state_scale[world, k] * d)
 
     for k in range(nv):
         v = qvel_double[world, k]
@@ -332,12 +324,8 @@ def _calc_adjusted_step(
     dt_max: float,
     divergence_threshold: float,
     dt_ceiling: wp.array[wp.float32],
-    ceiling_on: int,
     limited: wp.array[wp.int32],
     consec_rej: wp.array[wp.int32],
-    order_aware: int,
-    sliver_fix: int,
-    nan_guard: int,
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
 ):
@@ -358,10 +346,6 @@ def _calc_adjusted_step(
     world = wp.tid()
     e = err[world]
     step = dt[world]
-    # NOTE: ``step`` here is the post-boundary-clamp dt, so by default an accepted
-    # landing sliver rewrites ideal_dt relative to the remainder (<= 5x it),
-    # collapsing the carried dt. The Drake "artificially limited" exemption is
-    # opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1 (see the sliver branch below).
     is_diverged = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
 
     # Boundary-stalled worlds (dt clamped to 0): no-op step; accept+commit the
@@ -374,21 +358,17 @@ def _calc_adjusted_step(
 
     # At the floor we cannot subdivide any further.
     if step <= dt_min * wp.float32(1.001):
-        # With nan_guard off, a world still non-finite at the dt_min floor commits
-        # through the e > tol path below like any can't-meet-tol world; with nan_guard
-        # on (default), the guard below refuses the commit and latches `diverged`.
         if e > tol:
             accepted[world] = True
             ideal_dt[world] = dt_min
             consec_rej[world] = 0
-            # NaN guard (NEWTON_ADAPTIVE_NAN_GUARD=1, default): never commit a non-finite
-            # state at the floor -- hold the last-good (finite) state, freeze this world
-            # to its frame boundary, and latch `diverged` so env-side terminations can
-            # reset it. Only genuine non-finiteness (or the error kernel's divergence
-            # sentinel) triggers this: a large-but-finite error is a legitimately hard
-            # step, not a blow-up, and the constraint solve already runs at MuJoCo's
-            # default 1e-8 residual tolerance rather than leaning on a heuristic bound.
-            if nan_guard == 1 and (wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold):
+            # NaN guard: never commit a non-finite state at the floor -- hold
+            # the last-good (finite) state, freeze this world to its frame
+            # boundary, and latch `diverged` so env-side terminations can
+            # reset it. Only genuine non-finiteness (or the error kernel's
+            # divergence sentinel) triggers this: a large-but-finite error is
+            # a legitimately hard step, not a blow-up.
+            if wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold:
                 commit[world] = False
                 diverged[world] = True
                 sim_time[world] = next_time[world]
@@ -402,20 +382,12 @@ def _calc_adjusted_step(
     if is_diverged:
         accepted[world] = False
         commit[world] = False
-        if ceiling_on == 1:
-            dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
+        dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
         ideal_dt[world] = _DRAKE_MIN_SHRINK * step
         consec_rej[world] = consec_rej[world] + 1
         return
 
     new_step = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
-
-    # Order-aware rejection sizing (NEWTON_ADAPTIVE_ORDER_AWARE=1): from the second
-    # consecutive rejection onward, size with the FIRST-order rule (tol/e) instead of
-    # the step-doubling sqrt (which assumes order 2 and can overshoot in rejection
-    # cascades where the effective local order is lower, e.g. contact events).
-    if order_aware == 1 and e > tol and consec_rej[world] >= 1:
-        new_step = _DRAKE_SAFETY * step * (tol / wp.max(e, wp.float32(1.0e-30)))
 
     # Symmetric deadband: keep dt unchanged when new_step lands
     # in [k_Low * dt, k_High * dt]. Prevents dt thrash from small error spikes
@@ -430,20 +402,18 @@ def _calc_adjusted_step(
     commit[world] = acc
     if acc:
         consec_rej[world] = 0
-        # Sliver exemption (NEWTON_ADAPTIVE_SLIVER_FIX=1): an accepted step that was
-        # artificially shortened by the boundary clamp says nothing about the error-limited
-        # step size, so keep the carried ideal_dt instead of collapsing it to ~the sliver
-        # (Drake's artificially-limited rule). It also carries no ceiling information.
-        if sliver_fix == 1 and limited[world] == 1:
+        # Sliver exemption: an accepted step that was artificially shortened
+        # by the boundary clamp says nothing about the error-limited step
+        # size, so keep the carried ideal_dt instead of collapsing it to ~the
+        # sliver (Drake's artificially-limited rule). It also carries no
+        # ceiling information.
+        if limited[world] == 1:
             return
-        if ceiling_on == 1:
-            dt_ceiling[world] = wp.min(dt_ceiling[world] * _CEILING_RELAX, dt_max)
+        dt_ceiling[world] = wp.min(dt_ceiling[world] * _CEILING_RELAX, dt_max)
     else:
-        if ceiling_on == 1:
-            dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
+        dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
         consec_rej[world] = consec_rej[world] + 1
-    if ceiling_on == 1:
-        new_step = wp.min(new_step, dt_ceiling[world])
+    new_step = wp.min(new_step, dt_ceiling[world])
     ideal_dt[world] = new_step
 
 
@@ -735,7 +705,7 @@ def _clamp_dt_to_boundary(
     Worlds already at or past the boundary get dt=0 (no-op step). ``limited[i]=1``
     marks a step artificially shortened by the boundary (a "landing sliver"), so the
     controller can exempt it from step-size resizing (Drake's artificially-limited
-    rule, opt-in via NEWTON_ADAPTIVE_SLIVER_FIX=1).
+    rule, always on).
     """
     i = wp.tid()
     remaining = next_time[i] - sim_time[i]
@@ -985,19 +955,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # opt-in fix switches (baked into the captured graph at construction).
         self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
         self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
-        # Ceiling memory (NEWTON_ADAPTIVE_DT_CEILING=1, default on): per-world upper
+        # Ceiling memory (always on): per-world upper
         # bound on growth, recorded at rejections, relaxed on accepts. Init above any
         # reachable dt so it never binds until a rejection writes it.
         _ceiling_init = self._dt_max if self._dt_max != float("inf") else 1.0e6
         self._dt_ceiling = wp.full(world_count, wp.float32(_ceiling_init), dtype=wp.float32, device=device)
-        self._ceiling_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_DT_CEILING", "1") == "1" else 0
-        self._order_aware_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ORDER_AWARE", "0") == "1" else 0
-        self._sliver_fix_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_SLIVER_FIX", "0") == "1" else 0
         # Non-finite (or catastrophic) state at the dt floor: NEVER commit it. Hold
         # the last valid state for this ONE frame and latch ``diverged``; the env
         # consumes the latch as a termination and resets the world the same step.
-        # NEWTON_ADAPTIVE_NAN_GUARD=0 restores the legacy commit-anyway behavior.
-        self._nan_guard_flag = 0 if os.environ.get("NEWTON_ADAPTIVE_NAN_GUARD", "1") == "0" else 1
         # Non-resetting cumulative boundary-loop iteration count (NOT zeroed per
         # step_dt, unlike _iteration_count_buf). Each iteration runs the 3-eval
         # step-doubling attempt, so total MuJoCo opt-steps = iterations * 3, and
@@ -1017,11 +982,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Opt-in truncation guard (see _debt_guard). Off until validated.
         self._dt_init = float(dt_inner_init)
         self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
-        self._debt_guard_flag = os.environ.get("NEWTON_ADAPTIVE_DEBT_GUARD", "0") == "1"
         # Opt-in mixed-tolerance normalization: accept test becomes
         # |d| <= atol + rtol*|q| with atol = tol. Zero disables (bit-identical
         # legacy path).
-        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "0") or 0.0)
+        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "2e-6") or 0.0)
         self._err_rtol_over_atol = self._err_rtol / self._tol if self._err_rtol > 0.0 else 0.0
 
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
@@ -1090,26 +1054,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=device,
         )
 
-        # Filtered error estimate (NEWTON_ADAPTIVE_FILTERED_ERR=1): per-qpos-coordinate
-        # damping rate kd_i/M_ii [1/s] for the estimate filter w = 1/(1 + h*kd/M) in the
-        # error kernel. kd = joint damping + implicit-actuator kv (affine bias, biasprm[2]);
-        # M_ii from dof_M0 (reference-pose inertia diagonal — configuration dependence is
-        # second-order for a filter). Hinge/slide coords only; ball/free coords get 0
-        # (weight 1, full sensitivity). All-zero when the flag is off => weight exactly 1.
-        kd_over_m = np.zeros(self._nq, dtype=np.float32)
-        if os.environ.get("NEWTON_ADAPTIVE_FILTERED_ERR", "0") == "1":
-            mjm = self.mj_model
-            dof_kd = np.array(mjm.dof_damping, dtype=np.float64).copy()
-            for a in range(mjm.nu):
-                if mjm.actuator_trntype[a] == 0 and mjm.actuator_biastype[a] == 1:  # joint, affine
-                    j = mjm.actuator_trnid[a, 0]
-                    dof_kd[mjm.jnt_dofadr[j]] += -float(mjm.actuator_biasprm[a, 2])
-            m0 = np.maximum(np.array(mjm.dof_M0, dtype=np.float64), 1e-12)
-            for j in range(mjm.njnt):
-                if mjm.jnt_type[j] in (2, 3):  # slide, hinge: one dof, one qpos coord
-                    kd_over_m[mjm.jnt_qposadr[j]] = dof_kd[mjm.jnt_dofadr[j]] / m0[mjm.jnt_dofadr[j]]
-        self._kd_over_m = wp.array(kd_over_m, dtype=wp.float32, device=device)
-
         # ---- injected-contact refresh ----
         # With use_newton_contacts, the boundary call converts the CollisionPipeline
         # contacts ONCE with boundary-entry transforms. The inner march must NOT reuse
@@ -1119,10 +1063,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # cancels in the comparison). So dist/pos are re-anchored to the CURRENT
         # marching state at every iteration via the conversion kernel's fast path
         # (frame/solref/friction stay from the boundary full pass).
-        # NEWTON_ADAPTIVE_NO_CONTACT_REFRESH=1 restores the frozen behavior.
-        self._contact_refresh_enabled = self._use_newton_contacts and (
-            os.environ.get("NEWTON_ADAPTIVE_NO_CONTACT_REFRESH", "0") != "1"
-        )
+        self._contact_refresh_enabled = self._use_newton_contacts
         self._refresh_state = self.model.state() if self._contact_refresh_enabled else None
         self._refresh_contacts = None
         self._refresh_contacts_key = None
@@ -1508,8 +1449,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     self.mjw_data.qpos,
                     self._state_scale,
                     self._nq,
-                    self._kd_over_m,
-                    self._dt,
                     self.mjw_data.qvel,
                     self._nv,
                     self._active_idx,
@@ -1529,8 +1468,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self.mjw_data.qpos,
                 self._state_scale,
                 self._nq,
-                self._kd_over_m,
-                self._dt,
                 self.mjw_data.qvel,
                 self._nv,
                 self._err_rtol_over_atol,
@@ -1736,12 +1673,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._dt_max if self._dt_max != float("inf") else 1.0e6,
                 self._divergence_threshold,
                 self._dt_ceiling,
-                self._ceiling_flag,
                 self._limited,
                 self._consec_rej,
-                self._order_aware_flag,
-                self._sliver_fix_flag,
-                self._nan_guard_flag,
                 self._sim_time,
                 self._next_time,
             ],
@@ -1878,8 +1811,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._boundary_flag.fill_(1)
             if self._march_log_path is not None:
                 self._reject_count_buf.fill_(0)
-            if self._debt_guard_flag:
-                self._guard_hits.fill_(0)
+            self._guard_hits.fill_(0)
             if self._tail_compact:
                 # Every world starts the boundary active; the fill also forces
                 # the first iteration's snapshot set to cover all worlds, so
@@ -1905,23 +1837,22 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
             # Bound truncation damage BEFORE the next boundary consumes the
             # carried state; device-only work, legal graphs on or off.
-            if self._debt_guard_flag:
-                wp.launch(
-                    _debt_guard,
-                    dim=n,
-                    inputs=[
-                        self._sim_time,
-                        self._next_time,
-                        dt_outer,
-                        self._dt_init,
-                        self._dt_max if self._dt_max != float("inf") else 1.0e6,
-                        self._ideal_dt,
-                        self._dt_ceiling,
-                        self._consec_rej,
-                        self._guard_hits,
-                    ],
-                    device=device,
-                )
+            wp.launch(
+                _debt_guard,
+                dim=n,
+                inputs=[
+                    self._sim_time,
+                    self._next_time,
+                    dt_outer,
+                    self._dt_init,
+                    self._dt_max if self._dt_max != float("inf") else 1.0e6,
+                    self._ideal_dt,
+                    self._dt_ceiling,
+                    self._consec_rej,
+                    self._guard_hits,
+                ],
+                device=device,
+            )
 
             # Opt-in telemetry readout: host reads of post-march state, which
             # are only legal outside an active capture -- hence gated, never
@@ -1972,7 +1903,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         ncon = int(self.mjw_data.nacon.numpy()[0])
         n_debt = int((resid > 0.0).sum())
         n_subfloor = int((ideal < self._dt_min).sum())
-        n_guard = int(self._guard_hits.numpy()[0]) if self._debt_guard_flag else 0
+        n_guard = int(self._guard_hits.numpy()[0])
         self._march_log_file.write(
             f"{self._march_log_boundary},{iters},{cum},"
             f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"

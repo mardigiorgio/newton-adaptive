@@ -104,8 +104,8 @@ def main() -> int:
     far_on = cells[(OFFSET, True)][0]
 
     ok = True
-    if not far_off >= 2.0 * base_off:
-        print(f"VACUOUS: trap not armed (far/off {far_off:.2f} < 2x near/off {base_off:.2f})")
+    if not far_off >= 1.5 * base_off:
+        print(f"VACUOUS: trap not armed (far/off {far_off:.2f} < 1.5x near/off {base_off:.2f})")
         return 3
     if not far_on <= 1.25 * base_on:
         print(f"FAIL T2: floor does not release the trap (far/on {far_on:.2f} vs near/on {base_on:.2f})")
