@@ -447,6 +447,45 @@ def _advance_sim_time(
 
 
 @wp.kernel
+def _count_rejects(accepted: wp.array[wp.bool], rejects: wp.array[wp.int32]):
+    """Accumulate this iteration's rejected attempts (diagnostic only)."""
+    i = wp.tid()
+    if not accepted[i]:
+        wp.atomic_add(rejects, 0, 1)
+
+
+@wp.kernel
+def _debt_guard(
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt_outer: float,
+    dt_init: float,
+    ceiling_init: float,
+    ideal_dt: wp.array[wp.float32],
+    dt_ceiling: wp.array[wp.float32],
+    consec_rej: wp.array[wp.int32],
+    guard_hits: wp.array[wp.int32],
+):
+    """Bound the damage of a truncated boundary.
+
+    A world that cannot land within max_substeps would otherwise carry
+    unbounded time debt and a collapsed controller into every later
+    boundary: the debt compounds and recovery never outruns it. Cap the
+    carried debt at one boundary and reissue a fresh controller so the
+    next boundary attacks the shortfall at full growth.
+    """
+    i = wp.tid()
+    if sim_time[i] < next_time[i]:
+        floor_t = next_time[i] - dt_outer
+        if sim_time[i] < floor_t:
+            sim_time[i] = floor_t
+        ideal_dt[i] = dt_init
+        dt_ceiling[i] = ceiling_init
+        consec_rej[i] = 0
+        wp.atomic_add(guard_hits, 0, 1)
+
+
+@wp.kernel
 def _reset_worlds(
     mask: wp.array[wp.bool],
     dt_init: float,
@@ -957,6 +996,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._march_log_file = None
         self._march_log_boundary = 0
         self._march_log_hist_every = int(os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG_EVERY", "48"))
+        self._reject_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # Opt-in truncation guard (see _debt_guard). Off until validated.
+        self._dt_init = float(dt_inner_init)
+        self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
+        self._debt_guard_flag = os.environ.get("NEWTON_ADAPTIVE_DEBT_GUARD", "0") == "1"
 
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
         # iteration body. int64 because a long run at 4096 worlds overflows int32.
@@ -1679,6 +1724,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             ],
             device=dev,
         )
+        if self._march_log_path is not None:
+            wp.launch(_count_rejects, dim=n, inputs=[self._accepted, self._reject_count_buf], device=dev)
 
         # Rejected worlds roll back to the snapshot; committed worlds keep the doubled state.
         self._commit_or_restore()
@@ -1806,6 +1853,10 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
 
             self._iteration_count_buf.fill_(0)
             self._boundary_flag.fill_(1)
+            if self._march_log_path is not None:
+                self._reject_count_buf.fill_(0)
+            if self._debt_guard_flag:
+                self._guard_hits.fill_(0)
             if self._tail_compact:
                 # Every world starts the boundary active; the fill also forces
                 # the first iteration's snapshot set to cover all worlds, so
@@ -1829,9 +1880,30 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     device=device,
                 )
 
+            # Bound truncation damage BEFORE the next boundary consumes the
+            # carried state; device-only work, legal graphs on or off.
+            if self._debt_guard_flag:
+                wp.launch(
+                    _debt_guard,
+                    dim=n,
+                    inputs=[
+                        self._sim_time,
+                        self._next_time,
+                        dt_outer,
+                        self._dt_init,
+                        self._dt_max if self._dt_max != float("inf") else 1.0e6,
+                        self._ideal_dt,
+                        self._dt_ceiling,
+                        self._consec_rej,
+                        self._guard_hits,
+                    ],
+                    device=device,
+                )
+
             # Opt-in telemetry readout: host reads of post-march state, which
             # are only legal outside an active capture -- hence gated, never
-            # unconditional.
+            # unconditional. Runs after the guard, so resid reflects the
+            # bounded carry while n_guard reports the worlds it touched.
             if self._march_log_path is not None:
                 self._log_march_boundary()
 
@@ -1855,15 +1927,24 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         if self._march_log_file is None:
             # Line-buffered so a killed run keeps its tail.
             self._march_log_file = open(self._march_log_path, "a", buffering=1)
-            self._march_log_file.write("boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,resid_min,resid_max\n")
+            self._march_log_file.write(
+                "boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,"
+                "resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard\n"
+            )
         iters = int(self._iteration_count_buf.numpy()[0])
         cum = int(self._cum_iters.numpy()[0])
         ideal = self._ideal_dt.numpy()
         resid = self._next_time.numpy() - self._sim_time.numpy()
+        rejects = int(self._reject_count_buf.numpy()[0])
+        err_max = float(self._last_error.numpy().max())
+        n_debt = int((resid > 0.0).sum())
+        n_subfloor = int((ideal < self._dt_min).sum())
+        n_guard = int(self._guard_hits.numpy()[0]) if self._debt_guard_flag else 0
         self._march_log_file.write(
             f"{self._march_log_boundary},{iters},{cum},"
             f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"
-            f"{resid.min():.6e},{resid.max():.6e}\n"
+            f"{resid.min():.6e},{resid.max():.6e},"
+            f"{rejects},{err_max:.6e},{n_debt},{n_subfloor},{n_guard}\n"
         )
         self._march_log_boundary += 1
         if self._dt_hist is not None and self._march_log_boundary % self._march_log_hist_every == 0:
