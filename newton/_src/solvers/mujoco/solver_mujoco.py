@@ -3751,6 +3751,14 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                     )
         if separate_worlds is None:
             separate_worlds = not use_mujoco_cpu and model.world_count > 1
+        # World replication factor for the MJWarp DATA segment: mjw_data is built
+        # with nworld * replicas worlds while every Newton-side mapping and model
+        # field stays sized for the primary worlds (mjw model fields broadcast via
+        # field[worldid % shape[0]]). A subclass that needs extra data-only worlds
+        # (e.g. the adaptive solver's twin-evaluation rows) sets this attribute
+        # BEFORE calling super().__init__(); the default of 1 leaves every derived
+        # dimension exactly as before.
+        self._mjw_world_replicas = int(getattr(self, "_mjw_world_replicas", 1))
         # Buffers for the fast-path contact conversion optimisation.
         # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
         # Initialised before _convert_to_mjc because notify_model_changed (called
@@ -3994,8 +4002,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         buffer_dim = max(buffer.shape[1] for buffer in buffers)
         wp.launch(
             reset_world_buffers_kernel,
+            # Launch over ALL data worlds (replica rows clear with their primary:
+            # the mask is primary-sized and indexed modulo the primary count).
             dim=(d.nworld, buffer_dim),
-            inputs=[world_mask, *buffers],
+            inputs=[world_mask, d.nworld // self._mjw_world_replicas, *buffers],
             device=self.model.device,
         )
         if self.enable_sleeping:
@@ -4613,9 +4623,13 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         """
         if self.mj_model.ngeom == 0:
             return
+        # The kernel indexes primary-sized model fields per world, so it must
+        # launch over the primary worlds only; the written xposes are data-side
+        # rows, so replica worlds receive them via the mirror below.
+        nworld = self.mjw_data.nworld // self._mjw_world_replicas
         wp.launch(
             sync_worldbody_geom_xposes_kernel,
-            dim=(self.mjw_data.nworld, self.mj_model.ngeom),
+            dim=(nworld, self.mj_model.ngeom),
             inputs=[
                 self.mjw_model.geom_bodyid,
                 self.mjw_model.geom_pos,
@@ -4627,14 +4641,20 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.geom_xpos, self.mjw_data.geom_xmat)
 
     def _sync_site_xposes(self) -> None:
         """Refresh derived site poses after per-world model updates."""
         if self.mj_model.nsite == 0:
             return
+        # Primary-world launch + replica mirror: same constraint as
+        # _sync_worldbody_geom_xposes (model fields are primary-sized, the
+        # outputs are data-side rows).
+        nworld = self.mjw_data.nworld // self._mjw_world_replicas
         wp.launch(
             sync_site_xposes_kernel,
-            dim=(self.mjw_data.nworld, self.mj_model.nsite),
+            dim=(nworld, self.mj_model.nsite),
             inputs=[
                 self.mjw_model.site_bodyid,
                 self.mjw_model.site_pos,
@@ -4648,6 +4668,18 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.site_xpos, self.mjw_data.site_xmat)
+
+    def _mirror_data_rows_to_replicas(self, *arrays: wp.array) -> None:
+        """Copy the primary-world rows of data-side arrays into every replica
+        world's rows, so replica worlds see the same derived data the primary
+        sync kernels produced. Runs outside any CUDA-graph capture (construction
+        / notify_model_changed time)."""
+        nworld = self.mjw_data.nworld // self._mjw_world_replicas
+        for arr in arrays:
+            for r in range(1, self._mjw_world_replicas):
+                wp.copy(arr[r * nworld : (r + 1) * nworld], arr[0:nworld])
 
     def _create_inverse_shape_mapping(self):
         """
@@ -4688,7 +4720,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ctrl = mj_data.ctrl
             qfrc = mj_data.qfrc_applied
             xfrc = mj_data.xfrc_applied
-            nworld = mj_data.nworld
+            # Primary worlds only: replica rows are data-only scratch and must not
+            # affect per-world divisors or Newton-facing launch dims.
+            nworld = mj_data.nworld // self._mjw_world_replicas
         else:
             effective_dof_count = model.joint_dof_count - self._total_loop_joint_dofs
             single_world_template = len(mj_data.qfrc_applied) < effective_dof_count
@@ -4816,7 +4850,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # we have an MjWarp Data object
             qpos = mj_data.qpos
             qvel = mj_data.qvel
-            nworld = mj_data.nworld
+            # Primary worlds only: replica rows are data-only scratch and must not
+            # affect per-world divisors or Newton-facing launch dims.
+            nworld = mj_data.nworld // self._mjw_world_replicas
         else:
             # we have an MjData object from Mujoco
             effective_coord_count = model.joint_coord_count - self._total_loop_joint_coords
@@ -4913,7 +4949,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # we have an MjWarp Data object
             qpos = mj_data.qpos
             qvel = mj_data.qvel
-            nworld = mj_data.nworld
+            # Primary worlds only: replica rows are data-only scratch and must not
+            # affect per-world divisors or Newton-facing launch dims.
+            nworld = mj_data.nworld // self._mjw_world_replicas
         else:
             # we have an MjData object from Mujoco
             effective_coord_count = model.joint_coord_count - self._total_loop_joint_coords
@@ -5177,7 +5215,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         """Return the maximum number of rigid contacts that can be generated by MuJoCo."""
         if self.use_mujoco_cpu:
             raise NotImplementedError()
-        return self.mjw_data.naconmax
+        # Replica worlds are data-only scratch: the Newton-facing contact
+        # capacity is the primary worlds' share of naconmax.
+        return self.mjw_data.naconmax // self._mjw_world_replicas
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
@@ -5191,11 +5231,12 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         mj_data = self.mjw_data
         mj_contact = mj_data.contact
 
-        if mj_data.naconmax > contacts.rigid_contact_max:
+        primary_naconmax = mj_data.naconmax // self._mjw_world_replicas
+        if primary_naconmax > contacts.rigid_contact_max:
             raise ValueError(
-                f"MuJoCo naconmax ({mj_data.naconmax}) exceeds contacts.rigid_contact_max "
+                f"MuJoCo naconmax ({primary_naconmax}) exceeds contacts.rigid_contact_max "
                 f"({contacts.rigid_contact_max}). Create Contacts with at least "
-                f"rigid_contact_max={mj_data.naconmax}."
+                f"rigid_contact_max={primary_naconmax}."
             )
 
         wp.launch(
@@ -5203,6 +5244,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             dim=mj_data.naconmax,
             inputs=[
                 self.mjc_geom_to_newton_shape,
+                mj_data.nworld // self._mjw_world_replicas,
                 self.mjw_model.opt.cone,
                 mj_data.nacon,
                 mj_contact.pos,
@@ -7478,10 +7520,14 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         f"nvmax={nvmax} is too small: the initial state has {minimum_nvmax} awake degrees of freedom."
                     )
 
+            # The data segment carries replicas * nworld worlds (extra rows are
+            # data-only: model fields and mappings stay primary-sized and reach
+            # the replica rows through mjw's modulo world indexing). nconmax is
+            # per-world, so naconmax scales with the replicated world count.
             self.mjw_data = mujoco_warp.put_data(
                 self.mj_model,
                 self.mj_data,
-                nworld=nworld,
+                nworld=nworld * self._mjw_world_replicas,
                 nconmax=nconmax,
                 njmax=njmax,
                 nvmax=nvmax,
@@ -8032,6 +8078,12 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 ],
                 device=self.model.device,
             )
+            # The mapping is primary-sized, so the launch covers primary worlds
+            # only; mocap_pos/mocap_quat are data-side rows that mjw indexes
+            # directly by world (no modulo broadcast), so replica worlds must
+            # receive the same poses via the mirror.
+            if self._mjw_world_replicas > 1:
+                self._mirror_data_rows_to_replicas(self.mjw_data.mocap_pos, self.mjw_data.mocap_quat)
 
         # Update joint positions, joint axes, and relative body transforms
         # Iterates over MuJoCo joints [world, jnt]
@@ -8523,7 +8575,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
         wp.launch(
             update_site_properties_kernel,
-            dim=(self.mjw_data.nworld, self.mj_model.nsite),
+            # Model fields are primary-sized; replica worlds broadcast via modulo.
+            dim=(self.mjw_data.nworld // self._mjw_world_replicas, self.mj_model.nsite),
             inputs=[
                 self.model.shape_transform,
                 self.model.shape_scale,
@@ -8761,7 +8814,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             else:
                 pairs_per_world = npair
 
-            world_count = self.mjw_data.nworld
+            # Model fields are primary-sized; replica worlds broadcast via modulo.
+            world_count = self.mjw_data.nworld // self._mjw_world_replicas
 
             wp.launch(
                 update_pair_properties_kernel,
@@ -8794,7 +8848,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             if hasattr(self, "mjw_data"):
                 wp.launch(
                     kernel=update_model_properties_kernel,
-                    dim=self.mjw_data.nworld,
+                    # Model fields are primary-sized; replicas broadcast via modulo.
+                    dim=self.mjw_data.nworld // self._mjw_world_replicas,
                     inputs=[
                         self.model.gravity,
                     ],
@@ -8869,6 +8924,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        # eq_data is model-side (replica worlds reach it through mjw's modulo
+        # broadcast) but eq_active is data-side and indexed directly by world,
+        # so replica rows need the mirror to solve the same constraint set.
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.eq_active)
 
     def _update_mimic_eq_properties(self):
         """Update mimic constraint properties in the MuJoCo model.
@@ -8905,6 +8965,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+        # Same constraint as _update_eq_properties: eq_active is data-side and
+        # indexed directly by world, so replica rows need the mirror.
+        if self._mjw_world_replicas > 1:
+            self._mirror_data_rows_to_replicas(self.mjw_data.eq_active)
 
     def _update_tendon_properties(self):
         """Update fixed tendon properties in the MuJoCo model.

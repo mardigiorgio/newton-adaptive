@@ -756,6 +756,68 @@ def _snapshot_nacon_count(
 
 
 @wp.kernel
+def duplicate_contact_rows_for_twins_kernel(
+    last_nacon: wp.array[wp.int32],
+    nworld: int,
+    naconmax: int,
+    contact_dist: wp.array[float],
+    contact_pos: wp.array[wp.vec3],
+    contact_frame: wp.array[wp.mat33],
+    contact_includemargin: wp.array[float],
+    contact_friction: wp.array[vec5],
+    contact_solref: wp.array[wp.vec2],
+    contact_solreffriction: wp.array[wp.vec2],
+    contact_solimp: wp.array[vec5],
+    contact_dim: wp.array[int],
+    contact_geom: wp.array[wp.vec2i],
+    contact_efc_address: wp.array2d[int],
+    contact_worldid: wp.array[int],
+    nacon: wp.array[wp.int32],
+    overflow: wp.array[wp.int32],
+):
+    """Append a twin-world copy of every injected contact row.
+
+    MJWarp's constraint assembly contributes a contact row only to the world
+    stored in its ``worldid``, so twin worlds (rows ``nworld .. 2*nworld``) need
+    their own rows to see the same contact set as their primaries. Row ``r`` is
+    copied to row ``n0 + r`` (``n0`` = primary count latched by
+    ``_snapshot_nacon_count``, which must have run first so the latch keeps its
+    primary-count meaning), preserving per-world relative row order so twin
+    worlds assemble constraints in the same order as their primaries.
+    ``efc_address`` is reset the same way the conversion kernel resets it for
+    primary rows. Must be launched with a fixed dim covering every possible
+    primary row (graph-capture safe: the live count is read on device).
+    """
+    r = wp.tid()
+    n0 = last_nacon[0]
+    if r == 0:
+        # The total row count the eval sees; clamped so an overfull primary set
+        # never indexes past capacity.
+        nacon[0] = wp.min(2 * n0, naconmax)
+    if r >= n0:
+        return
+    t = n0 + r
+    if t >= naconmax:
+        # Latch instead of corrupting: the twin set is incomplete only when the
+        # primary count exceeds half of naconmax.
+        overflow[0] = 1
+        return
+    contact_dist[t] = contact_dist[r]
+    contact_pos[t] = contact_pos[r]
+    contact_frame[t] = contact_frame[r]
+    contact_includemargin[t] = contact_includemargin[r]
+    contact_friction[t] = contact_friction[r]
+    contact_solref[t] = contact_solref[r]
+    contact_solreffriction[t] = contact_solreffriction[r]
+    contact_solimp[t] = contact_solimp[r]
+    contact_dim[t] = contact_dim[r]
+    contact_geom[t] = contact_geom[r]
+    for i in range(contact_efc_address.shape[1]):
+        contact_efc_address[t, i] = -1
+    contact_worldid[t] = contact_worldid[r] + nworld
+
+
+@wp.kernel
 def convert_mj_coords_to_warp_kernel(
     qpos: wp.array2d[wp.float32],
     qvel: wp.array2d[wp.float32],
@@ -1451,6 +1513,7 @@ def create_convert_mjw_contacts_to_newton_kernel():
     def convert_mjw_contacts_to_newton_kernel(
         # inputs
         mjc_geom_to_newton_shape: wp.array2d[wp.int32],
+        nworld_primary: int,
         mj_opt_cone: int,
         mj_nacon: wp.array[wp.int32],
         mj_contact_pos: wp.array[wp.vec3],
@@ -1491,6 +1554,10 @@ def create_convert_mjw_contacts_to_newton_kernel():
             return
 
         world = mj_contact_worldid[contact_idx]
+        # Rows belonging to replica (data-only) worlds have no Newton-side
+        # shape mapping; skip them.
+        if world >= nworld_primary:
+            return
         geoms_mjw = mj_contact_geom[contact_idx]
 
         normal = mj_contact_frame[contact_idx][0]
@@ -3178,6 +3245,7 @@ def update_pair_properties_kernel(
 @wp.kernel(enable_backward=False)
 def reset_world_buffers_kernel(
     world_mask: wp.array[wp.bool],
+    nworld_primary: int,
     qacc_warmstart: wp.array2d[wp.float32],
     qfrc_applied: wp.array2d[wp.float32],
     ctrl: wp.array2d[wp.float32],
@@ -3191,9 +3259,13 @@ def reset_world_buffers_kernel(
     is guarded by its own column count. ``qacc_warmstart`` and ``qfrc_applied``
     share the DOF dimension. ``qacc`` is intentionally omitted: the solver
     overwrites it from ``qacc_warmstart`` at the start of every step.
+
+    ``world_mask`` is sized for the primary worlds; when the data segment
+    carries replica worlds beyond ``nworld_primary``, each replica row clears
+    together with its primary via the modulo index.
     """
     worldid, i = wp.tid()
-    if world_mask and not world_mask[worldid]:
+    if world_mask and not world_mask[worldid % nworld_primary]:
         return
     if i < qacc_warmstart.shape[1]:
         qacc_warmstart[worldid, i] = 0.0
