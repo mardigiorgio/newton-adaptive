@@ -1,8 +1,8 @@
 """Flag-equivalence probe for the adaptive march's batched-scheduling flags.
 
 Oracle argument (why this is not a tautology or a snapshot):
-    NEWTON_ADAPTIVE_TWIN_EVAL and NEWTON_ADAPTIVE_TAIL_COMPACT are SCHEDULING
-    changes, not numerical ones: the same physics kernels must run on the same
+    NEWTON_ADAPTIVE_TAIL_COMPACT is a SCHEDULING
+    change, not a numerical one: the same physics kernels must run on the same
     per-world inputs in a different batching. The correct output of a flag-on
     run is therefore exactly computable by an independent route -- the flag-off
     run of the identical scenario -- executed in the SAME process, same build,
@@ -22,8 +22,7 @@ Assertion tiers:
        needing >= 2 iterations -- dt is seeded at the cap there, so a second
        attempt can only follow a rejection; later boundaries cannot certify
        one because accepted steps also rewrite ideal_dt), the per-world dt
-       diverging across worlds, twin runs showing the 2N-world data layout,
-       and compaction runs ending some boundary with fewer active worlds than
+       diverging across worlds, and compaction runs ending some boundary with fewer active worlds than
        N (the ragged tail actually engaged -- otherwise the compacted and full
        paths run identical work and the compaction arms prove nothing). A
        probe that cannot fail is not a test.
@@ -34,7 +33,7 @@ Assertion tiers:
        reference bitwise on every recorded field. Compaction-only is STRICT:
        it changes no mjw launch and, by construction, no fp operation order
        (every compacted kernel writes world-private rows), so any mismatch is
-       a real bug, full stop. For twin-bearing configurations a mismatch is
+       a real bug, full stop. A mismatch is
        printed as the first divergent (boundary, field, world, element) with
        hex bit patterns and ulp distance -- triage data, not a tolerance:
        whether ulp-level drift is acceptable is decided with the owner, not
@@ -59,13 +58,6 @@ Excluded by design: _last_error, _accepted_error, _accepted, _commit --
     before either value can reach a decision.
 
 Residual risk (what a clean pass does NOT establish):
-    * Twin mode changes every mjw launch geometry (nworld = 2N), so on GPU the
-      atomic-arrival order in contact-cid assignment and per-world efc row
-      assembly can reorder floating-point reductions inside the constraint
-      solve, producing ulp drift that may flip accept/reject near tolerance.
-      A CPU pass (sequential launches) does not cover this; a GPU pass covers
-      only the tested arch. If twin fails bitwise while the repeat run passes,
-      the drift is real and the fallback criterion needs the owner's sign-off.
     * The Drake controller quantizes its output: the hysteresis deadband maps
       any new_step inside [k_Low*dt, k_High*dt] to dt, and the MIN_SHRINK /
       MAX_GROW clamps saturate outside it. An error-estimate corruption whose
@@ -78,10 +70,9 @@ Residual risk (what a clean pass does NOT establish):
     * The benign scene never reaches the dt floor, the NaN guard, the
       divergence sentinel, the ceiling knee, or max_substeps truncation; those
       paths stay unexercised.
-    * The scene has no actuators: nu == 0 and na == 0, so ctrl mirroring and
-      the act snapshot/seed path in twin mode are untested here.
-    * Equality of the recorded fields does not check twin-row contents
-      (expected garbage by construction) nor telemetry excluded above.
+    * The scene has no actuators: nu == 0 and na == 0, so the act
+      snapshot/seed path is untested here.
+    * Equality of the recorded fields does not check telemetry excluded above.
     * Compaction builds its index lists with atomics; the equality claim rests
       on every consumer writing world-private rows only. A CPU pass runs the
       list build sequentially, so GPU atomic-arrival patterns in the build
@@ -126,16 +117,11 @@ FORCE_SCALE = 0.5  # [N] / [N*m]; sized so ~0.2 kg boxes see O(g) accelerations
 # The flags the march must be invariant to, singly and combined. The repeat
 # run guards the oracle; the feature arms follow in strictness order
 # (compaction changes no mjw launch, so it is judged strictly first).
-ALL_FLAGS = ("NEWTON_ADAPTIVE_TWIN_EVAL", "NEWTON_ADAPTIVE_TAIL_COMPACT")
+ALL_FLAGS = ("NEWTON_ADAPTIVE_TAIL_COMPACT",)
 CONFIGS: list[tuple[str, dict[str, str]]] = [
     ("reference", {}),
     ("reference-repeat", {}),
     ("compact", {"NEWTON_ADAPTIVE_TAIL_COMPACT": "1"}),
-    ("twin", {"NEWTON_ADAPTIVE_TWIN_EVAL": "1"}),
-    (
-        "twin+compact",
-        {"NEWTON_ADAPTIVE_TWIN_EVAL": "1", "NEWTON_ADAPTIVE_TAIL_COMPACT": "1"},
-    ),
 ]
 
 
@@ -189,14 +175,7 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
         njmax=128,
         use_newton_contacts=True,
     )
-    twin_on = env.get("NEWTON_ADAPTIVE_TWIN_EVAL") == "1"
     compact_on = env.get("NEWTON_ADAPTIVE_TAIL_COMPACT") == "1"
-    if twin_on:
-        # Feature-armed vacuity guard: if the flag silently stopped reaching
-        # construction (e.g. someone moves the read to import time), this run
-        # would silently equal the reference and the probe would prove nothing.
-        assert solver.mjw_data.nworld == 2 * N_WORLDS, solver.mjw_data.nworld
-        assert len(solver.mjw_model.opt.timestep) == 2 * N_WORLDS
     if compact_on:
         # Same tripwire for the compaction flag at construction time; the
         # iteration-body counterpart (the list build actually running) is
@@ -207,9 +186,7 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
     # not run-to-run bitwise reproducible (atomic-ordered contact rows feed the
     # constraint assembly), and the reference-repeat oracle check fails before
     # any feature comparison can be judged.
-    pipeline = newton.CollisionPipeline(
-        model, rigid_contact_max=solver.get_max_contact_count(), deterministic=True
-    )
+    pipeline = newton.CollisionPipeline(model, rigid_contact_max=solver.get_max_contact_count(), deterministic=True)
     contacts = pipeline.contacts()
     state_0, state_1 = model.state(), model.state()
     control = model.control()
@@ -236,23 +213,13 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
         # and prove nothing), and a row is force-capable only when
         # dist < includemargin (mjw assembles constraint rows under that
         # test; margin-only candidates never produce force). Post-march host
-        # reads are legal. Twin runs count duplicated twin rows too; the
-        # guard consumes the reference run only.
+        # reads are legal. The guard consumes the reference run only.
         nacon = int(solver.mjw_data.nacon.numpy()[0])
         injected_seen = max(injected_seen, nacon)
         if nacon > 0:
             dist = solver.mjw_data.contact.dist.numpy()[:nacon]
             margin = solver.mjw_data.contact.includemargin.numpy()[:nacon]
             active_injected_seen = max(active_injected_seen, int((dist < margin).sum()))
-        if twin_on:
-            # A truncated twin duplication (primary injected rows exceeding
-            # naconmax // 2) makes twins integrate with missing contacts;
-            # tier 3 would then report an unexplained bitwise divergence and
-            # the twin-geometry note would misdirect triage toward fp
-            # reordering. Fail loudly with the real cause instead.
-            assert not solver.twin_contact_overflow, (
-                f"twin contact capacity exceeded at boundary {k}: primary injected rows > naconmax // 2 -- raise nconmax"
-            )
         records.append(
             {
                 "joint_q": state_0.joint_q.numpy().copy(),
@@ -318,7 +285,7 @@ def first_divergence(ref, cand):
     return None
 
 
-def report_divergence(name, ref, cand, where, twin_geometry: bool):
+def report_divergence(name, ref, cand, where):
     k, field, row = where
     print(
         f"FAIL[{name}]: first divergence at boundary {k}, field '{field}', row {row} (row=world for per-world fields)"
@@ -337,12 +304,6 @@ def report_divergence(name, ref, cand, where, twin_geometry: bool):
             cb = int(np.frombuffer(np.float32(cv).tobytes(), dtype=np.uint32)[0])
             u = ulp_distance(np.array([rv]), np.array([cv]))[0]
             print(f"  bits: ref=0x{rb:08x} cand=0x{cb:08x} ulp={u}")
-    if twin_geometry:
-        print(
-            "  note: twin mode changes every mjw launch geometry (nworld=2N); on GPU,"
-            " atomic-arrival order in contact-cid / efc assembly can reorder fp"
-            " reductions, so ulp-level drift here is the known suspect (see docstring)."
-        )
     else:
         print(
             "  note: this configuration changes no mjw launch and no fp operation"
@@ -367,7 +328,7 @@ def main() -> int:
     # boundary must END with fewer active worlds than N (worlds landed at
     # different iterations), otherwise the compacted and full paths run
     # identical work and their equality proves nothing.
-    tail_engaged = all(any(c < N_WORLDS for c in extras[name]["final_active"]) for name in ("compact", "twin+compact"))
+    tail_engaged = all(any(c < N_WORLDS for c in extras[name]["final_active"]) for name in ("compact",))
     # Rejection certification must use boundary 0: the controller rewrites
     # ideal_dt on ACCEPTED steps too, so from boundary 1 onward a world can
     # carry ideal_dt < DT_OUTER and take multiple accepted sub-steps with zero
@@ -393,7 +354,7 @@ def main() -> int:
     # --- Tier 2: oracle validity ------------------------------------------
     where = first_divergence(ref, runs["reference-repeat"])
     if where is not None:
-        report_divergence("reference-repeat", ref, runs["reference-repeat"], where, twin_geometry=False)
+        report_divergence("reference-repeat", ref, runs["reference-repeat"], where)
         print("ORACLE-DEGRADED: flags-off is not run-to-run deterministic on this device;")
         print("bitwise feature equality cannot be judged here.")
         return 2
@@ -405,7 +366,7 @@ def main() -> int:
         if where is None:
             print(f"PASS[{name}]: bitwise identical to reference over {K_BOUNDARIES} boundaries")
         else:
-            report_divergence(name, ref, runs[name], where, twin_geometry="NEWTON_ADAPTIVE_TWIN_EVAL" in env)
+            report_divergence(name, ref, runs[name], where)
             failed = True
     if failed:
         return 1

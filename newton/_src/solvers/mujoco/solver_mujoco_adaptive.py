@@ -64,7 +64,7 @@ from ...sim import BodyFlags, Contacts, Control, Model, State
 from ...sim.articulation import eval_articulation_fk
 from ...utils.benchmark import event_scope
 from ..adaptive_boundary import QuantileBoundaryStop
-from .kernels import convert_mj_coords_to_warp_kernel, duplicate_contact_rows_for_twins_kernel
+from .kernels import convert_mj_coords_to_warp_kernel
 from .mjw_alloc_cache import MjwStepAllocCache
 from .solver_mujoco import SolverMuJoCo
 
@@ -526,21 +526,6 @@ def _restore_uncommitted_rows_kernel(
 
 
 @wp.kernel
-def _scatter_twin_timestep(
-    first: wp.array[wp.float32],
-    second: wp.array[wp.float32],
-    nworld: int,
-    ts: wp.array[wp.float32],
-):
-    """Fill the 2N-world opt.timestep buffer for one twin-mode eval pass: real
-    world ``i`` integrates ``first[i]``, its twin ``nworld + i`` integrates
-    ``second[i]``. Flat, fixed-dim, preallocated output -- graph-capture safe."""
-    i = wp.tid()
-    ts[i] = first[i]
-    ts[nworld + i] = second[i]
-
-
-@wp.kernel
 def _copy_rows_indexed(
     src: wp.array2d[wp.float32],
     idx: wp.array[wp.int32],
@@ -558,24 +543,6 @@ def _copy_rows_indexed(
         return
     w = idx[i]
     dst[w, j] = src[src_row_off + w, j]
-
-
-@wp.kernel
-def _mirror_rows_indexed(
-    arr: wp.array2d[wp.float32],
-    idx: wp.array[wp.int32],
-    counts: wp.array[wp.int32],
-    slot: int,
-    nworld: int,
-):
-    """Seed twin rows in place: ``arr[nworld + w] = arr[w]`` for every world in
-    the index list. Single-array form so source and destination rows never
-    alias (twin rows are disjoint from primary rows by construction)."""
-    i, j = wp.tid()
-    if i >= counts[slot]:
-        return
-    w = idx[i]
-    arr[nworld + w, j] = arr[w, j]
 
 
 @wp.kernel
@@ -857,24 +824,15 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         if kwargs.get("enable_sleeping"):
             raise ValueError("SolverMuJoCoAdaptive does not support enable_sleeping=True.")
         kwargs["enable_sleeping"] = False
-        # Twin-worlds batched step double (NEWTON_ADAPTIVE_TWIN_EVAL=1): the mjw
-        # data segment carries 2N worlds -- N real + N twin. Per attempt the twin
-        # rows are seeded from the pre-attempt state and integrate the FULL step
-        # while the real rows integrate the two half steps, collapsing the
-        # step-doubling attempt from 3 sequential mjw evals to 2. Read at
-        # CONSTRUCTION (not import) so one process can build flag-on and
-        # flag-off solvers side by side; the choice is baked into the captured
-        # iteration graphs. Must be set before super().__init__() so the base
-        # build sees the replica count.
-        self._twin_eval = os.environ.get("NEWTON_ADAPTIVE_TWIN_EVAL", "0") == "1"
-        self._mjw_world_replicas = 2 if self._twin_eval else 1
+        # Single data-world per Newton world (the base solver supports replica
+        # multiples; this solver no longer uses them).
+        self._mjw_world_replicas = 1
         # Tail compaction (NEWTON_ADAPTIVE_TAIL_COMPACT=1): late march
         # iterations run full-batch kernels while only a few worlds are still
         # unfinished; a device-built index list of active worlds bounds the
         # solver-owned snapshot/seed/gather/error work to those worlds while
         # every launch keeps its fixed dim (graph-capture safe). Read at
-        # construction for the same reason as the twin flag; the choice is
-        # baked into the captured iteration graphs.
+        # construction; the choice is baked into the captured iteration graphs.
         self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "0") == "1"
         super().__init__(
             model,
@@ -923,9 +881,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # doubled state left in mjw_data.qpos).
         self._nq = int(self.mjw_data.qpos.shape[1])
         self._nv = int(self.mjw_data.qvel.shape[1])
-        # Explicit primary-world shapes (NOT zeros_like the mjw_data fields):
-        # controller state, snapshots, and the Richardson pair are per PRIMARY
-        # world even when the data segment carries twin-replica rows.
+        # Explicit per-world shapes (NOT zeros_like the mjw_data fields):
+        # controller state, snapshots, and the Richardson pair are per
+        # world.
         self._qpos_saved = wp.zeros((world_count, self._nq), dtype=wp.float32, device=device)
         self._qvel_saved = wp.zeros((world_count, self._nv), dtype=wp.float32, device=device)
         self._qpos_full = wp.zeros((world_count, self._nq), dtype=wp.float32, device=device)
@@ -1005,29 +963,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             # [0] boundaries, [1] truncated by max_substeps, [2] world-boundaries short of target
             self._dt_hist_trunc = wp.zeros(3, dtype=wp.int64, device=device)
 
-        # Stable buffer for opt.timestep; updated via wp.copy() per substep (or
-        # by _scatter_twin_timestep in twin mode). Sized over ALL data worlds:
-        # mjw indexes opt.timestep per world, so twin rows need their own slots
-        # (without them the modulo broadcast would hand twins the primary dt).
-        self._timestep_buf = wp.full(
-            world_count * self._mjw_world_replicas, dt_inner_init, dtype=wp.float32, device=device
-        )
+        # Stable buffer for opt.timestep; updated via wp.copy() per substep.
+        self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
         self.mjw_model.opt.timestep = self._timestep_buf
-
-        # ---- twin-eval scratch (see _step_double_twin) ----
-        if self._twin_eval:
-            # Second-eval twin timestep: twins already hold the full-step result,
-            # so they no-op at dt=0 while the reals complete the double.
-            self._zero_dt = wp.zeros(world_count, dtype=wp.float32, device=device)
-            # Latched by duplicate_contact_rows_for_twins_kernel when the primary
-            # contact count exceeds the twin headroom (naconmax // 2).
-            self._contact_dup_overflow = wp.zeros(1, dtype=wp.int32, device=device)
-            # Identity index list + full counts: the indexed copy/mirror kernels
-            # take an (idx, counts) pair so a later active-world compaction can
-            # substitute a compacted list without changing the kernels; with
-            # compaction absent these fixed buffers select every world.
-            self._identity_idx = wp.array(np.arange(world_count, dtype=np.int32), dtype=wp.int32, device=device)
-            self._full_counts = wp.array(np.full(2, world_count, dtype=np.int32), dtype=wp.int32, device=device)
 
         # ---- tail-compaction scratch (see _build_active_worlds) ----
         if self._tail_compact:
@@ -1287,152 +1225,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._refresh_injected_contacts()
         self._mjw_eval(self._dt_half)
 
-    def _mirror_rows_to_twins(self, *arrays: wp.array) -> None:
-        """Copy the real rows [0, N) of 2N-row mjw_data arrays into the twin
-        rows [N, 2N). Boundary/reset-time only (outside any capture), so the
-        dtype-agnostic slice copy is fine here; the per-attempt in-capture
-        seeding goes through ``_mirror_rows_indexed`` instead."""
-        n = self.model.world_count
-        for arr in arrays:
-            # Zero-size fields (e.g. ctrl with no actuators) cannot be sliced.
-            if arr is None or arr.size == 0:
-                continue
-            wp.copy(arr[n : 2 * n], arr[0:n])
-
-    def _mjw_eval_twin(self, first_dt: wp.array, second_dt: wp.array) -> None:
-        """ONE MuJoCo-Warp eval over ALL 2N worlds: real world ``i`` integrates
-        ``first_dt[i]``, its twin integrates ``second_dt[i]`` (the per-world
-        ``opt.timestep`` buffer makes the split a scatter, not a second eval)."""
-        wp.launch(
-            _scatter_twin_timestep,
-            dim=self.model.world_count,
-            inputs=[first_dt, second_dt, self.model.world_count],
-            outputs=[self._timestep_buf],
-            device=self.model.device,
-        )
-        with wp.ScopedDevice(self.model.device):
-            if self._alloc_cache is not None:
-                with self._alloc_cache.scope():
-                    self._mujoco_warp_step()
-            else:
-                self._mujoco_warp_step()
-
-    def _step_double_twin(self) -> None:
-        """Step doubling in TWO batched evals over 2N worlds (twin mode).
-
-        The real rows [0, N) run the two half steps and end holding the DOUBLED
-        state -- exactly what the sequential ``_step_double`` leaves in
-        ``mjw_data`` -- so the error estimate, controller, commit/rollback, and
-        boundary export all run unmodified on the real range. The twin rows
-        [N, 2N) are seeded from the pre-attempt state, run the FULL step in the
-        first eval (gathered into ``_qpos_full``), and no-op at dt=0 in the
-        second. Twin rows after the second eval hold dt=0-eval garbage by
-        construction: nothing reads them before the next attempt reseeds them,
-        and no export path touches rows >= N.
-
-        The mid-double contact refresh reads the real rows, which hold the
-        half-step state here just as they do sequentially. The shared-forward-
-        prefix optimization does not apply: there is no restore point between
-        the full and first-half evals to share a prefix across.
-        """
-        d = self.mjw_data
-        n = self.model.world_count
-        dev = self.model.device
-        # Tail compaction substitutes the device-built lists for the identity
-        # list; the kernels are unchanged. Landed worlds then skip snapshot,
-        # twin seeding, and the _qpos_full gather -- their twin rows run dt=0
-        # on stale garbage, which nothing reads.
-        if self._tail_compact:
-            snap_idx, act_idx, counts = self._snap_idx, self._active_idx, self._active_counts
-        else:
-            snap_idx, act_idx, counts = self._identity_idx, self._identity_idx, self._full_counts
-
-        # Snapshot the real rows (rollback target; slot 1 = snapshot set).
-        for src, dst, width in (
-            (d.qpos, self._qpos_saved, self._nq),
-            (d.qvel, self._qvel_saved, self._nv),
-            (d.qacc_warmstart, self._warmstart_saved, self._nv),
-        ):
-            wp.launch(
-                _copy_rows_indexed, dim=(n, width), inputs=[src, snap_idx, counts, 1, 0], outputs=[dst], device=dev
-            )
-        if self._na > 0:
-            wp.launch(
-                _copy_rows_indexed,
-                dim=(n, self._na),
-                inputs=[d.act, snap_idx, counts, 1, 0],
-                outputs=[self._act_saved],
-                device=dev,
-            )
-
-        # Seed the twins from the identical pre-attempt state (slot 0 = active
-        # set): both Richardson estimates must start from the same internal
-        # state, including the warm start and actuator activations.
-        for arr, width in ((d.qpos, self._nq), (d.qvel, self._nv), (d.qacc_warmstart, self._nv)):
-            wp.launch(_mirror_rows_indexed, dim=(n, width), inputs=[arr, act_idx, counts, 0, n], device=dev)
-        if self._na > 0:
-            wp.launch(_mirror_rows_indexed, dim=(n, self._na), inputs=[d.act, act_idx, counts, 0, n], device=dev)
-
-        # Eval 1: reals take the first half step, twins take the full step.
-        self._mjw_eval_twin(self._dt_half, self._dt)
-
-        # Gather the full-step result from the twin rows: _qpos_full vs the
-        # doubled state in the real rows is the Richardson pair.
-        wp.launch(
-            _copy_rows_indexed,
-            dim=(n, self._nq),
-            inputs=[d.qpos, act_idx, counts, 0, n],
-            outputs=[self._qpos_full],
-            device=dev,
-        )
-
-        # Mid-double refresh: re-anchor injected contacts to the half-step state
-        # (real rows) before the second half eval -- same placement and same
-        # source state as the sequential path.
-        if self._contact_refresh_enabled and self._refresh_contacts is not None:
-            self._refresh_injected_contacts()
-
-        # Eval 2: reals complete the double, twins no-op at dt=0.
-        self._mjw_eval_twin(self._dt_half, self._zero_dt)
-
-    def _duplicate_injected_contacts_for_twins(self, contacts: Contacts) -> None:
-        """Append twin-world copies of the injected contact rows (see the kernel
-        docstring). Must run after ``_convert_contacts_to_mjwarp`` so the
-        primary-count latch is already set. Flat fixed-dim launch on mjw_data
-        contact buffers -- records cleanly inside the captured iteration graph."""
-        d = self.mjw_data
-        naconmax = d.naconmax
-        # Twin rows only fit while the primary count stays within naconmax // 2;
-        # a primary set larger than that latches the overflow flag from the last
-        # in-range threads instead of writing out of range, so the truncated
-        # duplication is always detectable.
-        dim = min(contacts.rigid_contact_max, naconmax // 2)
-        if dim <= 0:
-            return
-        wp.launch(
-            duplicate_contact_rows_for_twins_kernel,
-            dim=dim,
-            inputs=[
-                self._last_nacon_count,
-                self.model.world_count,
-                naconmax,
-                d.contact.dist,
-                d.contact.pos,
-                d.contact.frame,
-                d.contact.includemargin,
-                d.contact.friction,
-                d.contact.solref,
-                d.contact.solreffriction,
-                d.contact.solimp,
-                d.contact.dim,
-                d.contact.geom,
-                d.contact.efc_address,
-                d.contact.worldid,
-            ],
-            outputs=[d.nacon, self._contact_dup_overflow],
-            device=self.model.device,
-        )
-
     def _estimate_error(self) -> None:
         """Per-world local error: inf-norm ``e = max|Δq|`` between the full step and the doubled
         half-step (NaN/inf collapse to a 1e10 sentinel). Writes ``_last_error``.
@@ -1519,9 +1311,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         model = self.model
         st = self._refresh_state
         mjw = self.mjw_data
-        # Primary worlds only: the refresh scratch state and the Newton joint
-        # layout are primary-sized; twin rows get their contact rows from the
-        # duplicate pass below.
+        # The refresh scratch state and the Newton joint
+        # layout are per-world sized.
         joints_per_world = model.joint_count // model.world_count
         mujoco_attrs = getattr(model, "mujoco", None)
         dof_ref = getattr(mujoco_attrs, "dof_ref", None) if mujoco_attrs is not None else None
@@ -1581,8 +1372,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=model.device,
         )
         self._convert_contacts_to_mjwarp(model, st, self._refresh_contacts)
-        if self._twin_eval:
-            self._duplicate_injected_contacts_for_twins(self._refresh_contacts)
 
     def _run_iteration_body(self, effective_dt_max: float) -> None:
         """ONE ragged adaptive iteration: histogram sample (if enabled) -> clamp -> step-double
@@ -1653,10 +1442,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._refresh_injected_contacts()
 
         # --- adaptive core: step double, estimate error, run the controller ---
-        if self._twin_eval:
-            self._step_double_twin()
-        else:
-            self._step_double()
+        self._step_double()
         self._estimate_error()
         wp.launch(
             _calc_adjusted_step,
@@ -1761,22 +1547,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._apply_mjc_control(self.model, state_0, control, self.mjw_data)
             if apply_forces is not None:
                 apply_forces(state_0)
-            if self._twin_eval:
-                # Applied controls and forces are written to the real rows only;
-                # the twins must integrate their full step under the identical
-                # inputs. Once per boundary, outside any capture.
-                self._mirror_rows_to_twins(self.mjw_data.ctrl, self.mjw_data.qfrc_applied, self.mjw_data.xfrc_applied)
 
             self._enable_rne_postconstraint(self._state_cur)
 
             # Load the incoming Newton state into MuJoCo coordinates ONCE per boundary;
             # the whole inner loop then marches mjw_data.qpos/qvel directly.
             self._update_mjc_data(self.mjw_data, self.model, state_0)
-            if self._twin_eval:
-                # Twin rows are reseeded every attempt; this boundary mirror
-                # keeps them finite so the first eval's pipeline never sees
-                # stale garbage in rows it still computes kinematics for.
-                self._mirror_rows_to_twins(self.mjw_data.qpos, self.mjw_data.qvel)
             if self._use_newton_contacts:
                 if contacts is None:
                     raise ValueError(
@@ -1787,8 +1563,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 # frame/solref/friction/layout); the inner march refreshes dist/pos per
                 # iteration via _refresh_injected_contacts (fast path).
                 self._convert_contacts_to_mjwarp(self.model, state_0, contacts)
-                if self._twin_eval:
-                    self._duplicate_injected_contacts_for_twins(contacts)
                 if self._contact_refresh_enabled:
                     # Seed the refresh scratch (kinematic dofs are copied from prev).
                     self._copy_state(self._refresh_state, state_0)
@@ -2103,11 +1877,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         joint state instead of resetting joint_q/joint_qd to model defaults.
         """
         super().reset(state, world_mask=world_mask, flags=flags)
-        if self._twin_eval:
-            # The base reset may push reset joint coordinates into the real
-            # qpos/qvel rows; keep the twin rows finite until the next attempt
-            # reseeds them.
-            self._mirror_rows_to_twins(self.mjw_data.qpos, self.mjw_data.qvel)
         mask = self._full_world_mask if world_mask is None else world_mask
         wp.launch(
             _reset_worlds,
@@ -2145,23 +1914,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     def iteration_count(self) -> wp.array:
         """Iteration count from the most recent ``step_dt``, shape ``[1]``, int32, on device."""
         return self._iteration_count_buf
-
-    @property
-    def twin_contact_overflow(self) -> bool:
-        """Whether a twin contact duplication has been truncated (latched, never cleared).
-
-        Set by ``duplicate_contact_rows_for_twins_kernel`` when the primary
-        injected-contact count exceeds ``naconmax // 2``: rows past the twin
-        headroom are dropped, so the twins integrate their full-dt estimate
-        against fewer contacts than their reals and the per-world error
-        estimate measures a contact-set discrepancy instead of truncation
-        error. Once latched, raise ``nconmax``. Always ``False`` with twin
-        mode off. Host read (device sync): call outside the march only, never
-        inside a captured region.
-        """
-        if not self._twin_eval:
-            return False
-        return bool(self._contact_dup_overflow.numpy()[0])
 
     @property
     def cumulative_iterations(self) -> wp.array:
