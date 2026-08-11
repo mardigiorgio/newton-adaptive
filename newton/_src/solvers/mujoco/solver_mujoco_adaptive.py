@@ -951,6 +951,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # reset_compute_counter().
         self._cum_iters = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # Opt-in per-boundary march telemetry (see _log_march_boundary). The
+        # env gate keeps the hot path to a single attribute check when unset.
+        self._march_log_path = os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG") or None
+        self._march_log_file = None
+        self._march_log_boundary = 0
+        self._march_log_hist_every = int(os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG_EVERY", "48"))
+
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
         # iteration body. int64 because a long run at 4096 worlds overflows int32.
         self._dt_hist: wp.array | None = None
@@ -1822,6 +1829,12 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     device=device,
                 )
 
+            # Opt-in telemetry readout: host reads of post-march state, which
+            # are only legal outside an active capture -- hence gated, never
+            # unconditional.
+            if self._march_log_path is not None:
+                self._log_march_boundary()
+
             # Convert the final committed state back to Newton coordinates ONCE per boundary
             # (incl. the FK pass for body_q/body_qd), then hand it to the caller. _state_cur
             # buffers the write so state and state_prev never alias in the convert kernel.
@@ -1829,6 +1842,32 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._copy_state(state_0, self._state_cur)
 
         return state_0, state_1
+
+    def _log_march_boundary(self) -> None:
+        """Append one CSV row of post-march telemetry for the finished boundary.
+
+        Pure observer: reads the boundary's counters and the controller-carry
+        arrays the march has already committed; writes nothing back to solver
+        state. Host reads are illegal while a capture is recording, so the
+        caller gates this on the opt-in env var instead of running it
+        unconditionally.
+        """
+        if self._march_log_file is None:
+            # Line-buffered so a killed run keeps its tail.
+            self._march_log_file = open(self._march_log_path, "a", buffering=1)
+            self._march_log_file.write("boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,resid_min,resid_max\n")
+        iters = int(self._iteration_count_buf.numpy()[0])
+        cum = int(self._cum_iters.numpy()[0])
+        ideal = self._ideal_dt.numpy()
+        resid = self._next_time.numpy() - self._sim_time.numpy()
+        self._march_log_file.write(
+            f"{self._march_log_boundary},{iters},{cum},"
+            f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"
+            f"{resid.min():.6e},{resid.max():.6e}\n"
+        )
+        self._march_log_boundary += 1
+        if self._dt_hist is not None and self._march_log_boundary % self._march_log_hist_every == 0:
+            self._march_log_file.write(f"HIST {self.dt_histogram_stats()}\n")
 
     def _iteration_graph(self, effective_dt_max: float):
         """Return the captured iteration-body graph (keyed by effective_dt_max), or ``None``
