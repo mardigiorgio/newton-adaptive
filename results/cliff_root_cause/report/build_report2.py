@@ -162,6 +162,15 @@ content = replace_once(
 
 content = replace_once(
     content,
+    "fixed-step does not complete it at any tested cost.</p>",
+    "fixed-step does not complete it at any tested cost.</p>\n"
+    '  <p class="cap"><b>In-regime twin</b> (resumed from the iter-150 grasping checkpoint, 2048 envs, seed 42, same protocol as the adaptive proof): '
+    "5.0 ms goes non-finite after 20 iterations, 2.5 ms after 5, 1.25 ms after 15 (death iteration again non-monotonic in dt). "
+    "The adaptive arm holds the identical state for 300 of 300 iterations at 15.02 s steady.</p>",
+)
+
+content = replace_once(
+    content,
     "Open: definitive pair completing now · live-process degradation root cause · lift-and-carry demonstration · single seed · ~45 commits unpushed (GitHub auth).",
     "Open: lift-and-carry demonstration · single seed · defect-probe gating of the three cliff fixes · nconmax headroom · ~48 commits unpushed (GitHub auth).",
 )
