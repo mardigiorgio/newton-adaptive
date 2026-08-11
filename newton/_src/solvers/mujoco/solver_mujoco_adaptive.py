@@ -187,7 +187,7 @@ def _inf_norm_state_error_kernel(
     dt: wp.array[wp.float32],
     qvel_double: wp.array2d[wp.float32],
     nv: int,
-    quant_floor: int,
+    rtol_over_atol: float,
     error_out: wp.array[wp.float32],
 ):
     """Adaptive-controller accuracy metric::
@@ -219,16 +219,15 @@ def _inf_norm_state_error_kernel(
             # actuator mode is damped in the ESTIMATE by the same factor the integrator
             # damps it in the SOLUTION; undamped coords (kd=0) keep w=1, and w -> 1 as
             # h -> 0, restoring full sensitivity when the step resolves the mode.
-            if quant_floor != 0:
-                # Quantization floor: a difference within a few ulps of the
-                # coordinate's own magnitude is representation noise, not
-                # truncation error. Scoring it would pin the error just under
-                # tol for large-magnitude coordinates and freeze the
-                # controller in its deadband at whatever dt it happens to
-                # hold.
+            if rtol_over_atol > 0.0:
+                # Normalized (mixed-tolerance) error: dividing by
+                # 1 + (rtol/atol)*|q| makes the fixed-tol accept test
+                # equivalent to |d| <= atol + rtol*|q|, so the budget scales
+                # with coordinate magnitude exactly as the float grid does --
+                # a large coordinate's representation noise can never pin the
+                # estimate near tol and freeze the controller's deadband.
                 m = wp.max(wp.abs(qpos_double[world, i]), wp.abs(qpos_full[world, i]))
-                if d <= m * wp.float32(4.7683716e-07):
-                    d = wp.float32(0.0)
+                d = d / (wp.float32(1.0) + rtol_over_atol * m)
             w = state_scale[world, i] / (wp.float32(1.0) + h * kd_over_m[i])
             max_err = wp.max(max_err, w * d)
 
@@ -260,7 +259,7 @@ def _inf_norm_state_error_indexed_kernel(
     idx: wp.array[wp.int32],
     counts: wp.array[wp.int32],
     slot: int,
-    quant_floor: int,
+    rtol_over_atol: float,
     error_out: wp.array[wp.float32],
 ):
     """:func:`_inf_norm_state_error_kernel` over a compacted world list: only
@@ -285,12 +284,11 @@ def _inf_norm_state_error_indexed_kernel(
         if wp.isnan(d):
             has_nan = 1
         else:
-            if quant_floor != 0:
-                # Same quantization floor as the full-dim kernel; the loop
-                # body must stay identical (same fp operation order).
+            if rtol_over_atol > 0.0:
+                # Same normalization as the full-dim kernel; the loop body
+                # must stay identical (same fp operation order).
                 m = wp.max(wp.abs(qpos_double[world, k]), wp.abs(qpos_full[world, k]))
-                if d <= m * wp.float32(4.7683716e-07):
-                    d = wp.float32(0.0)
+                d = d / (wp.float32(1.0) + rtol_over_atol * m)
             w = state_scale[world, k] / (wp.float32(1.0) + h * kd_over_m[k])
             max_err = wp.max(max_err, w * d)
 
@@ -1020,8 +1018,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._dt_init = float(dt_inner_init)
         self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
         self._debt_guard_flag = os.environ.get("NEWTON_ADAPTIVE_DEBT_GUARD", "0") == "1"
-        # Opt-in error quantization floor (see _inf_norm_state_error_kernel).
-        self._err_quant_floor_flag = 1 if os.environ.get("NEWTON_ADAPTIVE_ERR_QUANT_FLOOR", "0") == "1" else 0
+        # Opt-in mixed-tolerance normalization: accept test becomes
+        # |d| <= atol + rtol*|q| with atol = tol. Zero disables (bit-identical
+        # legacy path).
+        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "0") or 0.0)
+        self._err_rtol_over_atol = self._err_rtol / self._tol if self._err_rtol > 0.0 else 0.0
 
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
         # iteration body. int64 because a long run at 4096 worlds overflows int32.
@@ -1514,7 +1515,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     self._active_idx,
                     self._active_counts,
                     0,
-                    self._err_quant_floor_flag,
+                    self._err_rtol_over_atol,
                 ],
                 outputs=[self._last_error],
                 device=self.model.device,
@@ -1532,7 +1533,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._dt,
                 self.mjw_data.qvel,
                 self._nv,
-                self._err_quant_floor_flag,
+                self._err_rtol_over_atol,
             ],
             outputs=[self._last_error],
             device=self.model.device,
@@ -1951,14 +1952,24 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             self._march_log_file = open(self._march_log_path, "a", buffering=1)
             self._march_log_file.write(
                 "boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,"
-                "resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard\n"
+                "resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard,"
+                "eworld,qmax_i,qmax,ncon\n"
             )
         iters = int(self._iteration_count_buf.numpy()[0])
         cum = int(self._cum_iters.numpy()[0])
         ideal = self._ideal_dt.numpy()
         resid = self._next_time.numpy() - self._sim_time.numpy()
         rejects = int(self._reject_count_buf.numpy()[0])
-        err_max = float(self._last_error.numpy().max())
+        err_arr = self._last_error.numpy()
+        err_max = float(err_arr.max())
+        # Name the worst world's largest-magnitude coordinate: which qpos
+        # slot, and how big. Identifies WHAT the error norm is reading when
+        # err_max pins at a grid constant.
+        eworld = int(err_arr.argmax())
+        q_abs = np.abs(self.mjw_data.qpos.numpy()[eworld])
+        qmax_i = int(q_abs.argmax())
+        qmax = float(q_abs[qmax_i])
+        ncon = int(self.mjw_data.nacon.numpy()[0])
         n_debt = int((resid > 0.0).sum())
         n_subfloor = int((ideal < self._dt_min).sum())
         n_guard = int(self._guard_hits.numpy()[0]) if self._debt_guard_flag else 0
@@ -1966,7 +1977,8 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             f"{self._march_log_boundary},{iters},{cum},"
             f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"
             f"{resid.min():.6e},{resid.max():.6e},"
-            f"{rejects},{err_max:.6e},{n_debt},{n_subfloor},{n_guard}\n"
+            f"{rejects},{err_max:.6e},{n_debt},{n_subfloor},{n_guard},"
+            f"{eworld},{qmax_i},{qmax:.6e},{ncon}\n"
         )
         self._march_log_boundary += 1
         if self._dt_hist is not None and self._march_log_boundary % self._march_log_hist_every == 0:

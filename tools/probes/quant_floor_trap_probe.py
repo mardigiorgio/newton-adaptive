@@ -10,15 +10,15 @@ condition of the process-age trap observed in the benchmark (error pinned at
 creates that condition in the first second of a run instead of after ~4100
 boundaries.
 
-Cells (2x2): offset in {0 m, 8192 m} x quantization floor {off, on}.
+Cells (2x2): offset in {0 m, 8192 m} x quantization rtol {off, on}.
 PASS requires all three:
-  T1 (trap armed, vacuity): offset-8192/floor-off costs >= 2x iters of
-      offset-0/floor-off. If not, the rig manufactured nothing and proves
+  T1 (trap armed, vacuity): offset-8192/rtol-off costs >= 2x iters of
+      offset-0/rtol-off. If not, the rig manufactured nothing and proves
       nothing.
-  T2 (fix works): offset-8192/floor-on within 25% of offset-0/floor-on.
+  T2 (fix works): offset-8192/rtol-on within 25% of offset-0/rtol-on.
       Translation invariance restored.
-  T3 (fix free when healthy): offset-0/floor-on within 25% of
-      offset-0/floor-off.
+  T3 (fix free when healthy): offset-0/rtol-on within 25% of
+      offset-0/rtol-off.
 Also prints the armed cell's post-march error values: the trap signature is
 values pinned at ~9.77e-4.
 """
@@ -61,8 +61,8 @@ def build_model(offset: float):
     return b.finalize()
 
 
-def run_cell(offset: float, floor_on: bool) -> tuple[float, np.ndarray, np.ndarray]:
-    os.environ["NEWTON_ADAPTIVE_ERR_QUANT_FLOOR"] = "1" if floor_on else "0"
+def run_cell(offset: float, rtol_on: bool) -> tuple[float, np.ndarray, np.ndarray]:
+    os.environ["NEWTON_ADAPTIVE_RTOL"] = "2e-6" if rtol_on else "0"
     os.environ.pop("NEWTON_ADAPTIVE_TWIN_EVAL", None)
     os.environ.pop("NEWTON_ADAPTIVE_TAIL_COMPACT", None)
     model = build_model(offset)
@@ -91,11 +91,11 @@ def run_cell(offset: float, floor_on: bool) -> tuple[float, np.ndarray, np.ndarr
 def main() -> int:
     cells = {}
     for offset in (0.0, OFFSET):
-        for floor_on in (False, True):
-            key = (offset, floor_on)
-            mean_iters, iters, err = run_cell(offset, floor_on)
+        for rtol_on in (False, True):
+            key = (offset, rtol_on)
+            mean_iters, iters, err = run_cell(offset, rtol_on)
             cells[key] = (mean_iters, iters, err)
-            tag = f"offset={offset:>6.0f} floor={'on ' if floor_on else 'off'}"
+            tag = f"offset={offset:>6.0f} rtol={'on ' if floor_on else 'off'}"
             print(f"{tag}: steady iters/boundary {mean_iters:6.2f}  max {iters.max():4d}  err {err}")
 
     base_off = cells[(0.0, False)][0]
