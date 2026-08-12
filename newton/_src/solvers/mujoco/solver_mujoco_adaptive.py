@@ -827,13 +827,16 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # Single data-world per Newton world (the base solver supports replica
         # multiples; this solver no longer uses them).
         self._mjw_world_replicas = 1
-        # Tail compaction (NEWTON_ADAPTIVE_TAIL_COMPACT=1): late march
-        # iterations run full-batch kernels while only a few worlds are still
-        # unfinished; a device-built index list of active worlds bounds the
-        # solver-owned snapshot/seed/gather/error work to those worlds while
-        # every launch keeps its fixed dim (graph-capture safe). Read at
-        # construction; the choice is baked into the captured iteration graphs.
-        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "0") == "1"
+        # Tail compaction (default ON; NEWTON_ADAPTIVE_TAIL_COMPACT=0 opts out):
+        # late march iterations run full-batch kernels while only a few worlds
+        # are still unfinished; a device-built index list of active worlds
+        # bounds the solver-owned snapshot/seed/gather/error work to those
+        # worlds while every launch keeps its fixed dim (graph-capture safe).
+        # A pure scheduling change — march_equivalence_probe.py asserts bitwise
+        # identity with the full-batch path and must keep passing for this
+        # default to remain ON. Read at construction; the choice is baked into
+        # the captured iteration graphs.
+        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") == "1"
         super().__init__(
             model,
             separate_worlds=True,
