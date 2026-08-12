@@ -117,11 +117,21 @@ FORCE_SCALE = 0.5  # [N] / [N*m]; sized so ~0.2 kg boxes see O(g) accelerations
 # The flags the march must be invariant to, singly and combined. The repeat
 # run guards the oracle; the feature arms follow in strictness order
 # (compaction changes no mjw launch, so it is judged strictly first).
-ALL_FLAGS = ("NEWTON_ADAPTIVE_TAIL_COMPACT",)
+# Reference cells PIN every flag off: defaults may promote a validated flag to
+# on (tail compaction is default-on now), and a reference that inherits the
+# feature under test judges the feature against itself.
+ALL_FLAGS = (
+    "NEWTON_ADAPTIVE_TAIL_COMPACT",
+    "NEWTON_MJ_ADAPTIVE_CONDITIONAL",
+    "NEWTON_MJW_ALLOC_CACHE",
+)
+_ALL_OFF = {flag: "0" for flag in ALL_FLAGS}
 CONFIGS: list[tuple[str, dict[str, str]]] = [
-    ("reference", {}),
-    ("reference-repeat", {}),
-    ("compact", {"NEWTON_ADAPTIVE_TAIL_COMPACT": "1"}),
+    ("reference", dict(_ALL_OFF)),
+    ("reference-repeat", dict(_ALL_OFF)),
+    ("compact", {**_ALL_OFF, "NEWTON_ADAPTIVE_TAIL_COMPACT": "1"}),
+    ("conditional", {**_ALL_OFF, "NEWTON_MJ_ADAPTIVE_CONDITIONAL": "1"}),
+    ("compact+conditional", {**_ALL_OFF, "NEWTON_ADAPTIVE_TAIL_COMPACT": "1", "NEWTON_MJ_ADAPTIVE_CONDITIONAL": "1"}),
 ]
 
 
@@ -181,6 +191,10 @@ def run_config(name: str, env: dict[str, str], forces: np.ndarray | None):
         # iteration-body counterpart (the list build actually running) is
         # checked per boundary below via _active_counts.
         assert solver._tail_compact, "NEWTON_ADAPTIVE_TAIL_COMPACT did not reach construction"
+    else:
+        assert not solver._tail_compact, "reference cell inherited tail compaction (default leak)"
+    if env.get("NEWTON_MJ_ADAPTIVE_CONDITIONAL") == "1":
+        assert solver._conditional_enabled, "NEWTON_MJ_ADAPTIVE_CONDITIONAL did not reach construction"
 
     # deterministic=True sorts contact emission: without it the baseline march is
     # not run-to-run bitwise reproducible (atomic-ordered contact rows feed the
