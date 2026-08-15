@@ -49,38 +49,48 @@ Provenance: journal of wf_55df0381-9e4, agents a07793410/a6e00add.
 - Determinism default FLIPPED OFF (2026-08-15, Marco's order): all four
   resolution sites read env "0"-default, "1" opts in; probes pin "1"
   explicitly. Trainings pocket ~7.9%. Gate chain: detflip_gates.log.
+- Blocked-Cholesky narrowing (2026-08-15, loop pass 1): listed twins of
+  the masked factorize/solve pair launch at the env-grid budget; sites
+  chol_factorize/chol_solve added to the narrow tripwire. Gates 6/6:
+  construct, flag-equiv (new sites asserted), march-equiv, determinism,
+  containment, speed A/B. Measured (1024x8, det-unset production
+  config): late-window per-substep speedup 1.106 (10.6%), rising with
+  tail depth (it7: 1.233); det-ON pair proves exact substep bitwise
+  match (series 306..2019 equal). Raw late wall ratio 1.514 is
+  trajectory-confounded (det-OFF arms diverge; OFF arm ran ~20% more
+  substeps) — cite the per-substep number, not the wall ratio.
+  Provenance: scratchpad chol_gates.log, chol_ab_*.{log,telemetry},
+  sap_warp commit (see git log).
 - Snapshot commits: newton-adaptive march-counter-log 9c9dc934, sap_warp
   main 79e43bd, IsaacLab develop 82c0679d88.
 
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. PENDING IMMEDIATE: determinism default flip to OFF (Marco's order,
-   2026-08-15) — mjwarp itself is non-canonical (157 atomic_add sites, no
-   det mode; their forward_test.py:461 sorts around it), so det-ON holds SAP
-   to a standard the baseline doesn't meet. Flip default, keep opt-in for
-   probes (they pin det=1 explicitly already). Frees ~7.9% for trainings.
-   BLOCKED until fp32 agent stops editing solver files.
-2. Blocked-Cholesky narrowing (sap_warp/sim/blocked_cholesky.py): the
-   largest single remaining env-axis consumer after narrow-grid v2 (was out
-   of that task's file scope). Same list-indexed pattern, bitwise.
-3. Mixed-precision iterative refinement: fp32 factorization/GEMM + fp64
+1. Mixed-precision iterative refinement: fp32 factorization/GEMM + fp64
    residual + refinement loop — targets fp64-class accuracy at fp32 rate;
-   candidate to keep the 1e-8 optimality contract honestly if pure fp32
-   cannot. Flagship hands-dirty item.
-4. Shared assembly between full and half1 solves: same anchor state q_t =>
+   the fp32 campaign PROVED the split's premise (per-substep 2-3.2x
+   cheaper; only the error/residual path needs fp64). Flagship. Start
+   with the factorize/solve pair (now list-indexed, easy to twin at
+   fp32) + fp64 residual check + one refinement pass; gate class:
+   physics-visible (invariant gates + penetration + before/after).
+2. Shared assembly between full and half1 solves: same anchor state q_t =>
    byte-identical contact set/Jacobians/Delassus; only R(dt) and vhat
    differ. Compute once, read twice — bitwise by construction. Est. ~10-15%
    if assembly is ~1/3 of slab.
-5. Stream overlap of full and half1 solves (data-independent; half2 depends
+3. Stream overlap of full and half1 solves (data-independent; half2 depends
    on half1). Hides one solve's latency where kernels underfill the GPU.
    Canonical-per-solve reductions keep det mode compatible.
-6. LS-interior compaction isolated A/B at 1024 production scale: the ONE
+4. LS-interior compaction isolated A/B at 1024 production scale: the ONE
    stack feature never isolated at scale; micro-scene measured it 1.6-1.8%
    SLOWER. If negative at scale too: default it OFF (one env var, free wall).
-7. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
+5. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
    GEMM tiles): structural surgery, authorized; measure kernel-level first.
-8. Remaining un-narrowed env-axis launches outside contact_solve.py
+6. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
+7. Housekeeping: run pre-commit across the accumulated commits and
+   re-gate (hooks were deferred to keep certified bytes exact); fix the
+   TAIL_COMPACT =="1" exact-match footgun; make the march-compact
+   OFF-cell leak guard non-vacuous (review finding).
 
 ## Rails (non-negotiable)
 

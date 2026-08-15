@@ -247,6 +247,8 @@ EXPECTED_NARROW_SITES = frozenset(
         "commit_ls",
         "proj_gamma_update",
         "model_terms_grad",
+        "chol_factorize",
+        "chol_solve",
     }
 )
 
