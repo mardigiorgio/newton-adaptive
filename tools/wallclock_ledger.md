@@ -120,22 +120,46 @@ the LS/eval chain; per-slab fp64 cost is structural under the 1e-8
 contract. Wall relief must come from work-DELETION (shared assembly,
 overlap, narrowing) not precision.
 
+## Closed: stream overlap of full and half1 solves (2026-08-15 loop pass 4
+## — BLOCKED STRUCTURAL, zero edits made; probe overlap_capture_probe.py)
+
+The item's premise ("full and half1 are data-independent") is FALSE in the
+implementation, on two independent code-level grounds:
+(1) WARM-START CHAIN: half1's guess is (v_t + v_full)/2 — it CONSUMES the
+full solve's converged v_flat (solver_sap_adaptive.py substep-evals body:
+full solve -> wp.copy(_vfull, contact_solve.v_flat) -> average ->
+half1(guess=_vhalf1); half2 then consumes half1's state AND v_full). The
+three solves are serial by Drake-CENIC warm-start design; overlapping
+full/half1 requires changing half1's guess (e.g. v_t), which changes
+Newton paths and accepted states — physics-visible, not bitwise, a
+warm-start-semantics design change (Marco-level escalation, likely costs
+Newton iterations — the chain exists because it is good).
+(2) SHARED MUTABLE WORKSPACE: one SapContactSolve instance
+(solver_sap.py:932) serves all three solves — v_flat, converged_env,
+newton/LS lists, cost accumulators, dense/Hessian workspace are written
+by each solve in sequence. Overlap requires duplicating the solve
+workspace (the largest memory consumer) per concurrent solve; the
+4096-env production point already sits at 81% of the 32.6 GB card.
+CAPTURE MECHANICS (settled POSITIVE, durable knowledge): Warp 1.16 /
+CUDA 12.9 / sm_120 DOES support two-stream event-ordered fork/join under
+graph capture AND inside a wp.capture_while body, replaying exactly
+(overlap_capture_probe.py, exit 0, modes A and B both PASS with exact
+integer results). Future overlap ideas with genuinely independent work
+(cross-attempt, cross-boundary, a two-instance design if memory allows)
+are mechanically feasible.
+Tree state: zero repo edits made this pass (git status clean both repos;
+construct probe re-run PASS as restoration proof).
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Stream overlap of full and half1 solves (data-independent; half2 depends
-   on half1). Hides one solve's latency where kernels underfill the GPU.
-   Canonical-per-solve reductions keep det mode compatible. NOTE from the
-   shared-assembly measurement (landed, neutral): the slab is
-   contact-solve-dominated, so the overlap prize is the two Newton solves
-   themselves; with half-1 assembly now skipped, its solve starts sooner.
-2. LS-interior compaction isolated A/B at 1024 production scale: the ONE
+1. LS-interior compaction isolated A/B at 1024 production scale: the ONE
    stack feature never isolated at scale; micro-scene measured it 1.6-1.8%
    SLOWER. If negative at scale too: default it OFF (one env var, free wall).
-3. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
+2. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
    GEMM tiles): structural surgery, authorized; measure kernel-level first.
-4. Remaining un-narrowed env-axis launches outside contact_solve.py
+3. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-5. Housekeeping: run pre-commit across the accumulated commits and
+4. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
