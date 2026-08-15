@@ -1475,6 +1475,21 @@ class SolverSAPAdaptive:
         else:
             _mc_width = max(64, wc // 16)
         self._mc_width = max(1, min(_mc_width, max(1, wc // 2)))
+        # NEWTON_SAP_SHARED_ASSEMBLY (default ON; "0" opts out): within one
+        # step-doubling attempt the full solve and the first half solve
+        # anchor at the same state, contact set, control and world mask, so
+        # the dt-independent assembly (rigid ID, tau accumulation, mass
+        # matrix + factorization, body/contact Jacobians, Delassus weights)
+        # would rewrite byte-identical buffers; the half solve reuses the
+        # full solve's assembly and re-runs only the dt-dependent work (the
+        # per-world dt fill, v_star assembly, and the contact solve itself).
+        # Only the first half solve qualifies -- the second anchors at the
+        # midpoint state and keeps its own assembly.
+        self._shared_assembly = (
+            os.environ.get("NEWTON_SAP_SHARED_ASSEMBLY", "1") != "0" and self._do_doubling
+        )
+        self._sa_execs = wp.zeros(1, dtype=wp.int32, device=device)
+
         # Engagement counters (dim-1 increments recorded FIRST inside each
         # branch body). Allocated UNCONDITIONALLY so an OFF-configuration read
         # is a real observation: any branch-body emission in an OFF cell
@@ -1557,6 +1572,11 @@ class SolverSAPAdaptive:
     def march_compact_width(self) -> int:
         """Env budget of the narrow branch's list-indexed grids."""
         return self._mc_width
+
+    def shared_assembly_execs(self) -> int:
+        """Replay count of half-1 solves that reused the full solve's assembly
+        (host read; probe-side engagement tripwire, not consumed by physics)."""
+        return int(self._sa_execs.numpy()[0])
 
     def march_compact_execs(self) -> tuple[int, int]:
         """(narrow, wide) branch execution counts -- the engagement
@@ -1854,7 +1874,9 @@ class SolverSAPAdaptive:
         wp.copy(self._collide_state.body_q, state_in.body_q)
         self._pipeline.collide(self._collide_state, self._contacts)
 
-    def substep(self, state_in, state_out, control, contacts, dt: wp.array, guess=None, world_active=None) -> None:
+    def substep(
+        self, state_in, state_out, control, contacts, dt: wp.array, guess=None, world_active=None, reuse_assembly=False
+    ) -> None:
         """ONE inner physics step at the per-world ``dt`` vector (= CENIC ``ComputeNextContinuousState``).
 
         ``guess`` is an explicit SAP-order velocity seed. Passing ``None`` disables the
@@ -1867,7 +1889,9 @@ class SolverSAPAdaptive:
         which is safe because the accept-gated commit never reads them.
         """
         self._set_solver_guess(guess)
-        self._sap.step(state_in, state_out, control, contacts, dt, world_active=world_active)
+        self._sap.step(
+            state_in, state_out, control, contacts, dt, world_active=world_active, reuse_assembly=reuse_assembly
+        )
         wp.launch(
             _accumulate_solve_convergence,
             dim=self._world_count,
@@ -1937,6 +1961,10 @@ class SolverSAPAdaptive:
                 # half-1 from (v_t + v_full) / 2, reusing the q_t contact model.
                 wp.copy(self._vfull, self._sap.contact_solve.v_flat)
                 self._average_velocity_guess(self._vt, self._vfull, self._vhalf1)
+                if self._shared_assembly:
+                    # Counter records inside the captured body so replays
+                    # count: the tripwire proving the reuse path executes.
+                    wp.launch(_iter_count_increment, dim=1, inputs=[self._sa_execs], device=dev)
                 self.substep(
                     self._state_cur,
                     self._scratch_mid,
@@ -1945,6 +1973,7 @@ class SolverSAPAdaptive:
                     self._dt_half,
                     guess=self._vhalf1,
                     world_active=wa,
+                    reuse_assembly=self._shared_assembly,
                 )
 
                 # half-2 starts from q_{t+h/2}; warm-start from v_full. In the
@@ -2254,6 +2283,7 @@ class SolverSAPAdaptive:
             self._tail_compact,
             self._march_compact,
             self._mc_width,
+            self._shared_assembly,
             # Construction-constant today (precision is baked into the buffer
             # dtypes and kernel table at __init__), keyed defensively so a
             # future mutable-precision refactor cannot replay the other
@@ -2340,6 +2370,7 @@ class SolverSAPAdaptive:
             self._tail_compact,
             self._march_compact,
             self._mc_width,
+            self._shared_assembly,
         )
 
     def _launch_conditional_march(self, eff_dt_max: float, dt_outer: float) -> bool:

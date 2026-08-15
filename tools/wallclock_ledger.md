@@ -61,6 +61,26 @@ Provenance: journal of wf_55df0381-9e4, agents a07793410/a6e00add.
   substeps) — cite the per-substep number, not the wall ratio.
   Provenance: scratchpad chol_gates.log, chol_ab_*.{log,telemetry},
   sap_warp commit (see git log).
+- Shared full/half1 assembly (2026-08-15, loop pass 3,
+  NEWTON_SAP_SHARED_ASSEMBLY default ON, "0" disables): half-1 solves
+  reuse the full solve's dt-independent assembly (rigid ID, tau, mass
+  matrix + factorization, body/contact Jacobians, Delassus weights);
+  only dt fill, v_star assembly and the contact solve re-run. Bitwise
+  proof is TOTAL: det=1 ON/OFF 1024x8 training telemetry files are
+  byte-identical (substep series 306..14757 equal). Gates 6/6: construct,
+  flag-equiv (3 new arms shared-assembly / boundary-shared /
+  shared-full-stack, engagement counter >0 ON / ==0 OFF), march-equiv
+  fingerprint [6,25,20,24,19], determinism, containment, speed A/B.
+  SPEED VERDICT: neutral within noise -- late-window (it5-7) per-substep
+  ratio OFF/ON 0.979, whole-run per-substep ~1% apart, raw wall ON -6.0%
+  (188.0 vs 200.0 s) but trajectory-confounded (OFF ran 7.6% more
+  substeps). The duplicated assembly is a SMALL slab fraction at this
+  scene/scale: the slab is contact-solve-dominated (dense packs, GEMM,
+  LS trips), assembly kernels are small-grid. Kept default ON as pure
+  work-deletion with zero measured cost and larger win potential on
+  assembly-heavy scenes. Provenance: scratchpad sharedasm_g12.log,
+  sharedasm_g3456.log, sharedasm_ab_{det1,prod}_{on,off}.{log,telemetry};
+  sap_warp commit b1e48a3.
 - Snapshot commits: newton-adaptive march-counter-log 9c9dc934, sap_warp
   main 79e43bd, IsaacLab develop 82c0679d88.
 
@@ -102,21 +122,20 @@ overlap, narrowing) not precision.
 
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Shared assembly between full and half1 solves: same anchor state q_t =>
-   byte-identical contact set/Jacobians/Delassus; only R(dt) and vhat
-   differ. Compute once, read twice — bitwise by construction. Est. ~10-15%
-   if assembly is ~1/3 of slab.
-2. Stream overlap of full and half1 solves (data-independent; half2 depends
+1. Stream overlap of full and half1 solves (data-independent; half2 depends
    on half1). Hides one solve's latency where kernels underfill the GPU.
-   Canonical-per-solve reductions keep det mode compatible.
-3. LS-interior compaction isolated A/B at 1024 production scale: the ONE
+   Canonical-per-solve reductions keep det mode compatible. NOTE from the
+   shared-assembly measurement (landed, neutral): the slab is
+   contact-solve-dominated, so the overlap prize is the two Newton solves
+   themselves; with half-1 assembly now skipped, its solve starts sooner.
+2. LS-interior compaction isolated A/B at 1024 production scale: the ONE
    stack feature never isolated at scale; micro-scene measured it 1.6-1.8%
    SLOWER. If negative at scale too: default it OFF (one env var, free wall).
-4. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
+3. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
    GEMM tiles): structural surgery, authorized; measure kernel-level first.
-5. Remaining un-narrowed env-axis launches outside contact_solve.py
+4. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-6. Housekeeping: run pre-commit across the accumulated commits and
+5. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).

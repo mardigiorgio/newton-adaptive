@@ -213,6 +213,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_CONTAINMENT",
     "NEWTON_SAP_MARCH_COMPACT",
     "NEWTON_SAP_MARCH_COMPACT_WIDTH",
+    "NEWTON_SAP_SHARED_ASSEMBLY",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -265,6 +266,7 @@ def _cfg(
     conditional: str = "0",
     containment: str = "0",
     march: str = "0",
+    shared: str = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -281,6 +283,9 @@ def _cfg(
         # Default-ON in the solver; reference cells pin the strict boundary
         # kernel so containment is only ever the explicitly varied factor.
         "NEWTON_SAP_CONTAINMENT": containment,
+        # Default-ON in the solver; every cell pins it so half-1 assembly
+        # reuse is only ever the explicitly varied factor.
+        "NEWTON_SAP_SHARED_ASSEMBLY": shared,
         # Pinned UNIFORMLY (never the varied factor): the deterministic and
         # legacy accumulation orders are different fp orders by design, so no
         # bitwise contract exists across them. All cells run the new
@@ -377,6 +382,25 @@ CONFIGS = [
         conditional="1",
         containment="1",
     ),
+    # Half-1 shared assembly: the reuse must be bitwise-invisible in BOTH
+    # contact cadences (the reused buffers are cadence-agnostic: same anchor
+    # state and contact set within an attempt), and under the full shipping
+    # tier where the skip changes the captured launch stream.
+    _cfg("shared-assembly", "0", None, False, shared="1"),
+    _cfg("boundary-shared", "0", None, False, compact="1", refresh="1", shared="1"),
+    _cfg(
+        "shared-full-stack",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        conditional="1",
+        march="1",
+        shared="1",
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -391,6 +415,8 @@ BOUNDARY_FAMILY = (
     "march-compact-graph",
     "march-compact-conditional",
     "boundary-conditional",
+    "boundary-shared",
+    "shared-full-stack",
     "boundary-containment",
 )
 
@@ -494,6 +520,10 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         assert not solver._conditional_enabled, f"[{name}] cell inherited the conditional-march tier"
     containment_requested = env.get("NEWTON_SAP_CONTAINMENT") == "1"
     assert solver.containment == containment_requested, f"[{name}] containment switch did not reach construction"
+    shared_requested = env.get("NEWTON_SAP_SHARED_ASSEMBLY") == "1"
+    assert solver._shared_assembly == shared_requested, (
+        f"[{name}] shared-assembly switch did not reach construction"
+    )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
         march_requested
@@ -658,6 +688,22 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             "the compacted path leaked into an OFF cell."
         )
 
+    # Shared-assembly engagement: the counter records once per half-1 solve
+    # emission inside the captured body, so replays count; a zero total in an
+    # ON cell means the reuse path never executed (vacuous), a nonzero total
+    # in an OFF cell means it leaked. Host read is post-march only.
+    sa_execs = solver.shared_assembly_execs()
+    if shared_requested:
+        assert sa_execs > 0, (
+            f"[{name}] shared-assembly reuse never executed (engagement "
+            "counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert sa_execs == 0, (
+            f"[{name}] shared-assembly counter advanced with the switch off -- "
+            "the reuse path leaked into an OFF cell."
+        )
+
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
     # every mode (the collide runs outside the captured body); exact for the
     # per-attempt cadence only on eager (graph=0) arms -- graph replays do
@@ -670,6 +716,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "conditional_launches": int(solver._conditional_launches),
         "mc_execs": (mc_narrow, mc_wide),
         "narrow_sites": sorted(narrow_sites),
+        "sa_execs": sa_execs,
     }
 
 
