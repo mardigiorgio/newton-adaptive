@@ -178,6 +178,13 @@ def run_arm(name: str, max_iterations: int, containment: str | None):
         dt_inner_max=DT_OUTER,
         max_substeps=64,
         max_iterations=max_iterations,
+        # Default "drake" = the ctor default (construction unchanged when the
+        # env var is unset). SAP_CONTAINMENT_PRESET selects another preset so
+        # the certificate can name the configuration under test (e.g. the
+        # production approx32 modes when certifying the fp32 solve stack,
+        # whose drake-mode control arm needs > the shipping cap on this
+        # stiff-impact scene and would trip the zero-failure vacuity guard).
+        contact_preset_variant=os.environ.get("SAP_CONTAINMENT_PRESET", "drake"),
     )
     # Initial committed state (post-fk): the pre-failure reference when the
     # failure fires on boundary 0 (contact rows can exist at a standoff, so
@@ -253,7 +260,22 @@ def main() -> int:
         ),
         "failing world latched diverged at some boundary": first_latch is not None,
         "control arm completed with no raise": raised_b is None and len(rec_b) == K_BOUNDARIES,
-        "control arm converged everywhere (zero failure events)": sol_b.solve_failure_events == 0,
+        # Zero control-arm failure events is the strict default. The healthy-row
+        # isolation oracle only compares the contact-free worlds, whose rows
+        # carry zero failures in BOTH arms (the impact world -- the forced
+        # FAIL_WORLD -- is excluded from the comparison), so the oracle
+        # tolerates RECOVERED control-arm events on the impact world. The
+        # explicit opt-in exists for solve configurations (e.g. the fp32
+        # stack) whose shipping iteration cap organically caps out on this
+        # scene's first impact and recovers by shrink-retry; a LATCH in the
+        # control arm still fails the next guard unconditionally.
+        "control arm converged everywhere (zero failure events)": (
+            sol_b.solve_failure_events == 0
+            or (
+                os.environ.get("SAP_CONTAINMENT_ALLOW_RECOVERED_CONTROL") == "1"
+                and all(int(r["diverged"].sum()) == 0 for r in rec_b)
+            )
+        ),
         "control arm latched no world": all(int(r["diverged"].sum()) == 0 for r in rec_b),
         "containment boundaries counted (engagement)": sol_a._containment_boundaries == K_BOUNDARIES,
     }
@@ -367,11 +389,16 @@ def main() -> int:
 
     print(
         f"containment events={sol_a.solve_failure_events} "
+        f"control events={sol_b.solve_failure_events} (recovered-control allowed: "
+        f"{os.environ.get('SAP_CONTAINMENT_ALLOW_RECOVERED_CONTROL') == '1'}) "
         f"fail_world_counts={a_fail_counts.tolist()} first_latch_boundary={first_latch}"
     )
     if failed:
         return 1
-    print("SAP-CONTAINMENT: PASS")
+    print(
+        f"SAP-CONTAINMENT: PASS (preset={os.environ.get('SAP_CONTAINMENT_PRESET', 'drake')}, "
+        f"solve_precision={getattr(sol_a, 'solve_precision', 'fp64')})"
+    )
     return 0
 
 

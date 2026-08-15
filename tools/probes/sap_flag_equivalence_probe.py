@@ -47,6 +47,13 @@ Oracle argument (why this is not a tautology or a snapshot):
         identical in both bodies. The deterministic active-list build
         becomes canonical-ascending under this flag; consumers write
         world-private rows, so list order is bitwise-irrelevant.
+        Engagement is proven at three levels: both branch-execution
+        counters advance (allocated unconditionally, so an OFF cell's
+        (0, 0) is a real device read, not a restatement of the flag), the
+        in-branch capacity guard stays clean, and the contact solve's
+        emission-time site record must contain every converted launch
+        family this scene drives -- with OFF cells showing an EMPTY record
+        (no site ever emitted narrowed).
       * NEWTON_SAP_CONTAINMENT swaps the boundary-exit kernel for a variant
         that keeps a per-world solve failure OUT of the batch status word
         (containing it in the failing world's own reject/latch machinery)
@@ -211,6 +218,37 @@ ALL_FLAGS = (
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
 
 _SCRATCH = tempfile.mkdtemp(prefix="sap_flag_probe_")
+
+# Narrow-site families every march-compact arm of THIS scene must have
+# emitted with a narrowed env grid: the per-solve prepare family emits on
+# every narrow eval-core emission; the Newton/LS families emit whenever a
+# narrow-routed iteration carries a constrained world (this scene's
+# stragglers rest on the ground, so one always does). The armijo default
+# line search drives the no-hessian trial family. The attempt-consistent
+# scale sites (prep_scale_a_inv_pd/limit, scale_w_eff) are NOT listed:
+# they emit only under the opt-in NEWTON_SAP_ATTEMPT_CONSISTENT_R=1, which
+# every cell here leaves at its default (off).
+EXPECTED_NARROW_SITES = frozenset(
+    {
+        "prep_copy_guess",
+        "prep_a_diag",
+        "prep_build_pd",
+        "prep_build_limit",
+        "prep_clear_pdof",
+        "prep_mark_contact_pdof",
+        "prep_mark_model_pdof",
+        "proj_hessian",
+        "hessian_total",
+        "base_cost",
+        "axpy_trial_init",
+        "proj_gamma",
+        "eval_pd",
+        "eval_limit",
+        "commit_ls",
+        "proj_gamma_update",
+        "model_terms_grad",
+    }
+)
 
 
 def _cfg(
@@ -567,6 +605,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     # poison must stay clear, and OFF cells must never advance either
     # counter (leak guard). Host reads are post-march only.
     mc_narrow, mc_wide = solver.march_compact_execs()
+    narrow_sites = solver._sap.contact_solve.narrow_sites_emitted
     if march_expected:
         assert mc_narrow > 0, (
             f"[{name}] march-compact narrow branch never executed -- no iteration "
@@ -580,10 +619,23 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             f"[{name}] march-compact capacity poison latched -- a device env list "
             "outgrew the narrow grid budget."
         )
+        # Site-level engagement: the narrow body must actually contain every
+        # converted list-indexed launch family this scene drives; a missing
+        # tag means a converted site silently never emitted narrowed (dead
+        # branch or lost plumbing), not that the feature is off.
+        missing = EXPECTED_NARROW_SITES - narrow_sites
+        assert not missing, (
+            f"[{name}] march-compact narrow body never emitted converted "
+            f"site(s) {sorted(missing)} -- the narrowing does not reach them."
+        )
     else:
         assert (mc_narrow, mc_wide) == (0, 0), (
             f"[{name}] march-compact branch counters advanced in an OFF cell -- "
             "the narrow-grid path leaked."
+        )
+        assert not narrow_sites, (
+            f"[{name}] list-indexed sites emitted with a narrowed grid in an "
+            f"OFF cell ({sorted(narrow_sites)}) -- the narrow-grid path leaked."
         )
 
     # LS-interior compaction engagement: the device counter accumulates each
@@ -615,6 +667,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "ls_trip_env_total": ls_trip_env_total,
         "conditional_launches": int(solver._conditional_launches),
         "mc_execs": (mc_narrow, mc_wide),
+        "narrow_sites": sorted(narrow_sites),
     }
 
 

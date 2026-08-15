@@ -41,8 +41,11 @@ one ``wp.capture_while`` conditional while-node -- the solve's own device
 conditionals nest inside it -- and keeps only the post-march converge-or-throw
 status check on the host. Reject is a masked
 state-hold (a data branch), not control flow. The inner SAP solve is run CONVERGENT (to a
-fixed ``optimality_rel_tol = 1e-8``, independent of ``tol``) so its residual
-cannot pollute the step-doubling error estimate at any integration tolerance.
+fixed ``optimality_rel_tol``, independent of ``tol``) so its residual
+cannot pollute the step-doubling error estimate at any integration tolerance;
+the target is coupled to the selected solve precision (``1e-8`` on the fp64
+default; the fp32-achievable analogue when ``solve_precision="fp32"`` is
+opted into -- see ``_FP32_OPTIMALITY_K``).
 A per-world inner-solve failure is CONTAINED by default: the failing world's
 attempt rejects (its error is forced to the divergence sentinel, so the
 unconverged result is never committed) and retries at a shrunken dt, latching
@@ -112,6 +115,21 @@ _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
 # often a world in sustained contact re-probes its knee.
 _CEILING_MARGIN = wp.constant(wp.float32(0.9))
 _CEILING_RELAX = wp.constant(wp.float32(float(os.environ.get("NEWTON_ADAPTIVE_CEILING_RELAX", "1.1"))))
+
+# ---- fp32 solve-precision optimality target ----
+# The inner solve's convergence norms are evaluated in the solve dtype, so
+# gradient cancellation (two O(norm)-sized impulse terms subtracting to ~0 at
+# convergence) floors the achievable relative residual near that dtype's
+# epsilon. fp64 reaches the pinned 1e-8 target. In fp32 that target sits BELOW
+# the floor: every solve would cap out unconverged, contained rejection would
+# shrink dt to the floor, and every contacting world would latch diverged. The
+# fp32-selected configuration therefore couples its target to
+# max(1e-8, _FP32_OPTIMALITY_K * eps_fp32). K bounds the measured stagnation
+# floor of the fp32 residual evaluation with margin for population tails the
+# probe scene cannot sample; it is re-derived by
+# tools/probes/sap_fp32_floor_probe.py and must never be lowered below what
+# that probe reports. The fp64 path never reads this constant.
+_FP32_OPTIMALITY_K = 16.0
 
 
 def _dt_hist_layout(dt_min: float, dt_init: float, bins_per_decade: int) -> tuple[int, float]:
@@ -519,6 +537,15 @@ def _average_velocity_guess_f64(
 ):
     i = wp.tid()
     out[i] = wp.float64(0.5) * (a[i] + b[i])
+
+
+@wp.kernel
+def _guess_stage_f64_to_f32(
+    src: wp.array[wp.float64],
+    dst: wp.array[wp.float32],
+):
+    i = wp.tid()
+    dst[i] = wp.float32(src[i])
 
 
 @wp.kernel
@@ -1001,6 +1028,7 @@ class SolverSAPAdaptive:
         contact_preset_variant: str = "drake",
         line_search_variant: str = "armijo_decay",
         contact_tau_d: float = 0.01,
+        solve_precision: str | None = None,
         **kwargs,
     ):
         if mode not in _MODE_CODES:
@@ -1067,16 +1095,56 @@ class SolverSAPAdaptive:
         self._failure_replay_dt_scales = [float(x) for x in _dt_spec.split(",") if x.strip()] if _dt_spec else []
 
         # ---- inner SAP solver + model ----
+        # Solve-precision selection (opt-in; fp64 is the default). "fp64"
+        # passes NO precision overrides, leaving every knob to the contact
+        # preset (whose contact solve is fp64 in all shipped presets) -- the
+        # exact pre-option construction. "fp32" overrides the full solve stack
+        # -- free motion, contact weights, contact solve, contact linear solve
+        # -- to float32 on top of the preset's MODE choices (weights, contact
+        # points, boundary-pose handling, position integration), so precision
+        # is the only thing that changes. Committed state, the error metric,
+        # the controller, and the march are float32/float64 exactly as before
+        # in both settings. Resolution: explicit argument, else
+        # NEWTON_SAP_SOLVE_PRECISION, else fp64.
+        if solve_precision is None:
+            solve_precision = os.environ.get("NEWTON_SAP_SOLVE_PRECISION", "fp64")
+        _sp = str(solve_precision).strip().lower()
+        if _sp == "f32":
+            _sp = "fp32"
+        elif _sp == "f64":
+            _sp = "fp64"
+        if _sp not in ("fp32", "fp64"):
+            raise ValueError(f"solve_precision must be 'fp32'/'f32' or 'fp64'/'f64', got {solve_precision!r}.")
+        self._solve_precision = _sp
+
         # The convex SAP solve runs CONVERGENT (conditional, per-env early exit) to a fixed
         # optimality_rel_tol, independent of the integration tolerance: the solver residual
         # must sit far below tol at ANY tol setting, else it pollutes the step-doubling
-        # error estimate and the controller subdivides spuriously.
-        self._optimality_rel_tol = 1.0e-8
+        # error estimate and the controller subdivides spuriously. The target is COUPLED
+        # to the solve dtype: fp64 keeps the pinned 1e-8; fp32 uses the tightest
+        # achievable analogue (see _FP32_OPTIMALITY_K), because the convergence norms are
+        # evaluated in the solve dtype and a target below the dtype's residual floor can
+        # never be met by any iteration budget.
+        if self._solve_precision == "fp32":
+            self._optimality_rel_tol = max(1.0e-8, _FP32_OPTIMALITY_K * float(np.finfo(np.float32).eps))
+        else:
+            self._optimality_rel_tol = 1.0e-8
         self._sap_model = sap_model_from_newton(model)
         # Coord-layout newtons store control position targets per coordinate;
         # the remap gathers them into the dof layout SAP indexes. None when the
         # layouts already coincide (control arrays then pass through unchanged).
         self._target_remap = SapTargetRemap.from_newton_model(model)
+        # fp64 passes an EMPTY override dict so the construction is argument-
+        # for-argument identical to the pre-option solver (bitwise-clean
+        # default path); fp32 overrides the four precision knobs only.
+        _precision_overrides: dict[str, str] = {}
+        if self._solve_precision == "fp32":
+            _precision_overrides = {
+                "free_motion_solve_precision": "fp32",
+                "contact_solve_precision": "fp32",
+                "contact_linear_solve_precision": "fp32",
+                "sap_contact_weight_precision": "fp32",
+            }
         self._sap = SolverSAP(
             self._sap_model,
             max_rigid_contact=int(max_rigid_contact),
@@ -1088,6 +1156,7 @@ class SolverSAPAdaptive:
             contact_tau_d=float(contact_tau_d),
             contact_preset_variant=str(contact_preset_variant),
             line_search_variant=str(line_search_variant),
+            **_precision_overrides,
         )
 
         # ---- scratch SapStates (independent backing arrays) ----
@@ -1105,8 +1174,15 @@ class SolverSAPAdaptive:
         self._vfull = wp.clone(self._sap.contact_solve.v_flat)
         if self._sap.contact_solve.v_flat.dtype == wp.float64:
             self._average_velocity_guess_kernel = _average_velocity_guess_f64
+            self._guess_stage_f64 = None
         elif self._sap.contact_solve.v_flat.dtype == wp.float32:
             self._average_velocity_guess_kernel = _average_velocity_guess_f32
+            # The public->SAP boundary conversion kernels write CANONICAL f64
+            # SAP-order velocities; a float32 solve stack needs a staging
+            # buffer between that contract and the f32 guess buffers.
+            self._guess_stage_f64 = wp.zeros(
+                int(model.joint_dof_count), dtype=wp.float64, device=device
+            )
         else:
             raise TypeError(f"Unsupported SAP velocity dtype {self._sap.contact_solve.v_flat.dtype!r}.")
         self._solve_ok = wp.ones(wc, dtype=int, device=device)
@@ -1290,7 +1366,7 @@ class SolverSAPAdaptive:
         # The pair cap is GLOBAL across worlds and overflow drops mesh contacts
         # silently, so it must be scene-sized by the caller — the default only
         # fits small scenes.
-        # NEWTON_SAP_DETERMINISTIC (default ON; "0" opts out): run-to-run
+        # NEWTON_SAP_DETERMINISTIC (default OFF; "1" opts in): run-to-run
         # reproducibility for the whole SAP-adaptive stack. Here it makes the
         # pipeline sort contacts by a canonical key after the narrow phase,
         # so the global contact buffer ORDER (which every downstream per-env
@@ -1301,7 +1377,7 @@ class SolverSAPAdaptive:
         # capacity caps are unsaturated: an overflowing triangle-pair or
         # contact buffer drops entries by arrival order, which no sort can
         # canonicalize -- caps must stay scene-sized.
-        self._deterministic = os.environ.get("NEWTON_SAP_DETERMINISTIC", "1") != "0"
+        self._deterministic = os.environ.get("NEWTON_SAP_DETERMINISTIC", "0") == "1"
         # Deterministic contact packing indexes every buffered candidate
         # contact with CONTACT_ID_BITS id bits, so the reducer capacity (=
         # the triangle-pair cap) must fit that budget; clamp oversized caps
@@ -1399,13 +1475,16 @@ class SolverSAPAdaptive:
         else:
             _mc_width = max(64, wc // 16)
         self._mc_width = max(1, min(_mc_width, max(1, wc // 2)))
+        # Engagement counters (dim-1 increments recorded FIRST inside each
+        # branch body). Allocated UNCONDITIONALLY so an OFF-configuration read
+        # is a real observation: any branch-body emission in an OFF cell
+        # advances a counter instead of being masked by an early return.
+        self._mc_narrow_execs = wp.zeros(1, dtype=wp.int32, device=device)
+        self._mc_wide_execs = wp.zeros(1, dtype=wp.int32, device=device)
         if self._march_compact:
-            # Branch condition word (int32[1], read by the conditional node),
-            # engagement counters (dim-1 increments recorded FIRST inside
-            # each branch body), and the chunked canonical-build scratch.
+            # Branch condition word (int32[1], read by the conditional node)
+            # and the chunked canonical-build scratch.
             self._mc_cond = wp.zeros(1, dtype=wp.int32, device=device)
-            self._mc_narrow_execs = wp.zeros(1, dtype=wp.int32, device=device)
-            self._mc_wide_execs = wp.zeros(1, dtype=wp.int32, device=device)
             _n_chunks = (wc + _MC_CHUNK - 1) // _MC_CHUNK
             self._mc_n_chunks = _n_chunks
             self._mc_chunk_counts = wp.zeros(_n_chunks, dtype=wp.int32, device=device)
@@ -1481,10 +1560,10 @@ class SolverSAPAdaptive:
 
     def march_compact_execs(self) -> tuple[int, int]:
         """(narrow, wide) branch execution counts -- the engagement
-        tripwires. Host sync; call outside the hot path. (0, 0) when the
-        feature is off."""
-        if not self._march_compact:
-            return (0, 0)
+        tripwires. Host sync; call outside the hot path. Always a real
+        device read (the counters exist in every configuration), so an OFF
+        configuration's (0, 0) observes that no branch body ever emitted
+        rather than restating the flag."""
         return (
             int(self._mc_narrow_execs.numpy()[0]),
             int(self._mc_wide_execs.numpy()[0]),
@@ -1544,6 +1623,22 @@ class SolverSAPAdaptive:
     @property
     def mode(self) -> str:
         return self._mode
+
+    @property
+    def solve_precision(self) -> str:
+        """Resolved solve-stack precision, ``"fp64"`` (default) or ``"fp32"`` (opt-in).
+
+        fp32 also couples the inner optimality target to the fp32-achievable
+        analogue (``optimality_rel_tol`` reflects the coupled value); the
+        integration tolerance ``tol`` is the physics contract and is identical
+        in both settings.
+        """
+        return self._solve_precision
+
+    @property
+    def optimality_rel_tol(self) -> float:
+        """The inner solve's optimality target actually in force (dtype-coupled)."""
+        return float(self._optimality_rel_tol)
 
     @property
     def tiling(self) -> str:
@@ -1731,7 +1826,18 @@ class SolverSAPAdaptive:
 
     def _copy_state_velocity_to_sap_guess(self, state_in, guess) -> None:
         if getattr(state_in, "joint_qd_order", "sap") == "public":
-            self._sap._copy_public_joint_velocity_to_sap(state_in, guess)
+            if guess.dtype == wp.float32:
+                # The boundary conversion writes canonical f64 SAP velocities;
+                # stage there, then downcast into the f32 guess buffer.
+                self._sap._copy_public_joint_velocity_to_sap(state_in, self._guess_stage_f64)
+                wp.launch(
+                    _guess_stage_f64_to_f32,
+                    dim=int(self.model.joint_dof_count),
+                    inputs=[self._guess_stage_f64, guess],
+                    device=self.model.device,
+                )
+            else:
+                self._sap._copy_public_joint_velocity_to_sap(state_in, guess)
         else:
             wp.copy(guess, state_in.joint_qd)
 
@@ -2148,6 +2254,11 @@ class SolverSAPAdaptive:
             self._tail_compact,
             self._march_compact,
             self._mc_width,
+            # Construction-constant today (precision is baked into the buffer
+            # dtypes and kernel table at __init__), keyed defensively so a
+            # future mutable-precision refactor cannot replay the other
+            # dtype's launch stream.
+            self._solve_precision,
         )
         graph = self._graph_cache.get(key)
         if graph is None:
