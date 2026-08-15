@@ -31,17 +31,31 @@ stops the instant every world has reached its boundary)::
         if no world is unfinished:  break              # ONE 4-byte host flag read per iteration
     write state_cur back
 
-The ONLY host sync in the step path is that single 4-byte boundary-flag read per
-iteration (iteration counts are scene-dependent: a few per boundary on gentle scenes,
-10-20+ measured on contact-rich in-hand manipulation): it lets the loop stop as soon as every world
-lands instead of grinding a fixed count of wasted no-op substeps (a ``dt=0`` no-op still
-runs the full batched SAP solve, so wasted iterations are NOT free). Reject is a masked
-state-hold (a data branch), not control flow. The inner SAP solve is run CONVERGENT (to
-``optimality_rel_tol = max(kappa*tol, 1e-8)``, kappa=1e-3; CENIC Sec. VI-B) so its residual
-cannot pollute the step-doubling error estimate. The substep body -- including the solve's
-``wp.capture_while`` -- is captured ONCE and replayed per iteration: capturing ONE such body
-is the intended use of conditional graph nodes (the old >=1024-env SIGABRT was from capturing
-3N of them in the old per-N loop), validated clean to 4096 envs.
+The ONLY host sync in the step path is a 4-byte boundary-status read: once per
+iteration on the per-iteration tier (it lets the loop stop as soon as every world
+lands instead of grinding a fixed count of wasted no-op substeps -- a ``dt=0`` no-op
+still runs the full batched SAP solve, so wasted iterations are NOT free), or ONCE
+PER BOUNDARY on the whole-march conditional tier (default ON;
+``NEWTON_SAP_ADAPTIVE_CONDITIONAL=0`` opts out), which records the entire march as
+one ``wp.capture_while`` conditional while-node -- the solve's own device
+conditionals nest inside it -- and keeps only the post-march converge-or-throw
+status check on the host. Reject is a masked
+state-hold (a data branch), not control flow. The inner SAP solve is run CONVERGENT (to a
+fixed ``optimality_rel_tol = 1e-8``, independent of ``tol``) so its residual
+cannot pollute the step-doubling error estimate at any integration tolerance.
+A per-world inner-solve failure is CONTAINED by default: the failing world's
+attempt rejects (its error is forced to the divergence sentinel, so the
+unconverged result is never committed) and retries at a shrunken dt, latching
+``diverged`` at the dt floor -- the same per-world path a NaN state takes,
+while every other world marches on. A floor-latch freezes the world's
+committed state and force-advances its clock to the boundary, so the latch
+(:attr:`diverged`, read after the boundary call) is the CONSUMER'S only signal
+that the world's trajectory is broken; recovering the world -- resetting it
+and terminating its episode -- is the consumer's responsibility, the solver
+only reports.
+``NEWTON_SAP_CONTAINMENT=0`` restores the strict batch-fatal converge-or-throw. The substep body -- including the solve's
+``wp.capture_while`` -- captures as a flat launch stream, replayed per iteration on the
+per-iteration tier and re-recorded as the while-node body on the conditional tier.
 
 Two modes (one machine; mode only changes how ``dt`` evolves, set per solver) -- these are
 the only two compared:
@@ -57,11 +71,15 @@ This file is self-contained: every controller kernel is inlined below (no shared
 
 from __future__ import annotations
 
+import contextlib
+import math
 import os
+import warnings
 
 import numpy as np
 import warp as wp
 from sim.sap_runtime import (
+    SapTargetRemap,
     sap_contacts_from_newton,
     sap_control_from_newton,
     sap_model_from_newton,
@@ -69,11 +87,12 @@ from sim.sap_runtime import (
 )
 
 # sys.path is configured by the package __init__ before this module is imported.
+from sim.contact_solve import _env_grid_capacity_guard
 from sim.solver_sap import SolverSAP
 
 import newton
 
-from ..adaptive_boundary import QuantileBoundaryStop
+from ..adaptive_boundary import mark_unfinished_contained, mark_unfinished_with_status
 
 # ---- step-evolution mode codes (passed to _adapt_dt as a uniform kernel arg) ----
 _MODE_FIXED = wp.constant(0)
@@ -85,6 +104,108 @@ _DRAKE_MIN_SHRINK = wp.constant(wp.float32(0.1))
 _DRAKE_MAX_GROW = wp.constant(wp.float32(5.0))
 _DRAKE_HYSTERESIS_HIGH = wp.constant(wp.float32(1.2))
 _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
+# Ceiling memory: a rejection at step h records dt_ceiling = 0.9*h; growth is
+# clamped to the ceiling, which relaxes per accepted step (default 1.1x,
+# override NEWTON_ADAPTIVE_CEILING_RELAX). Handles error landscapes with a knee
+# (contact regimes) where order-2 growth sizing otherwise oscillates
+# accept-grow-reject around the acceptance boundary; the relax rate sets how
+# often a world in sustained contact re-probes its knee.
+_CEILING_MARGIN = wp.constant(wp.float32(0.9))
+_CEILING_RELAX = wp.constant(wp.float32(float(os.environ.get("NEWTON_ADAPTIVE_CEILING_RELAX", "1.1"))))
+
+
+def _dt_hist_layout(dt_min: float, dt_init: float, bins_per_decade: int) -> tuple[int, float]:
+    """Bin count and low edge for the dt-occupancy histogram.
+
+    One extra decade above ``dt_init`` is included as headroom for configurations where
+    ``dt_outer > dt_init`` (the controller can then grow the step past ``dt_init``, up to
+    ``effective_dt_max = min(dt_max, dt_outer)``). ``dt_max`` defaults to ``inf``, so for
+    the common case ``dt_outer <= dt_init`` the step can never exceed ``dt_init`` and the
+    bins above ``min(dt_max, dt_outer)`` are simply never populated.
+
+    Args:
+        dt_min: Adaptive timestep floor [s].
+        dt_init: Initial adaptive timestep [s].
+        bins_per_decade: Log-spaced bins per decade.
+
+    Returns:
+        ``(n_bins, lo_log10)`` -- total bin count (floor bin + log bins + overflow bin)
+        and ``log10(dt_min)``.
+    """
+    lo_log10 = math.log10(dt_min)
+    n_decades = math.ceil(math.log10(dt_init / dt_min)) + 1
+    return 1 + n_decades * bins_per_decade + 1, lo_log10
+
+
+def _dt_hist_edges(dt_min: float, n_bins: int, bins_per_decade: int) -> np.ndarray:
+    """Edges [s] of the log-spaced bins, i.e. bins ``1 .. n_bins - 2``.
+
+    Length is ``n_bins - 1``: the floor bin (0) and the overflow bin (``n_bins - 1``)
+    are open-ended and contribute no finite edge of their own.
+    """
+    return dt_min * 10.0 ** (np.arange(n_bins - 1) / float(bins_per_decade))
+
+
+_DT_HIST_SENTINEL = 1.0e38
+"""Initial value of the saturation-depth accumulator; means "floor never hit".
+
+Not exactly representable in float32 (rounds to ``9.9999997e37``), so any comparison
+against the untouched accumulator must go through ``float(np.float32(_DT_HIST_SENTINEL))``
+rather than the raw double literal -- see :meth:`SolverSAPAdaptive.dt_histogram_stats`.
+"""
+
+
+@wp.kernel
+def _dt_histogram_accum(
+    dt: wp.array[wp.float32],
+    ideal_dt: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt_min: float,
+    lo_log10: float,
+    bins_per_decade: float,
+    n_bins: int,
+    counts: wp.array[wp.int64],
+    saturation: wp.array[wp.float32],
+):
+    """Bin the timestep this iteration is about to attempt.
+
+    Launched at the TOP of the substep body, before ``_clamp_dt_to_boundary``: at that
+    point ``dt`` still holds the controller's chosen step, not a landing sliver -- the
+    ``_adapt_dt`` accept paths restore ``dt`` from the carried step after a
+    boundary-limited accept precisely so this holds. Worlds already at their boundary
+    are skipped -- they take no further step this interval.
+
+    Bin 0 counts exact floor hits; the ``wp.clamp`` that writes ``dt`` (in ``_seed_dt``
+    and ``_adapt_dt``) produces bitwise ``dt_min`` on clamp, so the equality test is
+    reliable. ``saturation`` accumulates ``min(ideal_dt)`` over floor-clamped worlds,
+    showing how far below the floor the controller wanted to go.
+
+    Precondition: ``dt`` must be finite here. ``NaN`` and ``+inf`` both fail the ``h <=
+    dt_min`` test (NaN comparisons are always false; ``+inf > dt_min``), so they fall
+    through to the ``b = ...`` branch below -- but casting an ``inf``/``NaN``-derived
+    ``wp.log10`` result to ``int`` does not saturate to a large positive index the way the
+    overflow bin needs; it lands ``b`` near or below the valid range, which ``wp.clamp``
+    then floors up to bin 1 (near-floor) instead of the last (overflow) bin -- the
+    INVERTING direction. This is safe because every writer of ``dt`` produces a finite
+    value: ``_seed_dt`` and ``_adapt_dt`` write through ``wp.clamp`` into
+    ``[dt_min, cap]`` (which sanitizes NaN -> ``dt_min`` and ``+inf`` -> the cap), while
+    ``_clamp_dt_to_boundary`` writes boundary remainders of the finite clocks (or 0)
+    and ``_reset_worlds`` writes the finite ``dt_init``; so a non-finite ``dt`` never
+    actually reaches this kernel. No runtime
+    finiteness branch is added here to avoid the per-iteration cost of guarding an
+    otherwise-unreachable case.
+    """
+    i = wp.tid()
+    if sim_time[i] >= next_time[i]:
+        return
+    h = dt[i]
+    if h <= dt_min:
+        wp.atomic_add(counts, 0, wp.int64(1))
+        wp.atomic_min(saturation, 0, ideal_dt[i])
+        return
+    b = 1 + int(wp.floor((wp.log10(h) - lo_log10) * bins_per_decade))
+    wp.atomic_add(counts, wp.clamp(b, 1, n_bins - 1), wp.int64(1))
 
 
 # ============================================================================
@@ -142,16 +263,24 @@ def _clamp_dt_to_boundary(
     dt_half: wp.array[wp.float32],
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
+    limited: wp.array[wp.int32],
 ):
-    """Clamp dt so no world oversteps its boundary; worlds at/past it get dt=0 (no-op)."""
+    """Clamp dt so no world oversteps its boundary; worlds at/past it get dt=0 (no-op).
+
+    ``limited[i]=1`` marks a step artificially shortened by the boundary (a "landing
+    sliver"), so the controller can exempt it from step-size resizing (Drake's
+    artificially-limited rule, always on).
+    """
     i = wp.tid()
     remaining = next_time[i] - sim_time[i]
+    limited[i] = 0
     if remaining <= wp.float32(0.0):
         dt[i] = wp.float32(0.0)
         dt_half[i] = wp.float32(0.0)
     elif dt[i] > remaining:
         dt[i] = remaining
         dt_half[i] = remaining * wp.float32(0.5)
+        limited[i] = 1
 
 
 @wp.kernel
@@ -160,6 +289,9 @@ def _inf_norm_state_error_kernel(
     joint_q_double: wp.array[wp.float32],
     state_scale: wp.array2d[wp.float32],
     coords_per_world: int,
+    joint_qd_commit: wp.array[wp.float32],
+    dofs_per_world: int,
+    rtol_over_atol: float,
     error_out: wp.array[wp.float32],
 ):
     """Per-world step-doubling accuracy metric (Kurtz & Castro, Sec. V-E)::
@@ -170,10 +302,22 @@ def _inf_norm_state_error_kernel(
     diagonal ``S`` (here identity). NaN is flagged PER COMPONENT: ``wp.max`` is fmaxf
     on CUDA, which returns the non-NaN operand, so a NaN difference would otherwise be
     silently dropped from the running max and a non-finite world would report error 0
-    and be committed (the same bug was found and fixed in SolverMuJoCoAdaptive's error
-    kernel). NaN/inf collapse to a large sentinel so the controller treats them as
+    and be committed. NaN/inf collapse to a large sentinel so the controller treats them as
     divergence -- including in ``fixed`` mode, where ``joint_q_full == joint_q_double``
     gives ``e == 0`` for finite states (always accept) and the sentinel for NaN ones.
+
+    With ``rtol_over_atol > 0``, each coordinate's difference is normalized by
+    ``1 + (rtol/atol)*|q|`` so the fixed-tol accept test is equivalent to
+    ``|d| <= atol + rtol*|q|`` -- the budget scales with coordinate magnitude exactly
+    as the float grid does, so a large coordinate's representation noise can never pin
+    the estimate near tol and freeze the controller's deadband. Zero disables the
+    branch (bit-identical legacy path).
+
+    The error NORM stays position-only, but the committed state includes ``joint_qd``,
+    so finiteness must be checked there too: a non-finite velocity with still-finite
+    positions would otherwise commit (position error looks small) and poison
+    subsequent steps via forces ~ v. ``joint_qd_commit`` is the commit candidate's
+    velocity.
     """
     world = wp.tid()
     q_start = world * coords_per_world
@@ -185,12 +329,186 @@ def _inf_norm_state_error_kernel(
         if wp.isnan(d):
             has_nan = 1
         else:
+            if rtol_over_atol > 0.0:
+                m = wp.max(wp.abs(joint_q_double[q_start + i]), wp.abs(joint_q_full[q_start + i]))
+                d = d / (wp.float32(1.0) + rtol_over_atol * m)
             max_err = wp.max(max_err, state_scale[world, i] * d)
+
+    for i in range(dofs_per_world):
+        v = joint_qd_commit[world * dofs_per_world + i]
+        if wp.isnan(v) or wp.isinf(v):
+            has_nan = 1
 
     if has_nan != 0 or wp.isnan(max_err) or wp.isinf(max_err):
         max_err = float(1.0e10)
 
     error_out[world] = max_err
+
+
+@wp.kernel
+def _inf_norm_state_error_indexed_kernel(
+    joint_q_full: wp.array[wp.float32],
+    joint_q_double: wp.array[wp.float32],
+    state_scale: wp.array2d[wp.float32],
+    coords_per_world: int,
+    joint_qd_commit: wp.array[wp.float32],
+    dofs_per_world: int,
+    idx: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    slot: int,
+    rtol_over_atol: float,
+    error_out: wp.array[wp.float32],
+):
+    """:func:`_inf_norm_state_error_kernel` over a compacted world list: only
+    worlds in the index list get a fresh error; landed worlds keep their last
+    written value. Safe because a landed world's error never reaches a
+    decision: ``_adapt_dt``'s DONE branch returns before reading ``err``.
+    Fixed launch dim with a device-side count guard so the launch records
+    cleanly under graph capture; the loop body must stay identical to the
+    full-dim kernel's (same fp operation order per world)."""
+    i = wp.tid()
+    if i >= counts[slot]:
+        return
+    world = idx[i]
+    q_start = world * coords_per_world
+
+    max_err = float(0.0)
+    has_nan = int(0)
+    for k in range(coords_per_world):
+        d = wp.abs(joint_q_double[q_start + k] - joint_q_full[q_start + k])
+        # NaN must be flagged per component: wp.max is fmaxf on CUDA, which
+        # RETURNS THE NON-NAN OPERAND (see the full-dim kernel).
+        if wp.isnan(d):
+            has_nan = 1
+        else:
+            if rtol_over_atol > 0.0:
+                m = wp.max(wp.abs(joint_q_double[q_start + k]), wp.abs(joint_q_full[q_start + k]))
+                d = d / (wp.float32(1.0) + rtol_over_atol * m)
+            max_err = wp.max(max_err, state_scale[world, k] * d)
+
+    for k in range(dofs_per_world):
+        v = joint_qd_commit[world * dofs_per_world + k]
+        if wp.isnan(v) or wp.isinf(v):
+            has_nan = 1
+
+    if has_nan != 0 or wp.isnan(max_err) or wp.isinf(max_err):
+        max_err = float(1.0e10)
+
+    error_out[world] = max_err
+
+
+@wp.kernel
+def _reset_active_counts(counts: wp.array[wp.int32]):
+    """Zero the compaction counter (dim=1): slot 0 = active set. Must run
+    before :func:`_build_active_worlds` each iteration (stream order
+    guarantees it)."""
+    counts[0] = 0
+
+
+@wp.kernel
+def _build_active_worlds(
+    dt: wp.array[wp.float32],
+    counts: wp.array[wp.int32],
+    active_idx: wp.array[wp.int32],
+    world_active: wp.array[wp.int32],
+):
+    """Compact the unfinished worlds into an index list plus a per-world gate
+    mask. Runs AFTER the boundary clamp so post-clamp ``dt > 0`` is the single
+    source of truth for "this world attempts a step" -- the same predicate the
+    controller's DONE branch keys on. Unlike the MuJoCo sibling there is no
+    snapshot set: SAP's rollback is "hold ``state_cur``" (the evals write
+    out-of-place scratch and the commit is accept-gated), so a landing world
+    has no saved rows to freeze. List order comes from atomics and is
+    nondeterministic; every consumer writes world-private rows only, so
+    ordering cannot perturb any floating-point result."""
+    i = wp.tid()
+    if dt[i] > wp.float32(0.0):
+        active_idx[wp.atomic_add(counts, 0, 1)] = i
+        world_active[i] = 1
+    else:
+        world_active[i] = 0
+
+
+# Canonical (ascending) active-list build, used in place of the atomic
+# _build_active_worlds when march compaction runs deterministic: the narrow
+# tail body makes the list an ITERATION SPACE, so its order is pinned to a
+# pure function of the dt vector (chunked count -> serial chunk scan ->
+# in-order scatter; every launch has fixed dims and no atomics). Results are
+# bitwise-invariant to list order either way (consumers write world-private
+# rows), so the two builds are interchangeable for physics; the ordered one
+# additionally makes the list itself run-to-run stable.
+_MC_CHUNK = 64
+
+
+@wp.kernel
+def _build_active_worlds_chunk_count(
+    dt: wp.array[wp.float32],
+    n: int,
+    chunk: int,
+    chunk_counts: wp.array[wp.int32],
+):
+    b = wp.tid()
+    lo = b * chunk
+    hi = wp.min(lo + chunk, n)
+    c = int(0)
+    for i in range(lo, hi):
+        if dt[i] > wp.float32(0.0):
+            c = c + 1
+    chunk_counts[b] = c
+
+
+@wp.kernel
+def _build_active_worlds_chunk_scan(
+    chunk_counts: wp.array[wp.int32],
+    n_chunks: int,
+    chunk_offsets: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+):
+    """Serial exclusive scan over the (small) per-chunk counts (dim=1)."""
+    acc = int(0)
+    for b in range(n_chunks):
+        chunk_offsets[b] = acc
+        acc = acc + chunk_counts[b]
+    counts[0] = acc
+
+
+@wp.kernel
+def _build_active_worlds_ordered_scatter(
+    dt: wp.array[wp.float32],
+    n: int,
+    chunk: int,
+    chunk_offsets: wp.array[wp.int32],
+    active_idx: wp.array[wp.int32],
+    world_active: wp.array[wp.int32],
+):
+    b = wp.tid()
+    lo = b * chunk
+    hi = wp.min(lo + chunk, n)
+    c = chunk_offsets[b]
+    for i in range(lo, hi):
+        if dt[i] > wp.float32(0.0):
+            active_idx[c] = i
+            world_active[i] = 1
+            c = c + 1
+        else:
+            world_active[i] = 0
+
+
+@wp.kernel
+def _derive_narrow_cond(
+    counts: wp.array[wp.int32],
+    cap: int,
+    cond: wp.array[wp.int32],
+):
+    """Select the march-compact branch (dim=1): narrow iff the active-world
+    count fits the narrow grid budget. The narrow body's launch dims are
+    sized to ``cap``, so this predicate is the ONLY thing that may route an
+    iteration into it; the in-branch capacity guard re-checks the same
+    invariant so an edit that skews cond vs dims cannot pass silently."""
+    if counts[0] <= cap:
+        cond[0] = 1
+    else:
+        cond[0] = 0
 
 
 @wp.kernel
@@ -263,41 +581,38 @@ def _adapt_dt(
     dt_min: float,
     dt_max: float,
     divergence_threshold: float,
-    force_accept: wp.array[wp.int32],
+    dt_ceiling: wp.array[wp.float32],
+    limited: wp.array[wp.int32],
+    consec_rej: wp.array[wp.int32],
+    ceiling_cap: float,
+    dt_fixed: float,
 ):
     """The per-world step-doubling controller -- the whole accept/reject/done decision.
 
     Writes ``accept[w]`` (gates the state commit), advances ``sim_time`` on accept, and
     evolves ``dt``/``ideal_dt`` per ``mode``. Every branch is per-thread data flow (no
     device control flow), which is what makes the enclosing substep loop a flat graph.
+
+    ``dt_max`` is the effective per-boundary cap (``min(ctor dt_max, dt_outer)``) that
+    clamps the working ``dt``; ``ceiling_cap`` is the ctor ``dt_max`` (sanitized finite)
+    that bounds the ceiling relax -- the ceiling is cross-boundary memory and must not
+    be pulled down to the current boundary's cap.
     """
     w = wp.tid()
     step = dt[w]
 
     # DONE: world reached its boundary (or clamp zeroed its step) -> commit nothing.
+    # Out-of-place scratch keeps a stalled world's state untouched by construction
+    # (state_cur is read-only through the evals), so there is nothing to restore and
+    # nothing to accept: committing here would copy dt=0 scratch garbage over good
+    # state. Returning before the ideal_dt writes also carries the good ideal_dt
+    # across the boundary unchanged.
     if sim_time[w] >= next_time[w] or step <= wp.float32(0.0):
         accept[w] = False
         return
 
     e = err[w]
     is_div = wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold
-
-    # ---------- Quantile-stop forced completion ----------
-    # The boundary loop abandoned this world once enough of the batch had landed, so take
-    # the boundary-clamped remainder unconditionally: time becomes exact and only this one
-    # step's local error exceeds tol. A non-finite step is still never committed.
-    if force_accept[0] == 1:
-        if is_div:
-            accept[w] = False
-            sim_time[w] = next_time[w]
-            diverged[w] = True
-            return
-        accept[w] = True
-        sim_time[w] = next_time[w]
-        accepted_error[w] = e
-        substeps_frame[w] = substeps_frame[w] + 1
-        wp.atomic_add(cum_accepted, 0, 1)
-        return
 
     # ---------- FIXED: constant dt, error control off (NaN guard only) ----------
     if mode == _MODE_FIXED:
@@ -312,6 +627,14 @@ def _adapt_dt(
         accepted_error[w] = e
         substeps_frame[w] = substeps_frame[w] + 1
         wp.atomic_add(cum_accepted, 0, 1)
+        # A boundary-limited (sliver) accept leaves the clamped remainder in dt;
+        # restore the constant step so a rounding-residue iteration attempts (and
+        # the histogram bins) the configured dt, not the sliver. The next clamp
+        # re-derives dt=0 (DONE) or the true remainder either way.
+        if limited[w] == 1:
+            d = wp.clamp(dt_fixed, dt_min, dt_max)
+            dt[w] = d
+            dt_half[w] = d * wp.float32(0.5)
         return
 
     # ---------- ADAPTIVE: within-frame grow on accept / shrink+retry on reject ----------
@@ -322,6 +645,7 @@ def _adapt_dt(
             sim_time[w] = next_time[w]
             diverged[w] = True
             ideal_dt[w] = dt_min
+            consec_rej[w] = 0
             return
         # Accept progress (cannot subdivide further). CRUCIAL: still size ideal_dt by the
         # Drake rule so a world RECOVERS once its step is good again -- e <= tol grows ideal_dt
@@ -334,15 +658,25 @@ def _adapt_dt(
         accepted_error[w] = e
         substeps_frame[w] = substeps_frame[w] + 1
         wp.atomic_add(cum_accepted, 0, 1)
+        consec_rej[w] = 0
         new_step = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
         if new_step > _DRAKE_HYSTERESIS_LOW * step and new_step < _DRAKE_HYSTERESIS_HIGH * step:
             new_step = step
         ideal_dt[w] = wp.clamp(new_step, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
+        # A boundary-limited accept (remainder at/below the floor) leaves the sliver
+        # in dt; restore from the resized ideal_dt so a rounding-residue iteration
+        # attempts (and the histogram bins) the controller's step, not the sliver.
+        if limited[w] == 1:
+            d = wp.clamp(ideal_dt[w], dt_min, dt_max)
+            dt[w] = d
+            dt_half[w] = d * wp.float32(0.5)
         return
 
     # Above the floor and diverged: reject, shrink hard, hold state, retry.
     if is_div:
         accept[w] = False
+        dt_ceiling[w] = wp.min(dt_ceiling[w], _CEILING_MARGIN * step)
+        consec_rej[w] = consec_rej[w] + 1
         new_step = _DRAKE_MIN_SHRINK * step
         ideal_dt[w] = new_step
         d = wp.clamp(new_step, dt_min, dt_max)
@@ -360,16 +694,34 @@ def _adapt_dt(
     # Accept when within tol, or when the controller still wants to grow (avoids
     # rejecting a marginally-over-tol step the controller would enlarge anyway).
     acc = e <= tol or new_step >= step
-    d = wp.clamp(new_step, dt_min, dt_max)
     if acc:
         accept[w] = True
         sim_time[w] = sim_time[w] + step
         accepted_error[w] = e
         substeps_frame[w] = substeps_frame[w] + 1
         wp.atomic_add(cum_accepted, 0, 1)
+        consec_rej[w] = 0
+        # Sliver exemption: an accepted step that was artificially shortened by the
+        # boundary clamp says nothing about the error-limited step size, so keep the
+        # carried ideal_dt instead of collapsing it to ~the sliver (Drake's
+        # artificially-limited rule). It also carries no ceiling information, so the
+        # relax is skipped too. dt is restored from the carried ideal_dt so a
+        # rounding-residue iteration attempts (and the histogram bins) the
+        # controller's step, not the sliver; the next iteration's clamp re-derives
+        # dt=0 (DONE) or the true remainder either way.
+        if limited[w] == 1:
+            d = wp.clamp(ideal_dt[w], dt_min, dt_max)
+            dt[w] = d
+            dt_half[w] = d * wp.float32(0.5)
+            return
+        dt_ceiling[w] = wp.min(dt_ceiling[w] * _CEILING_RELAX, ceiling_cap)
     else:
         accept[w] = False
+        dt_ceiling[w] = wp.min(dt_ceiling[w], _CEILING_MARGIN * step)
+        consec_rej[w] = consec_rej[w] + 1
+    new_step = wp.min(new_step, dt_ceiling[w])
     ideal_dt[w] = new_step
+    d = wp.clamp(new_step, dt_min, dt_max)
     dt[w] = d
     dt_half[w] = d * wp.float32(0.5)
 
@@ -424,12 +776,16 @@ def _reset_worlds(
     next_time: wp.array[wp.float32],
     diverged: wp.array[wp.bool],
     accepted: wp.array[wp.bool],
+    dt_ceiling: wp.array[wp.float32],
+    ceiling_init: float,
 ):
     """Restore the per-world controller state to construction defaults for masked worlds.
 
     Called on env/episode reset so pre-reset controller state (dt / clocks / latches)
     does not leak into post-reset dynamics. ``sim_time`` and ``next_time`` reset together
-    to 0 so the world restarts a clean boundary interval.
+    to 0 so the world restarts a clean boundary interval. ``consec_rej`` is not reset
+    here: it is inert outside the debt guard (which zeroes it itself), and no branch
+    reads its value.
     """
     i = wp.tid()
     if mask[i]:
@@ -440,27 +796,178 @@ def _reset_worlds(
         next_time[i] = wp.float32(0.0)
         diverged[i] = False
         accepted[i] = False
+        dt_ceiling[i] = ceiling_init
 
 
 @wp.kernel
-def _mark_unfinished(
+def _boundary_reset(flag: wp.array[wp.int32]):
+    """Set flag[0] = 0 (assume all worlds reached the boundary)."""
+    flag[0] = 0
+
+
+@wp.kernel
+def _iter_count_increment(count: wp.array[wp.int32]):
+    """Increment iteration counter (dim=1, single thread)."""
+    count[0] = count[0] + 1
+
+
+@wp.kernel
+def _iters_exhausted_stop(iter_count: wp.array[wp.int32], max_iters: int, flag: wp.array[wp.int32]):
+    """Latch the boundary loop closed once ``max_substeps`` attempts have run.
+
+    Runs AFTER the boundary-exit check so the cap wins: the safety bound must stop the loop
+    regardless of how many worlds are still short. A solve-failure status
+    (``flag[0] >= 2``) is preserved -- exhausting the attempt budget on the final
+    permitted iteration must never mask the converge-or-throw contract.
+    """
+    if iter_count[0] >= max_iters and flag[0] < 2:
+        flag[0] = 0
+
+
+@wp.kernel
+def _march_continue_set(cont: wp.array[wp.int32]):
+    """Open the device-side march loop (dim=1).
+
+    The conditional while-node tests its condition BEFORE the first trip, and
+    the march's contract is that the substep body runs at least once per
+    boundary, so the condition must enter the loop open.
+    """
+    cont[0] = 1
+
+
+@wp.kernel
+def _march_continue_from_status(status: wp.array[wp.int32], cont: wp.array[wp.int32]):
+    """Derive the march loop condition from the boundary status word (dim=1).
+
+    Only status 1 (unfinished, budget remaining) continues the loop; 0 (done,
+    or budget exhausted) and 2 (inner solve failed) both stop it. The loop
+    condition is a SEPARATE word from the status because the failure status
+    must survive for the caller's post-march converge-or-throw check -- and a
+    nonzero status used directly as the loop condition would spin a failed
+    solve forever on device.
+    """
+    if status[0] == 1:
+        cont[0] = 1
+    else:
+        cont[0] = 0
+
+
+@wp.kernel
+def _debt_guard(
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
-    solve_ok: wp.array[int],
-    flag: wp.array[wp.int32],
+    dt_outer: float,
+    dt_init: float,
+    ceiling_init: float,
+    ideal_dt: wp.array[wp.float32],
+    dt_ceiling: wp.array[wp.float32],
+    consec_rej: wp.array[wp.int32],
+    guard_hits: wp.array[wp.int32],
 ):
-    """Set ``flag[0]`` to the loop status: 0 done, 1 unfinished, 2 solve failed.
+    """Bound the damage of a truncated boundary.
 
-    Read back (one int32) after each substep to decide whether the boundary loop can stop:
-    once every world has landed (``sim_time >= next_time``) the flag is 0 and the loop
-    breaks. A non-converged inner SAP solve uses the same status read to enforce the
-    CENIC/Drake "converge or throw" contract without adding another host sync.
+    A world that cannot land within max_substeps would otherwise carry
+    unbounded time debt and a collapsed controller into every later
+    boundary: the debt compounds and recovery never outruns it. Cap the
+    carried debt at one boundary and reissue a fresh controller so the
+    next boundary attacks the shortfall at full growth.
     """
     i = wp.tid()
-    if solve_ok[i] == 0:
-        wp.atomic_max(flag, 0, 2)
-    elif sim_time[i] < next_time[i]:
-        wp.atomic_max(flag, 0, 1)
+    if sim_time[i] < next_time[i]:
+        floor_t = next_time[i] - dt_outer
+        if sim_time[i] < floor_t:
+            sim_time[i] = floor_t
+        ideal_dt[i] = dt_init
+        dt_ceiling[i] = ceiling_init
+        consec_rej[i] = 0
+        wp.atomic_add(guard_hits, 0, 1)
+
+
+@wp.kernel
+def _count_rejects(
+    accepted: wp.array[wp.bool],
+    dt: wp.array[wp.float32],
+    diverged: wp.array[wp.bool],
+    rejects: wp.array[wp.int32],
+):
+    """Accumulate this iteration's rejected attempts (diagnostic only).
+
+    A world at its boundary makes no attempt (its dt was clamped to 0 and the
+    controller's DONE branch leaves ``accepted`` False), so a reject is
+    not-accepted AND attempting (post-controller ``dt > 0``). A divergence
+    LATCH (the floor / fixed-mode / force-accept non-finite paths, which
+    freeze the world to its boundary) is a refusal that will NOT be retried,
+    not a controller rejection, so latched worlds are excluded -- the same
+    semantics as the MuJoCo counter, whose floor path never lowers
+    ``accepted``. The above-floor diverged path (shrink and retry) does not
+    latch and still counts.
+    """
+    i = wp.tid()
+    if (not accepted[i]) and (not diverged[i]) and dt[i] > wp.float32(0.0):
+        wp.atomic_add(rejects, 0, 1)
+
+
+@wp.kernel
+def _count_boundary_truncation(
+    iter_count: wp.array[wp.int32],
+    max_iters: int,
+    out: wp.array[wp.int64],
+):
+    """Record one boundary, and whether it used the full ``max_substeps`` budget (dim=1).
+
+    ``out[0]`` counts boundaries. ``out[1]`` counts boundaries whose MARCH consumed the
+    entire ``max_substeps`` budget (``iter_count`` is the caller's march-only
+    snapshot) -- this INCLUDES the case where
+    every world happened to land exactly on the final permitted iteration, so it is not
+    on its own proof that any world is short of its target time. It is still a genuine saturation signal: the boundary had
+    no iterations to spare. For actual under-advance, see ``out[2]`` (``unfinished_worlds``,
+    written by :func:`_count_unfinished_worlds`).
+    """
+    out[0] = out[0] + wp.int64(1)
+    if iter_count[0] >= max_iters:
+        out[1] = out[1] + wp.int64(1)
+
+
+@wp.kernel
+def _count_unfinished_worlds(
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    out: wp.array[wp.int64],
+):
+    """Accumulate world-boundaries that ended short of the target time into ``out[2]``."""
+    i = wp.tid()
+    if sim_time[i] < next_time[i]:
+        wp.atomic_add(out, 2, wp.int64(1))
+
+
+@wp.kernel
+def _status_sentinel_reset(out: wp.array[wp.float32]):
+    """Reset 6-element summary buffer: [min_sim_time, max_sim_time, max_error, accept_count, min_dt, max_dt]."""
+    out[0] = float(1.0e38)
+    out[1] = float(0.0)
+    out[2] = float(0.0)
+    out[3] = float(0.0)
+    out[4] = float(1.0e38)
+    out[5] = float(0.0)
+
+
+@wp.kernel
+def _status_summary_kernel(
+    sim_time: wp.array[wp.float32],
+    last_error: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    accepted: wp.array[wp.bool],
+    out: wp.array[wp.float32],
+):
+    """Reduce per-world arrays to 6 summary scalars via atomics."""
+    i = wp.tid()
+    wp.atomic_min(out, 0, sim_time[i])
+    wp.atomic_max(out, 1, sim_time[i])
+    wp.atomic_max(out, 2, last_error[i])
+    if accepted[i]:
+        wp.atomic_add(out, 3, wp.float32(1.0))
+    wp.atomic_min(out, 4, dt[i])
+    wp.atomic_max(out, 5, dt[i])
 
 
 class SolverSAPAdaptive:
@@ -470,6 +977,10 @@ class SolverSAPAdaptive:
     builds the ``SapModel`` + inner ``SolverSAP`` internally, and exposes the Newton
     solver surface (``step`` / ``step_dt`` / ``reset``) plus per-world telemetry
     (``dt`` / ``sim_time`` / ``diverged`` / ``substeps``).
+
+    ``max_substeps`` defaults to 16 here (each attempt costs three SAP solves), unlike
+    ``SolverMuJoCoAdaptive``'s 256; callers that need the MuJoCo-adaptive budget must
+    pass their own value.
     """
 
     def __init__(
@@ -479,11 +990,13 @@ class SolverSAPAdaptive:
         mode: str = "adaptive",
         tol: float = 1e-3,
         dt_inner_init: float = 0.01,
-        dt_inner_min: float = 1e-6,
+        dt_inner_min: float = 1e-12,
         dt_inner_max: float | None = None,
         max_substeps: int = 16,
-        landed_fraction: float = 1.0,
+        dt_histogram: bool = False,
+        dt_histogram_bins_per_decade: int = 4,
         max_rigid_contact: int = 128,
+        max_triangle_pairs: int = 1_000_000,
         max_iterations: int = 30,
         contact_preset_variant: str = "drake",
         line_search_variant: str = "armijo_decay",
@@ -500,8 +1013,22 @@ class SolverSAPAdaptive:
             raise ValueError(f"dt_inner_min must be > 0, got {dt_inner_min!r}.")
         if dt_inner_max is not None and float(dt_inner_max) <= 0.0:
             raise ValueError(f"dt_inner_max must be > 0 when provided, got {dt_inner_max!r}.")
+        # The controller invariant: the seed must sit strictly above the floor and
+        # within the cap, else the floor/deadband branches degenerate.
+        if not float(dt_inner_min) < float(dt_inner_init):
+            raise ValueError(
+                f"dt_inner_min must be < dt_inner_init, got dt_inner_min={dt_inner_min!r}, "
+                f"dt_inner_init={dt_inner_init!r}."
+            )
+        if dt_inner_max is not None and not float(dt_inner_init) <= float(dt_inner_max):
+            raise ValueError(
+                f"dt_inner_init must be <= dt_inner_max when provided, got "
+                f"dt_inner_init={dt_inner_init!r}, dt_inner_max={dt_inner_max!r}."
+            )
         if int(max_substeps) < 1:
             raise ValueError(f"max_substeps must be >= 1, got {max_substeps!r}.")
+        if int(dt_histogram_bins_per_decade) < 1:
+            raise ValueError(f"dt_histogram_bins_per_decade must be >= 1, got {dt_histogram_bins_per_decade!r}.")
         self.model = model
         device = model.device
         wc = int(model.world_count)
@@ -511,17 +1038,50 @@ class SolverSAPAdaptive:
         self._spread_every = int(os.environ.get("NEWTON_SAP_SPREAD_EVERY", "10"))
         self._frame_counter = 0
 
+        # Post-mortem forensics (default OFF). Host-only: every read happens
+        # strictly AFTER the converge-or-throw decision, outside any capture or
+        # hot loop, so the gate adds no device work and cannot perturb the
+        # solve in any state.
+        #   NEWTON_SAP_FAILURE_DUMP=<path.json> -- on a status>=2 boundary,
+        #     dump the failing worlds' solver/controller/contact state to
+        #     <path> before raising.
+        #   NEWTON_SAP_FAILURE_REPLAY=<caps|1> -- comma-separated inner Newton
+        #     iteration caps (or "1" for a built-in ladder); after the dump,
+        #     re-run the failing attempt's inner solves restricted to the
+        #     failing worlds at each cap and append the residual trajectory to
+        #     the dump (converge / stall / diverge attribution).
+        self._failure_dump_path = os.environ.get("NEWTON_SAP_FAILURE_DUMP") or None
+        _replay_spec = os.environ.get("NEWTON_SAP_FAILURE_REPLAY", "").strip()
+        if _replay_spec in ("", "0"):
+            self._failure_replay_caps: list[int] = []
+        elif _replay_spec == "1":
+            self._failure_replay_caps = [30, 60, 120, 240, 480, 960]
+        else:
+            self._failure_replay_caps = [int(x) for x in _replay_spec.split(",") if x.strip()]
+        #   NEWTON_SAP_FAILURE_REPLAY_DT=<scales> -- comma-separated dt scale
+        #     factors; after the cap ladder, re-run the failing attempt at
+        #     scaled step sizes (original inner cap) to measure whether the
+        #     failure is dt-sensitive -- the counterfactual for the
+        #     controller's own shrink-and-retry path.
+        _dt_spec = os.environ.get("NEWTON_SAP_FAILURE_REPLAY_DT", "").strip()
+        self._failure_replay_dt_scales = [float(x) for x in _dt_spec.split(",") if x.strip()] if _dt_spec else []
+
         # ---- inner SAP solver + model ----
-        # The convex SAP solve runs CONVERGENT (conditional, per-env early exit) to
-        # optimality_rel_tol = max(kappa*tol, 1e-8), kappa = 1e-3 (CENIC, Kurtz & Castro
-        # Sec. VI-B): the solver residual must sit far below the integration tolerance, else
-        # it pollutes the step-doubling error estimate and the controller subdivides spuriously.
+        # The convex SAP solve runs CONVERGENT (conditional, per-env early exit) to a fixed
+        # optimality_rel_tol, independent of the integration tolerance: the solver residual
+        # must sit far below tol at ANY tol setting, else it pollutes the step-doubling
+        # error estimate and the controller subdivides spuriously.
+        self._optimality_rel_tol = 1.0e-8
         self._sap_model = sap_model_from_newton(model)
+        # Coord-layout newtons store control position targets per coordinate;
+        # the remap gathers them into the dof layout SAP indexes. None when the
+        # layouts already coincide (control arrays then pass through unchanged).
+        self._target_remap = SapTargetRemap.from_newton_model(model)
         self._sap = SolverSAP(
             self._sap_model,
             max_rigid_contact=int(max_rigid_contact),
             max_iterations=int(max_iterations),
-            optimality_rel_tol=max(1.0e-3 * float(tol), 1.0e-8),  # CENIC kappa*acc (Sec. VI-B)
+            optimality_rel_tol=self._optimality_rel_tol,
             cost_abs_tol=0.0,
             cost_rel_tol=0.0,
             static_substep=False,
@@ -551,9 +1111,77 @@ class SolverSAPAdaptive:
             raise TypeError(f"Unsupported SAP velocity dtype {self._sap.contact_solve.v_flat.dtype!r}.")
         self._solve_ok = wp.ones(wc, dtype=int, device=device)
 
+        # Per-world solve-failure CONTAINMENT (default ON; NEWTON_SAP_CONTAINMENT=0
+        # opts into the strict batch-fatal converge-or-throw, for probes/debugging).
+        # Contained semantics: a failing world's error is already forced to the
+        # divergence sentinel, so the controller rejects the attempt (never
+        # consuming the unconverged result) and retries at a shrunken dt; a
+        # failure that persists to the dt floor latches the world ``diverged``
+        # exactly like a NaN state -- the world holds its last committed finite
+        # state while its clock is forced to the boundary, and the latch
+        # (.diverged, read after the boundary call) is the consumer's only
+        # signal to reset the world and terminate its episode. The batch
+        # keeps marching either way. The committed-step contract is unchanged:
+        # every committed step still passed the full converge-to-tolerance
+        # solve; failures only ever reject or latch.
+        self._containment = os.environ.get("NEWTON_SAP_CONTAINMENT", "1") != "0"
+        # Cumulative per-world failure-event counts (device; written by the
+        # contained boundary kernel, read host-side only on the rare path when
+        # the sticky per-boundary latch says a failure happened).
+        self._solve_fail_world = wp.zeros(wc, dtype=wp.int32, device=device)
+        # Host-side cumulative accounting + rate-limit state for the warning.
+        self._solve_failure_events = 0
+        self._solve_failure_boundaries = 0
+        self._fail_world_prev = np.zeros(wc, dtype=np.int64)
+        self._fail_warn_emitted = 0
+        # Host count of boundaries integrated with containment active (probe
+        # engagement tripwire; no device work).
+        self._containment_boundaries = 0
+
+        # Tail compaction (default ON; NEWTON_ADAPTIVE_TAIL_COMPACT=0 opts out):
+        # late march iterations run full-batch kernels while only a few worlds
+        # are still unfinished; a device-built index list + per-world gate mask
+        # of active worlds restricts the per-world SAP pipeline work (free
+        # motion, Jacobian/dynamics assembly, contact-solve entry, integration,
+        # FK, the error metric) to those worlds while every launch keeps its
+        # fixed dim (graph-capture safe). Landed worlds enter each solve
+        # pre-converged, so the Newton loop's trip count is set by active
+        # worlds only. A pure scheduling change -- the tail-compact arm of
+        # sap_flag_equivalence_probe.py asserts bitwise identity with the
+        # full-batch path and must keep passing for this default to remain ON.
+        # Read at construction; the choice is baked into the captured body.
+        # NOT covered: the two CollisionPipeline passes and the contact
+        # scatter, which stay full-width (their global atomic slot assignment
+        # must see an identical thread set, else active worlds' contact-slot
+        # order -- and downstream fp summation order -- could change).
+        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") == "1"
+        if self._tail_compact:
+            # counts[0] = active-set size (worlds attempting a step this
+            # iteration, post-boundary-clamp dt > 0). Rebuilt on device each
+            # iteration; consumers keep FIXED launch dims and early-exit on
+            # the device-read count or the per-world gate mask.
+            self._active_counts = wp.zeros(1, dtype=wp.int32, device=device)
+            self._active_idx = wp.zeros(wc, dtype=wp.int32, device=device)
+            self._world_active = wp.ones(wc, dtype=wp.int32, device=device)
+
         # ---- per-world controller buffers (the dt VECTOR is the primitive; no N) ----
         self._dt = wp.full(wc, dt_inner_init, dtype=wp.float32, device=device)
         self._dt_half = wp.full(wc, dt_inner_init * 0.5, dtype=wp.float32, device=device)
+
+        # Attempt-consistent constitutive law (default OFF;
+        # NEWTON_SAP_ATTEMPT_CONSISTENT_R=1 opts in): pin every trial solve's
+        # near-rigid clamps (contact rn_hard, joint-limit r_nr, PD gain clamp)
+        # to THIS attempt's dt instead of each solve's own dt, so the
+        # step-doubling comparison measures truncation error of one fixed
+        # constitutive law rather than the dt-coupled law difference between
+        # the full step and its halves.  The full solve's transform is exactly
+        # 1 (committed-step laws unchanged; attempts still tighten as the
+        # attempted dt falls), and the twin precedent is the MuJoCo solver's
+        # NEWTON_ADAPTIVE_CONTACT_COUPLING (coupled solref with
+        # timeconst = 2*dt_attempt for both trials, also default OFF).
+        self._attempt_consistent_r = os.environ.get("NEWTON_SAP_ATTEMPT_CONSISTENT_R", "0") == "1"
+        if self._attempt_consistent_r:
+            self._sap.contact_solve.set_constitutive_dt(self._dt)
         self._ideal_dt = wp.full(wc, dt_inner_init, dtype=wp.float32, device=device)
         self._sim_time = wp.zeros(wc, dtype=wp.float32, device=device)
         self._next_time = wp.zeros(wc, dtype=wp.float32, device=device)
@@ -563,9 +1191,14 @@ class SolverSAPAdaptive:
         self._accepted_error = wp.zeros(wc, dtype=wp.float32, device=device)
         self._substeps_frame = wp.zeros(wc, dtype=wp.int32, device=device)
         self._cum_accepted = wp.zeros(1, dtype=wp.int32, device=device)
-        # Boundary flag: 1 if any world is still short of its boundary after a substep.
-        # Read back once per iteration (the single accepted host sync) to break the loop early.
-        self._unfinished = wp.zeros(1, dtype=wp.int32, device=device)
+        # Boundary status word. Slot 0: per-iteration boundary flag (0 done,
+        # 1 unfinished, 2 solve failed -- strict mode only), reset in-body each
+        # iteration and read back once per iteration / once per march (the
+        # single accepted host sync) to break the loop early. Slot 1: sticky
+        # per-boundary solve-failure latch (containment mode only), zeroed at
+        # boundary open so the same post-march read reports failures that
+        # recovered or latched before the final iteration.
+        self._unfinished = wp.zeros(2, dtype=wp.int32, device=device)
 
         self._mode = str(mode)
         self._mode_code = _MODE_CODES[self._mode]
@@ -576,6 +1209,60 @@ class SolverSAPAdaptive:
         self._max_substeps = int(max_substeps)
         self._divergence_threshold = float(1.0e9)
         self._full_world_mask = wp.full(wc, True, dtype=wp.bool, device=device)
+
+        # Boundary-limited flag (landing slivers, see _clamp_dt_to_boundary) and
+        # consecutive-rejection counter (debt-guard input; no branch reads it).
+        self._limited = wp.zeros(wc, dtype=wp.int32, device=device)
+        self._consec_rej = wp.zeros(wc, dtype=wp.int32, device=device)
+        # Ceiling memory (always on): per-world upper bound on growth, recorded at
+        # rejections, relaxed on accepts. Init above any reachable dt so it never
+        # binds until a rejection writes it; also the finite stand-in for an inf
+        # dt_max wherever a kernel arg must stay finite.
+        self._ceiling_init = self._dt_max if self._dt_max != float("inf") else 1.0e6
+        self._dt_ceiling = wp.full(wc, wp.float32(self._ceiling_init), dtype=wp.float32, device=device)
+        self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
+        # Mixed-tolerance normalization: accept test becomes |d| <= atol + rtol*|q|
+        # with atol = tol. Zero disables (bit-identical legacy path).
+        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "2e-6") or 0.0)
+        self._err_rtol_over_atol = self._err_rtol / self._tol if self._err_rtol > 0.0 else 0.0
+
+        # Per-boundary device iteration counter (also latches the loop closed at
+        # max_substeps, see _iters_exhausted_stop) and the non-resetting cumulative
+        # attempt counter: each iteration runs the 3-eval step-doubling attempt, so
+        # total SAP evals = iterations * 3, and rejected attempts are counted (a
+        # rejection is just another iteration). Compute axis for work-precision;
+        # reset with reset_compute_counter().
+        self._iteration_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
+        self._cum_iters = wp.zeros(1, dtype=wp.int32, device=device)
+        self._status_scalars = wp.zeros(6, dtype=wp.float32, device=device)
+
+        # Opt-in per-boundary march telemetry (see _log_march_boundary). The env
+        # gate keeps the hot path to a single attribute check when unset.
+        self._march_log_path = os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG") or None
+        self._march_log_file = None
+        self._march_log_boundary = 0
+        self._march_log_hist_every = int(os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG_EVERY", "48"))
+        self._reject_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
+        # body. int64 because a long run at large world counts overflows int32.
+        self._dt_hist: wp.array | None = None
+        self._dt_hist_sat: wp.array | None = None
+        self._dt_hist_trunc: wp.array | None = None
+        self._march_iters: wp.array | None = None
+        self._dt_hist_bpd = int(dt_histogram_bins_per_decade)
+        self._dt_hist_n_bins = 0
+        self._dt_hist_lo_log10 = 0.0
+        if dt_histogram:
+            self._dt_hist_n_bins, self._dt_hist_lo_log10 = _dt_hist_layout(
+                self._dt_min, self._dt_inner_init, self._dt_hist_bpd
+            )
+            self._dt_hist = wp.zeros(self._dt_hist_n_bins, dtype=wp.int64, device=device)
+            self._dt_hist_sat = wp.full(1, _DT_HIST_SENTINEL, dtype=wp.float32, device=device)
+            # [0] boundaries, [1] truncated by max_substeps, [2] world-boundaries short of target
+            self._dt_hist_trunc = wp.zeros(3, dtype=wp.int64, device=device)
+            # March-only iteration count snapshot for the truncation label.
+            self._march_iters = wp.zeros(1, dtype=wp.int32, device=device)
 
         self._coords_per_world = int(model.joint_coord_count) // wc
         self._dofs_per_world = int(model.joint_dof_count) // wc
@@ -599,16 +1286,130 @@ class SolverSAPAdaptive:
         self._err_lhs = self._scratch_full
         self._err_rhs = self._scratch_full if self._mode == "fixed" else self._scratch_double
 
-        # ---- own collision pipeline (refreshed at q_t and q_{t+h/2} per attempt) ----
+        # ---- own collision pipeline ----
+        # The pair cap is GLOBAL across worlds and overflow drops mesh contacts
+        # silently, so it must be scene-sized by the caller — the default only
+        # fits small scenes.
+        # NEWTON_SAP_DETERMINISTIC (default ON; "0" opts out): run-to-run
+        # reproducibility for the whole SAP-adaptive stack. Here it makes the
+        # pipeline sort contacts by a canonical key after the narrow phase,
+        # so the global contact buffer ORDER (which every downstream per-env
+        # slot assignment and fp summation inherits) is a pure function of
+        # the state, not of atomic arrival order. sap_warp reads the same
+        # variable for its own order-bound stages (per-env contact slots,
+        # cost reductions, tree-force accumulation). Deterministic only while
+        # capacity caps are unsaturated: an overflowing triangle-pair or
+        # contact buffer drops entries by arrival order, which no sort can
+        # canonicalize -- caps must stay scene-sized.
+        self._deterministic = os.environ.get("NEWTON_SAP_DETERMINISTIC", "1") != "0"
+        # Deterministic contact packing indexes every buffered candidate
+        # contact with CONTACT_ID_BITS id bits, so the reducer capacity (=
+        # the triangle-pair cap) must fit that budget; clamp oversized caps
+        # to it. The determinism caveat is unchanged either way: an
+        # overflowing cap drops entries by arrival order, so caps must stay
+        # above the scene's live demand.
+        _tri_pairs = int(max_triangle_pairs)
+        if self._deterministic:
+            from ...geometry.contact_reduction_global import CONTACT_ID_BITS
+
+            _tri_pairs = min(_tri_pairs, 1 << int(CONTACT_ID_BITS))
         self._pipeline = newton.CollisionPipeline(
             model,
             broad_phase="sap",
             rigid_contact_max=int(max_rigid_contact) * wc,
+            max_triangle_pairs=_tri_pairs,
+            deterministic=self._deterministic,
         )
         self._contacts = self._pipeline.contacts()
         self._collide_state = model.state()
         self._sap_contacts = sap_contacts_from_newton(self._contacts)
         self._sap_control = None
+        # NEWTON_ADAPTIVE_CONTACT_REFRESH selects the intra-boundary contact
+        # cadence (the same gate SolverMuJoCoAdaptive reads):
+        #   unset/"1" (default) -- collide ONCE per boundary at the entry
+        #     state; every attempt reuses that contact SET. The per-attempt
+        #     Jacobian rebuild re-derives gap/points/Jacobian from the state
+        #     each eval runs from (q_t, then q_{t+h/2}), which is this
+        #     solver's intrinsic analog of the MuJoCo fast-path dist/pos
+        #     refresh -- the error estimator keeps its contact sensitivity
+        #     while frames/pairs/materials stay from the boundary pass.
+        #   "attempt"/"2" -- re-collide at q_t and q_{t+h/2} on EVERY attempt
+        #     (diagnostic-only cost/behavior attribution).
+        #   "0" -- parsed for parity with the MuJoCo gate but identical to
+        #     the default here: the re-anchor is intrinsic to the Jacobian
+        #     rebuild and has no separate off switch.
+        # Read at construction; the choice shapes the captured substep body
+        # (per-attempt keeps the collide inside it, the default hoists it out).
+        self._contact_refresh_per_attempt = os.environ.get("NEWTON_ADAPTIVE_CONTACT_REFRESH", "1") in (
+            "attempt",
+            "2",
+        )
+        # Boundary cadence + determinism: the contact SET is frozen per
+        # boundary, so the canonical slot ranks are too -- compute them once
+        # per boundary (outside the captured body) instead of on every
+        # jacobian rebuild; per-attempt cadence keeps in-compute ranks.
+        if self._deterministic and not self._contact_refresh_per_attempt:
+            self._sap.contact_jacobian.det_slots_external = True
+        # Host-side count of CollisionPipeline invocations. In the default
+        # cadence every collide happens OUTSIDE the captured body, so this is
+        # exact; in per-attempt mode it undercounts under graph replay (the
+        # replay does not re-enter Python) -- probes that assert on it must
+        # pin the eager path.
+        self._collide_calls = 0
+
+        # ---- world-level march compaction (narrow-grid tail body) ----
+        # Default ON; NEWTON_SAP_MARCH_COMPACT=0 opts out (any value except
+        # "0" enables, so partial/typo values fail toward the default). Late
+        # march iterations carry only a few still-marching worlds, yet every
+        # launch keeps its full fixed grid (graph-capture requirement); this
+        # records the eval core (the three SAP solves + the error metric) as
+        # a device-side conditional with TWO bodies -- the wide body is
+        # today's launch stream verbatim, the narrow body is the SAME kernel
+        # sequence with every list-indexed launch's env axis sized to a small
+        # budget -- and routes each iteration by the device-read active-world
+        # count. Bitwise by construction: list-indexed kernels exit at the
+        # device count, so grid slots beyond it never did work; the subset
+        # chain (world_active -> stage2 -> newton -> LS lists) bounds every
+        # list by the active-world count, which the branch predicate bounds
+        # by the budget; capacity guards latch a poison word on any
+        # violation and the post-march reader raises. Requires the whole
+        # compaction chain (tail/solve/LS) and the boundary contact cadence
+        # (per-attempt collide inside the eval core must stay full-width and
+        # is excluded rather than special-cased); needs >= 2 worlds so both
+        # branches are reachable. Mask-gated (non-listed) kernels keep full
+        # grids in BOTH bodies -- the five status kernels, collision, the
+        # contact scatter, and the controller/commit/clamp kernels among
+        # them, which is what the hold-semantics argument requires.
+        _mc_requested = os.environ.get("NEWTON_SAP_MARCH_COMPACT", "1") != "0"
+        self._march_compact = bool(
+            _mc_requested
+            and self._tail_compact
+            and self._sap.contact_solve._solve_compact
+            and self._sap.contact_solve._ls_compact
+            and not self._contact_refresh_per_attempt
+            and wc >= 2
+        )
+        # Narrow-grid env budget: small enough to shed most idle grid slots,
+        # large enough that mid-march active counts still route wide only
+        # while genuinely wide; capped at wc//2 so the wide branch stays
+        # reachable at any world count (both-branch tripwires need it).
+        _mc_width = os.environ.get("NEWTON_SAP_MARCH_COMPACT_WIDTH")
+        if _mc_width is not None:
+            _mc_width = int(_mc_width)
+        else:
+            _mc_width = max(64, wc // 16)
+        self._mc_width = max(1, min(_mc_width, max(1, wc // 2)))
+        if self._march_compact:
+            # Branch condition word (int32[1], read by the conditional node),
+            # engagement counters (dim-1 increments recorded FIRST inside
+            # each branch body), and the chunked canonical-build scratch.
+            self._mc_cond = wp.zeros(1, dtype=wp.int32, device=device)
+            self._mc_narrow_execs = wp.zeros(1, dtype=wp.int32, device=device)
+            self._mc_wide_execs = wp.zeros(1, dtype=wp.int32, device=device)
+            _n_chunks = (wc + _MC_CHUNK - 1) // _MC_CHUNK
+            self._mc_n_chunks = _n_chunks
+            self._mc_chunk_counts = wp.zeros(_n_chunks, dtype=wp.int32, device=device)
+            self._mc_chunk_offsets = wp.zeros(_n_chunks, dtype=wp.int32, device=device)
 
         # ---- solver-internal CUDA-graph capture of the substep BODY ----
         # The per-substep body is a flat kernel sequence, so it captures once and replays at
@@ -621,24 +1422,103 @@ class SolverSAPAdaptive:
             _is_cuda = False
         # Body-graph capture. The convergent solve uses wp.capture_while; capturing ONE substep
         # body that contains it is the intended use of conditional graph nodes, and its node
-        # count is constant in env count -- validated clean (no SIGABRT, tight spread) at 1024
-        # and 4096 envs. The old >=1024-env SIGABRT was from capturing 3N such bodies in the old
-        # per-N loop, not one. On any capture/instantiate failure the loop falls back to eager.
+        # count is constant in env count (never one body per substep, whose node count would
+        # scale with the loop). On any capture/instantiate failure the loop falls back to eager.
+        self._is_cuda = _is_cuda
         self._graph_enabled = _is_cuda and os.environ.get("NEWTON_SAP_ADAPTIVE_GRAPH", "1") != "0"
-        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached the
-        # boundary, then force-complete the rest. 1.0 == wait for every world (default).
-        self._quantile_stop = QuantileBoundaryStop(
-            self._world_count, self.model.device, landed_fraction=landed_fraction, graph_enabled=self._graph_enabled
-        )
         self._graph_cache: dict = {}
         # Modules/allocations must be warm before capture (a launch that triggers a lazy
         # module load syncs the stream and aborts capture). Run the first frame eagerly.
         self._graph_warmed = False
 
+        # ---- whole-march conditional tier (default ON; NEWTON_SAP_ADAPTIVE_CONDITIONAL=0 opts out) ----
+        # The march loop itself records as ONE wp.capture_while conditional
+        # while-node whose body is the substep body: the per-iteration 4-byte
+        # status poll collapses to a single post-march status read per boundary
+        # (the converge-or-throw check), and an outer manager-level capture may
+        # wrap the boundary call around the while-node. The solve's own device
+        # conditionals (capture_if / capture_while) nest inside the while-node
+        # body; conditional bodies may not record allocations or host work, so
+        # warmup boundaries run on the per-iteration tier first and any
+        # capture/launch failure downgrades permanently to that tier (never
+        # crashes a run). A pure scheduling change: the while-node body is the
+        # SAME launch stream the per-iteration tier replays.
+        self._conditional_enabled = (
+            self._graph_enabled and os.environ.get("NEWTON_SAP_ADAPTIVE_CONDITIONAL", "1") != "0"
+        )
+        self._conditional_graph_cache: dict = {}
+        self._conditional_warm_boundaries = 0
+        # Host-side count of whole-march conditional replays: the engagement
+        # tripwire probes read to prove the tier actually executed.
+        self._conditional_launches = 0
+        # While-node loop condition, separate from the status word (see
+        # _march_continue_from_status).
+        self._march_continue = wp.zeros(1, dtype=wp.int32, device=device)
+
     # ---------------------------------------------------------------- properties
     @property
     def diverged(self) -> wp.array:
         return self._diverged
+
+    @property
+    def containment(self) -> bool:
+        """True when per-world solve-failure containment is active (default);
+        False in strict converge-or-throw mode (``NEWTON_SAP_CONTAINMENT=0``)."""
+        return self._containment
+
+    @property
+    def march_compact(self) -> bool:
+        """True when the narrow-grid tail body (world-level march compaction)
+        is active: default ON, disabled by ``NEWTON_SAP_MARCH_COMPACT=0`` or
+        by a missing prerequisite (tail/solve/LS compaction, boundary contact
+        cadence, >= 2 worlds)."""
+        return self._march_compact
+
+    @property
+    def march_compact_width(self) -> int:
+        """Env budget of the narrow branch's list-indexed grids."""
+        return self._mc_width
+
+    def march_compact_execs(self) -> tuple[int, int]:
+        """(narrow, wide) branch execution counts -- the engagement
+        tripwires. Host sync; call outside the hot path. (0, 0) when the
+        feature is off."""
+        if not self._march_compact:
+            return (0, 0)
+        return (
+            int(self._mc_narrow_execs.numpy()[0]),
+            int(self._mc_wide_execs.numpy()[0]),
+        )
+
+    def _raise_if_march_compact_poisoned(self) -> None:
+        """Fail loudly if any narrowed grid's capacity invariant was violated
+        (a device list outgrew the narrow budget -- envs would have been
+        silently skipped). Host read; callers invoke it only at post-march /
+        eager points, never inside a capture."""
+        if not self._march_compact:
+            return
+        if int(self._sap.contact_solve._env_grid_poison.numpy()[0]) != 0:
+            raise RuntimeError(
+                "SolverSAPAdaptive march compaction: a device env list exceeded "
+                f"the narrow grid budget ({self._mc_width}); results from the "
+                "poisoned march are unsafe. This invariant is structural "
+                "(branch cond and subset chain bound every list by the budget) "
+                "-- a violation means the routing or the chain was edited "
+                "inconsistently."
+            )
+
+    @property
+    def solve_failure_worlds(self) -> wp.array:
+        """Cumulative per-world count of contained inner-solve failure events,
+        shape ``[world_count]``, int32, on device. Read with ``.numpy()``
+        OUTSIDE the inner loop only (it is a device sync)."""
+        return self._solve_fail_world
+
+    @property
+    def solve_failure_events(self) -> int:
+        """Host-side cumulative count of contained inner-solve failure events
+        (updated on the rare post-march path of a failing boundary)."""
+        return self._solve_failure_events
 
     @property
     def dt(self) -> wp.array:
@@ -674,9 +1554,128 @@ class SolverSAPAdaptive:
     def contacts(self):
         return self._contacts
 
+    @property
+    def iteration_count(self) -> wp.array:
+        """Iteration count from the most recent boundary call, shape ``[1]``, int32, on device."""
+        return self._iteration_count_buf
+
+    @property
+    def cumulative_iterations(self) -> wp.array:
+        """Boundary-loop iterations accumulated since the last :meth:`reset_compute_counter`,
+        shape ``[1]``, int32, on device. Includes rejected attempts. Read with ``.numpy()``
+        OUTSIDE the inner loop only (it is a device sync)."""
+        return self._cum_iters
+
     def cumulative_substeps(self) -> int:
-        """Total SAP opt-steps since the last reset (= accepted inner steps * 3 evals)."""
-        return int(self._cum_accepted.numpy()[0]) * 3
+        """Total SAP evals since the last :meth:`reset_compute_counter` (= boundary-loop
+        attempts * 3 in adaptive mode; rejected attempts included -- a rejection is just
+        another iteration). Compute axis for work-precision. The three evals share no
+        forward prefix, and the two half-step solves converge cheaper than the full one,
+        so this counts evals, not equal-cost work units. Fixed mode runs one eval per
+        iteration and is counted as such. Host sync; call outside the hot path."""
+        return int(self._cum_iters.numpy()[0]) * (3 if self._do_doubling else 1)
+
+    def get_status_summary(self) -> dict[str, float]:
+        """Reduce per-world arrays to a 6-scalar summary via one GPU transfer."""
+        device = self.model.device
+        n = self._world_count
+
+        wp.launch(_status_sentinel_reset, dim=1, inputs=[self._status_scalars], device=device)
+        wp.launch(
+            _status_summary_kernel,
+            dim=n,
+            inputs=[self._sim_time, self._accepted_error, self._dt, self._accepted, self._status_scalars],
+            device=device,
+        )
+
+        scalars = self._status_scalars.numpy()
+        return {
+            "sim_time_min": float(scalars[0]),
+            "sim_time_max": float(scalars[1]),
+            "error_max": float(scalars[2]),
+            "accept_count": int(scalars[3]),
+            "dt_min": float(scalars[4]),
+            "dt_max": float(scalars[5]),
+        }
+
+    @property
+    def dt_histogram(self) -> wp.array | None:
+        """Per-bin counts of the inner timestep SELECTED per iteration, shape ``[n_bins]``,
+        int64, on device.
+
+        ``None`` unless the solver was constructed with ``dt_histogram=True``. Each sample is
+        the controller's chosen step for that iteration, taken BEFORE the boundary-landing
+        clamp (see :func:`_dt_histogram_accum`); on a landing iteration the step actually
+        integrated is smaller than what is binned here. Bin 0 counts iterations where the
+        selected step was already at/below the ``dt_inner_min`` floor, bins ``1 .. n_bins - 2``
+        are log-spaced (see :attr:`dt_histogram_edges`), and the last bin absorbs everything
+        above the range. Read with ``.numpy()`` OUTSIDE the inner loop only (it is a device
+        sync).
+        """
+        return self._dt_hist
+
+    @property
+    def dt_histogram_edges(self) -> np.ndarray | None:
+        """Edges [s] of the log-spaced histogram bins, shape ``[n_bins - 1]``.
+
+        ``None`` unless ``dt_histogram=True``. The floor and overflow bins are open-ended
+        and contribute no finite edge, so this is one shorter than :attr:`dt_histogram`.
+        """
+        if self._dt_hist is None:
+            return None
+        return _dt_hist_edges(self._dt_min, self._dt_hist_n_bins, self._dt_hist_bpd)
+
+    def reset_dt_histogram(self) -> None:
+        """Zero the histogram and saturation accumulators.
+
+        Call after warmup so graph capture and initial dt settling stay out of the counts.
+        No-op when the histogram is disabled.
+        """
+        if self._dt_hist is None:
+            return
+        self._dt_hist.zero_()
+        self._dt_hist_sat.fill_(_DT_HIST_SENTINEL)
+        self._dt_hist_trunc.zero_()
+
+    def dt_histogram_stats(self) -> dict[str, float | int]:
+        """Scalar summary of floor occupancy. Host sync; call outside the hot path.
+
+        Returns:
+            ``total_samples`` (attempted inner steps counted), ``floor_samples``,
+            ``floor_fraction`` (0..1), ``saturation_depth`` -- the smallest
+            ``ideal_dt`` [s] the controller asked for while clamped to the floor, or
+            ``0.0`` if the floor was never hit -- ``boundaries`` (boundary calls
+            counted), ``capped_boundaries`` (boundaries that used the full
+            ``max_substeps`` budget; this includes boundaries where every world
+            happened to land exactly on the final permitted iteration, so it is not
+            on its own proof of under-advance), and ``unfinished_worlds``
+            (world-boundaries that ended with ``sim_time < next_time``, i.e. the
+            actual under-advance measure).
+
+        Raises:
+            RuntimeError: If the solver was not constructed with ``dt_histogram=True``.
+        """
+        if self._dt_hist is None:
+            raise RuntimeError("dt_histogram_stats() requires SolverSAPAdaptive(dt_histogram=True)")
+        counts = self._dt_hist.numpy()
+        total = int(counts.sum())
+        floor = int(counts[0])
+        sat = float(self._dt_hist_sat.numpy()[0])
+        # _DT_HIST_SENTINEL (1e38) is not exactly representable in float32: the untouched
+        # accumulator reads back as 9.9999997e37, which is < 1.0e38. Comparing against the
+        # raw double literal would never fire, so "floor never hit" must compare against
+        # the SAME float32 round-trip the accumulator itself went through.
+        never_hit = sat >= float(np.float32(_DT_HIST_SENTINEL))
+        trunc = self._dt_hist_trunc.numpy()
+        return {
+            "total_samples": total,
+            "floor_samples": floor,
+            "floor_fraction": (floor / total) if total else 0.0,
+            "saturation_depth": 0.0 if never_hit else sat,
+            "boundaries": int(trunc[0]),
+            "capped_boundaries": int(trunc[1]),
+            "unfinished_worlds": int(trunc[2]),
+        }
 
     def get_max_contact_count(self) -> int:
         """Per-batch rigid-contact capacity (for manager-level sensor buffer sizing)."""
@@ -688,6 +1687,8 @@ class SolverSAPAdaptive:
         return None
 
     def reset_compute_counter(self) -> None:
+        """Zero the cumulative iteration/substep counters."""
+        self._cum_iters.fill_(0)
         self._cum_accepted.fill_(0)
 
     def notify_model_changed(self, flags: int) -> None:
@@ -743,25 +1744,164 @@ class SolverSAPAdaptive:
         )
 
     def _collide_from(self, state_in) -> None:
+        self._collide_calls += 1
         wp.copy(self._collide_state.body_q, state_in.body_q)
         self._pipeline.collide(self._collide_state, self._contacts)
 
-    def substep(self, state_in, state_out, control, contacts, dt: wp.array, guess=None) -> None:
+    def substep(self, state_in, state_out, control, contacts, dt: wp.array, guess=None, world_active=None) -> None:
         """ONE inner physics step at the per-world ``dt`` vector (= CENIC ``ComputeNextContinuousState``).
 
         ``guess`` is an explicit SAP-order velocity seed. Passing ``None`` disables the
         solver's persisted warm-start so the solve starts from its physical boundary
         velocity ``v0``. This mirrors Drake's CENIC warm-starts instead of accidentally
         reusing a rejected attempt's terminal velocity.
+
+        ``world_active`` (per-world int gate) restricts the SAP pipeline to
+        still-marching worlds; landed worlds' ``state_out`` rows go stale,
+        which is safe because the accept-gated commit never reads them.
         """
         self._set_solver_guess(guess)
-        self._sap.step(state_in, state_out, control, contacts, dt)
+        self._sap.step(state_in, state_out, control, contacts, dt, world_active=world_active)
         wp.launch(
             _accumulate_solve_convergence,
             dim=self._world_count,
             inputs=[self._sap.contact_solve.converged_env, self._solve_ok],
             device=self.model.device,
         )
+
+    # ----------------------------------------------------------- eval core
+    def _substep_evals(self, wa, env_grid: int, narrow: bool) -> None:
+        """Emit the eval core once: the three SAP solves plus the error metric.
+
+        ``env_grid`` sizes the ENV AXIS of every list-indexed launch (threaded
+        into the contact-solve interior via ``set_env_grid``; consumed
+        directly by the indexed error kernel); the subset chain
+        world_active -> stage2 -> newton -> LS bounds every list by the
+        active-world count, which the caller's branch predicate bounds by
+        ``env_grid``. ``narrow`` marks the march-compact narrow branch, which
+        records its engagement counter FIRST (execution proof for the
+        tripwires) and then the branch-capacity guard re-checking the routing
+        invariant on device. Everything mask-gated or full-width-by-design
+        (the solve's status/init kernels, collision, the contact scatter, the
+        v-guess copies/averages) emits identically in both branches.
+        """
+        n = self._world_count
+        dev = self.model.device
+
+        if self._march_compact:
+            if narrow:
+                wp.launch(_iter_count_increment, dim=1, inputs=[self._mc_narrow_execs], device=dev)
+                wp.launch(
+                    _env_grid_capacity_guard,
+                    dim=1,
+                    inputs=[self._active_counts, self._mc_width, self._sap.contact_solve._env_grid_poison],
+                    device=dev,
+                )
+            else:
+                wp.launch(_iter_count_increment, dim=1, inputs=[self._mc_wide_execs], device=dev)
+            self._sap.contact_solve.set_env_grid(env_grid)
+
+        try:
+            # Per-attempt cadence only: rebuild the contact set at q_t for the
+            # full step and first half-step. The default (boundary) cadence
+            # collided once in integrate(), outside this (captured) body, and
+            # every attempt reuses that set with per-attempt re-anchoring via
+            # the Jacobian rebuild. When collision does run here it stays
+            # FULL-WIDTH in every mode: the pipeline compacts all worlds'
+            # contacts into one global buffer via atomic slot assignment, so
+            # restricting its thread set could permute active worlds' contact
+            # order (and downstream fp summation order). March compaction
+            # excludes the per-attempt cadence at construction, so this
+            # branch never emits inside a conditional body.
+            if self._contact_refresh_per_attempt:
+                self._collide_from(self._state_cur)
+
+            # Drake CENIC warm-starts: full from v_t.
+            self._copy_state_velocity_to_sap_guess(self._state_cur, self._vt)
+            self.substep(
+                self._state_cur,
+                self._scratch_full,
+                self._sap_control,
+                self._sap_contacts,
+                self._dt,
+                guess=self._vt,
+                world_active=wa,
+            )
+            if self._do_doubling:
+                # half-1 from (v_t + v_full) / 2, reusing the q_t contact model.
+                wp.copy(self._vfull, self._sap.contact_solve.v_flat)
+                self._average_velocity_guess(self._vt, self._vfull, self._vhalf1)
+                self.substep(
+                    self._state_cur,
+                    self._scratch_mid,
+                    self._sap_control,
+                    self._sap_contacts,
+                    self._dt_half,
+                    guess=self._vhalf1,
+                    world_active=wa,
+                )
+
+                # half-2 starts from q_{t+h/2}; warm-start from v_full. In the
+                # default (boundary) cadence the boundary contact SET is
+                # reused and this solve's Jacobian rebuild re-anchors it at
+                # the midpoint state (the mid-double refresh that keeps the
+                # Richardson pair contact-sensitive); per-attempt mode
+                # re-collides instead.
+                if self._contact_refresh_per_attempt:
+                    self._collide_from(self._scratch_mid)
+                self.substep(
+                    self._scratch_mid,
+                    self._scratch_double,
+                    self._sap_control,
+                    self._sap_contacts,
+                    self._dt_half,
+                    guess=self._vfull,
+                    world_active=wa,
+                )
+
+            if self._tail_compact:
+                # Compacted error metric: landed worlds keep their last
+                # written error, which never reaches a decision (the
+                # controller's DONE branch returns before reading it). The
+                # env axis runs at env_grid; the kernel exits at the
+                # device-read active count.
+                wp.launch(
+                    _inf_norm_state_error_indexed_kernel,
+                    dim=env_grid,
+                    inputs=[
+                        self._err_lhs.joint_q,
+                        self._err_rhs.joint_q,
+                        self._state_scale,
+                        self._coords_per_world,
+                        self._commit_src.joint_qd,
+                        self._dofs_per_world,
+                        self._active_idx,
+                        self._active_counts,
+                        0,
+                        self._err_rtol_over_atol,
+                    ],
+                    outputs=[self._last_error],
+                    device=dev,
+                )
+            else:
+                wp.launch(
+                    _inf_norm_state_error_kernel,
+                    dim=n,
+                    inputs=[
+                        self._err_lhs.joint_q,
+                        self._err_rhs.joint_q,
+                        self._state_scale,
+                        self._coords_per_world,
+                        self._commit_src.joint_qd,
+                        self._dofs_per_world,
+                        self._err_rtol_over_atol,
+                    ],
+                    outputs=[self._last_error],
+                    device=dev,
+                )
+        finally:
+            if self._march_compact:
+                self._sap.contact_solve.set_env_grid(None)
 
     # ----------------------------------------------------------- substep body
     def _substep_body(self, eff_dt_max: float) -> None:
@@ -770,61 +1910,109 @@ class SolverSAPAdaptive:
         Identical flat kernel sequence every iteration, so it captures ONCE and replays per
         iteration. Per-world accept/reject/done is decided in ``_adapt_dt`` and applied by
         the gated ``_commit_*`` launches (a rejected or done world holds ``state_cur``). The
-        final ``_mark_unfinished`` sets the boundary flag the loop reads to stop early; the
+        final boundary-exit kernel (``mark_unfinished_contained`` by default,
+        ``mark_unfinished_with_status`` in strict mode) sets the boundary flag the loop reads to stop early; the
         flag is reset by the caller before each iteration so it reflects this step only.
         """
         n = self._world_count
         dev = self.model.device
 
+        # Sample BEFORE _clamp_dt_to_boundary: dt still holds the controller's chosen
+        # step here, not a landing sliver (worlds already landed are skipped in-kernel).
+        if self._dt_hist is not None:
+            wp.launch(
+                _dt_histogram_accum,
+                dim=n,
+                inputs=[
+                    self._dt,
+                    self._ideal_dt,
+                    self._sim_time,
+                    self._next_time,
+                    self._dt_min,
+                    self._dt_hist_lo_log10,
+                    float(self._dt_hist_bpd),
+                    self._dt_hist_n_bins,
+                    self._dt_hist,
+                    self._dt_hist_sat,
+                ],
+                device=dev,
+            )
+
+        # Count this attempt (per-boundary + cumulative). A rejection is just another iteration.
+        wp.launch(_iter_count_increment, dim=1, inputs=[self._iteration_count_buf], device=dev)
+        wp.launch(_iter_count_increment, dim=1, inputs=[self._cum_iters], device=dev)
+
         wp.launch(
             _clamp_dt_to_boundary,
             dim=n,
-            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time],
+            inputs=[self._dt, self._dt_half, self._sim_time, self._next_time, self._limited],
             device=dev,
         )
+
+        # Compact the unfinished worlds AFTER the clamp (post-clamp dt > 0 is
+        # the single "attempts a step" predicate) and before anything consumes
+        # the list/mask. Fixed-dim launches; the count lives on device. Under
+        # deterministic march compaction the list becomes an iteration space
+        # (the narrow body sizes grids to it), so it is built canonically
+        # ascending instead of in atomic arrival order; both builds produce
+        # the same set/count and every consumer writes world-private rows,
+        # so the choice cannot perturb any floating-point result.
+        wa = None
+        if self._tail_compact:
+            if self._march_compact and self._deterministic:
+                wp.launch(
+                    _build_active_worlds_chunk_count,
+                    dim=self._mc_n_chunks,
+                    inputs=[self._dt, n, _MC_CHUNK, self._mc_chunk_counts],
+                    device=dev,
+                )
+                wp.launch(
+                    _build_active_worlds_chunk_scan,
+                    dim=1,
+                    inputs=[self._mc_chunk_counts, self._mc_n_chunks, self._mc_chunk_offsets, self._active_counts],
+                    device=dev,
+                )
+                wp.launch(
+                    _build_active_worlds_ordered_scatter,
+                    dim=self._mc_n_chunks,
+                    inputs=[self._dt, n, _MC_CHUNK, self._mc_chunk_offsets, self._active_idx, self._world_active],
+                    device=dev,
+                )
+            else:
+                wp.launch(_reset_active_counts, dim=1, inputs=[self._active_counts], device=dev)
+                wp.launch(
+                    _build_active_worlds,
+                    dim=n,
+                    inputs=[self._dt, self._active_counts, self._active_idx, self._world_active],
+                    device=dev,
+                )
+            wa = self._world_active
 
         wp.launch(_reset_solve_convergence, dim=n, inputs=[self._solve_ok], device=dev)
 
-        # Build the contact model around q_t for the full step and first half-step.
-        self._collide_from(self._state_cur)
-
-        # Drake CENIC warm-starts: full from v_t.
-        self._copy_state_velocity_to_sap_guess(self._state_cur, self._vt)
-        self.substep(
-            self._state_cur, self._scratch_full, self._sap_control, self._sap_contacts, self._dt, guess=self._vt
-        )
-        if self._do_doubling:
-            # half-1 from (v_t + v_full) / 2, reusing the q_t contact model.
-            wp.copy(self._vfull, self._sap.contact_solve.v_flat)
-            self._average_velocity_guess(self._vt, self._vfull, self._vhalf1)
-            self.substep(
-                self._state_cur,
-                self._scratch_mid,
-                self._sap_control,
-                self._sap_contacts,
-                self._dt_half,
-                guess=self._vhalf1,
+        # Eval core: the three SAP solves plus the error metric. With march
+        # compaction the core records as a device-side conditional -- one
+        # wide body (today's stream verbatim) and one narrow body (the same
+        # stream with list-indexed env grids sized to the budget) -- routed
+        # per iteration by the active-world count written just above. Both
+        # branch bodies are pure pre-allocated launch streams (no host work,
+        # no allocations), so the conditional records under both capture
+        # tiers and executes eagerly during warmup.
+        if self._march_compact:
+            wp.launch(
+                _derive_narrow_cond,
+                dim=1,
+                inputs=[self._active_counts, self._mc_width, self._mc_cond],
+                device=dev,
             )
-
-            # half-2 starts from q_{t+h/2}, so rebuild contacts at the midpoint state and
-            # warm-start from v_full.
-            self._collide_from(self._scratch_mid)
-            self.substep(
-                self._scratch_mid,
-                self._scratch_double,
-                self._sap_control,
-                self._sap_contacts,
-                self._dt_half,
-                guess=self._vfull,
+            wp.capture_if(
+                self._mc_cond,
+                on_true=lambda: self._substep_evals(wa, self._mc_width, True),
+                on_false=lambda: self._substep_evals(wa, n, False),
             )
+        else:
+            self._substep_evals(wa, n, False)
 
-        wp.launch(
-            _inf_norm_state_error_kernel,
-            dim=n,
-            inputs=[self._err_lhs.joint_q, self._err_rhs.joint_q, self._state_scale, self._coords_per_world],
-            outputs=[self._last_error],
-            device=dev,
-        )
         wp.launch(
             _apply_solve_convergence_to_error,
             dim=n,
@@ -852,10 +2040,21 @@ class SolverSAPAdaptive:
                 self._dt_min,
                 eff_dt_max,
                 self._divergence_threshold,
-                self._quantile_stop.force_accept,
+                self._dt_ceiling,
+                self._limited,
+                self._consec_rej,
+                self._ceiling_init,
+                self._dt_inner_init,
             ],
             device=dev,
         )
+        if self._march_log_path is not None:
+            wp.launch(
+                _count_rejects,
+                dim=n,
+                inputs=[self._accepted, self._dt, self._diverged, self._reject_count_buf],
+                device=dev,
+            )
 
         src = self._commit_src
         wp.launch(
@@ -889,17 +2088,36 @@ class SolverSAPAdaptive:
                 device=dev,
             )
 
-        # Boundary flag for early termination: set to 1 if any world is still unfinished.
+        # Boundary flag for early termination: reset in-body (so the flag reflects
+        # this step only, with no host write between replays), then set to 1 if any
+        # world is still unfinished. Containment (default) keeps a solve failure
+        # per-world -- the controller's reject/shrink/floor-latch absorbs it --
+        # and records it in the sticky slot-1 latch + per-world counter; strict
+        # mode folds it into the batch-fatal status 2 instead.
+        wp.launch(_boundary_reset, dim=1, inputs=[self._unfinished], device=dev)
+        if self._containment:
+            wp.launch(
+                mark_unfinished_contained,
+                dim=n,
+                inputs=[self._sim_time, self._next_time, self._solve_ok, self._solve_fail_world, self._unfinished],
+                device=dev,
+            )
+        else:
+            wp.launch(
+                mark_unfinished_with_status,
+                dim=n,
+                inputs=[self._sim_time, self._next_time, self._solve_ok, self._unfinished],
+                device=dev,
+            )
+        # The max_substeps cap runs LAST so it wins over the boundary-exit check;
+        # the kernel preserves a status-2 flag so the cap can never mask a solve
+        # failure.
         wp.launch(
-            _mark_unfinished,
-            dim=n,
-            inputs=[self._sim_time, self._next_time, self._solve_ok, self._unfinished],
+            _iters_exhausted_stop,
+            dim=1,
+            inputs=[self._iteration_count_buf, self._max_substeps, self._unfinished],
             device=dev,
         )
-        # Quantile stop: lower the flag once enough of the batch has landed. Runs AFTER
-        # _mark_unfinished so a non-converged solve (status 2) is never masked.
-        if self._quantile_stop.enabled:
-            self._quantile_stop.mark_boundary(self._sim_time, self._next_time, self._unfinished, dev)
 
     def _body_graph(self, eff_dt_max: float, dt_outer: float):
         """Return the captured single-substep-body graph, or ``None`` to run eagerly.
@@ -914,7 +2132,23 @@ class SolverSAPAdaptive:
         if not self._graph_warmed:
             self._graph_warmed = True
             return None
-        key = round(float(dt_outer), 12)
+        # The contact cadence shapes the captured body (per-attempt keeps the
+        # collide inside it), so it is part of the key: a cached graph must
+        # never replay the other cadence's launch stream. The LS-compaction
+        # switch shapes it too (list-rebuild launches inside the line-search
+        # trips), so it is keyed for the same reason. The line-search variant
+        # selects entirely different launch streams inside the Newton loop
+        # (fused single-launch ladder vs conditional backtracking trips), so
+        # it is keyed as well.
+        key = (
+            round(float(dt_outer), 12),
+            self._contact_refresh_per_attempt,
+            bool(getattr(self._sap.contact_solve, "_ls_compact", False)),
+            str(getattr(self._sap, "line_search_variant", "")),
+            self._tail_compact,
+            self._march_compact,
+            self._mc_width,
+        )
         graph = self._graph_cache.get(key)
         if graph is None:
             try:
@@ -927,17 +2161,493 @@ class SolverSAPAdaptive:
                 return None
         return graph
 
+    _CONDITIONAL_WARM_BOUNDARIES = 2
+    """Boundaries to run on the per-iteration tier before attempting whole-march
+    conditional capture: kernel-module loads and any lazy allocation must happen
+    OUTSIDE the capture (a conditional body may not record them)."""
+
+    def _external_capture_active(self) -> bool:
+        """True when an OUTER CUDA-graph capture is recording on the current stream,
+        so the march must record its conditional while-node into that graph instead
+        of launching/replaying its own (host reads, including the post-march status
+        check, are illegal there -- the outer graph's owner reads ``_unfinished``
+        after replay if it needs the converge-or-throw contract)."""
+        if not self._is_cuda:
+            return False
+        try:
+            dev = wp.get_device(self.model.device)
+            return dev.captures.get(wp.get_stream(dev)) is not None
+        except Exception:
+            return False
+
+    def _conditional_march_body(self, eff_dt_max: float) -> None:
+        """One while-node trip: the substep body, then the loop-condition update.
+
+        The update runs AFTER ``_iters_exhausted_stop`` (the last launch of the
+        body) so the budget cap and a solve-failure status both close the loop."""
+        self._substep_body(eff_dt_max)
+        wp.launch(
+            _march_continue_from_status,
+            dim=1,
+            inputs=[self._unfinished, self._march_continue],
+            device=self.model.device,
+        )
+
+    def _march_conditional(self, eff_dt_max: float) -> None:
+        """Record the whole march as a device-side loop: seed the loop condition
+        open, then ``wp.capture_while`` over the substep body. The seed records
+        INSIDE the graph so every replay is self-contained (the body always runs
+        at least once per boundary, matching the per-iteration tier)."""
+        wp.launch(_march_continue_set, dim=1, inputs=[self._march_continue], device=self.model.device)
+        wp.capture_while(self._march_continue, lambda: self._conditional_march_body(eff_dt_max))
+
+    def _abort_active_capture(self) -> None:
+        """Best-effort: never leave the stream in capture mode after a failed capture.
+
+        A stream stuck mid-capture silently records every subsequent launch into an
+        orphan graph, which manifests later as bogus OOMs. Belt-and-braces alongside
+        ScopedCapture's own cleanup."""
+        try:
+            dev = wp.get_device(self.model.device)
+            stream = wp.get_stream(dev)
+            if dev.captures.get(stream) is not None:
+                with contextlib.suppress(Exception):
+                    wp.capture_end(stream=stream)
+        except Exception:
+            pass
+
+    def _conditional_graph_key(self, dt_outer: float):
+        """Cache key for the whole-march conditional graph: every switch that
+        shapes the recorded launch stream (the same determinants as
+        :meth:`_body_graph`'s key -- a cached graph must never replay another
+        configuration's launch stream)."""
+        return (
+            round(float(dt_outer), 12),
+            self._contact_refresh_per_attempt,
+            bool(getattr(self._sap.contact_solve, "_ls_compact", False)),
+            str(getattr(self._sap, "line_search_variant", "")),
+            self._tail_compact,
+            self._march_compact,
+            self._mc_width,
+        )
+
+    def _launch_conditional_march(self, eff_dt_max: float, dt_outer: float) -> bool:
+        """Replay (capturing on first use) the whole-march conditional graph.
+        Returns False after permanently downgrading on any capture/launch failure."""
+        key = self._conditional_graph_key(dt_outer)
+        graph = self._conditional_graph_cache.get(key)
+        if graph is None:
+            try:
+                with wp.ScopedCapture() as cap:
+                    self._march_conditional(eff_dt_max)
+                graph = cap.graph
+                self._conditional_graph_cache[key] = graph
+            except Exception as exc:
+                self._abort_active_capture()
+                self._conditional_enabled = False
+                self._conditional_graph_cache.clear()
+                warnings.warn(
+                    f"SolverSAPAdaptive: conditional-march capture failed ({exc}); "
+                    "downgrading permanently to per-iteration graph replay.",
+                    stacklevel=2,
+                )
+                return False
+        try:
+            wp.capture_launch(graph)
+        except Exception as exc:
+            self._conditional_enabled = False
+            self._conditional_graph_cache.clear()
+            warnings.warn(
+                f"SolverSAPAdaptive: conditional-march launch failed ({exc}); "
+                "downgrading permanently to per-iteration graph replay.",
+                stacklevel=2,
+            )
+            return False
+        self._conditional_launches += 1
+        return True
+
+    # ------------------------------------------------------- failure forensics
+    def _failure_dump_world_record(self, w: int, arrays: dict) -> dict:
+        """One failing world's record for the forensic dump: raw buffer values
+        only; every derived field carries its derivation rule in the JSON so
+        the dump stays interpretable without this source."""
+        cpw = self._coords_per_world
+        dpw = self._dofs_per_world
+        ncon_w = int(arrays["ncon"][w])
+        phi0_w = arrays["phi0"][w, : max(ncon_w, 0)]
+        # Attempted-step reconstruction: the controller's reject path already
+        # ran on the failing attempt (solve failure forces err to the
+        # divergence threshold), so dt was shrunk by _DRAKE_MIN_SHRINK and
+        # ideal_dt holds the unclamped shrunken step; a diverged-latch world
+        # (floor / fixed mode) keeps dt untouched instead.
+        if bool(arrays["diverged"][w]):
+            dt_attempted = float(arrays["dt"][w])
+        else:
+            dt_attempted = float(arrays["ideal_dt"][w]) / float(np.float32(_DRAKE_MIN_SHRINK))
+        return {
+            "world": int(w),
+            "solve_ok": int(arrays["solve_ok"][w]),
+            "last_solve": {
+                "converged": int(arrays["converged"][w]),
+                "optimality_reached": int(arrays["opt_reached"][w]),
+                "cost_reached": int(arrays["cost_reached"][w]),
+                "newton_iterations": int(arrays["n_iters"][w]),
+                "grad_norm": float(arrays["grad_norm"][w]),
+                "p_norm": float(arrays["p_norm"][w]),
+                "jc_norm": float(arrays["jc_norm"][w]),
+                "opt_tol": float(arrays["opt_tol"][w]),
+                "alpha": float(arrays["alpha"][w]),
+                "ls_status": int(arrays["ls_status"][w]),
+                "ls_iterations_total": int(arrays["ls_total"][w]),
+                "cost": float(arrays["cost"][w]),
+                "previous_cost": float(arrays["prev_cost"][w]),
+            },
+            "contact": {
+                "count": ncon_w,
+                "phi0_min": float(phi0_w.min()) if ncon_w > 0 else None,
+                "n_penetrating": int((phi0_w < 0.0).sum()) if ncon_w > 0 else 0,
+                "phi0": [float(x) for x in phi0_w[:256]],
+            },
+            "controller": {
+                "dt_post_adapt": float(arrays["dt"][w]),
+                "dt_attempted_est": dt_attempted,
+                "ideal_dt": float(arrays["ideal_dt"][w]),
+                "dt_ceiling": float(arrays["dt_ceiling"][w]),
+                "sim_time": float(arrays["sim_time"][w]),
+                "next_time": float(arrays["next_time"][w]),
+                "boundary_remaining": float(arrays["next_time"][w] - arrays["sim_time"][w]),
+                "diverged": bool(arrays["diverged"][w]),
+                "limited": int(arrays["limited"][w]),
+                "consec_rej": int(arrays["consec_rej"][w]),
+                "last_error": float(arrays["last_error"][w]),
+            },
+            "joint_q": [float(x) for x in arrays["joint_q"][w * cpw : (w + 1) * cpw]],
+            "joint_qd": [float(x) for x in arrays["joint_qd"][w * dpw : (w + 1) * dpw]],
+        }
+
+    def _dump_solve_failure(self) -> None:
+        """NEWTON_SAP_FAILURE_DUMP: write the failing worlds' state to a JSON
+        file before the converge-or-throw raise.
+
+        Pure observer of buffers the march already left behind; every
+        ``.numpy()`` here is a host read performed after the raise decision,
+        outside any capture. The rejected failing attempt never committed, so
+        ``_state_cur`` still holds the state that attempt solved from, and the
+        boundary contact set (and its deterministic slot ranks) is untouched
+        -- which is also what makes the optional replay exact.
+        """
+        import json
+        import time
+
+        cs = self._sap.contact_solve
+        cj = self._sap.contact_jacobian
+
+        solve_ok = self._solve_ok.numpy()
+        failing = np.flatnonzero(solve_ok == 0)
+
+        p_norm = np.sqrt(np.maximum(cs.p_norm2.numpy(), 0.0))
+        jc_norm = np.sqrt(np.maximum(cs.jc_norm2.numpy(), 0.0))
+        arrays = {
+            "solve_ok": solve_ok,
+            "converged": cs.converged_env.numpy(),
+            "opt_reached": cs.optimality_reached_env.numpy(),
+            "cost_reached": cs.cost_reached_env.numpy(),
+            "n_iters": cs.newton_iterations_env.numpy(),
+            "grad_norm": np.sqrt(np.maximum(cs.grad_norm2.numpy(), 0.0)),
+            "p_norm": p_norm,
+            "jc_norm": jc_norm,
+            "opt_tol": float(self._sap.optimality_abs_tol)
+            + float(self._sap.optimality_rel_tol) * np.maximum(p_norm, jc_norm),
+            "alpha": cs.alpha.numpy(),
+            "ls_status": cs.ls_status.numpy(),
+            "ls_total": cs.ls_iterations_total.numpy(),
+            "cost": cs.cost.numpy(),
+            "prev_cost": cs.previous_cost.numpy(),
+            "ncon": cj.contact_env_count_wp.numpy(),
+            "phi0": cj.contact_env_phi0_wp.numpy(),
+            "dt": self._dt.numpy(),
+            "ideal_dt": self._ideal_dt.numpy(),
+            "dt_ceiling": self._dt_ceiling.numpy(),
+            "sim_time": self._sim_time.numpy(),
+            "next_time": self._next_time.numpy(),
+            "diverged": self._diverged.numpy(),
+            "limited": self._limited.numpy(),
+            "consec_rej": self._consec_rej.numpy(),
+            "last_error": self._last_error.numpy(),
+            "joint_q": self._state_cur.joint_q.numpy(),
+            "joint_qd": self._state_cur.joint_qd.numpy(),
+        }
+        ncon_all = arrays["ncon"]
+
+        dump: dict = {
+            "semantics": (
+                "Post-mortem of a converge-or-throw (status>=2) boundary. 'last_solve' fields are "
+                "the LAST inner solve of the failing attempt (in adaptive mode the second "
+                "half-step 'double' solve); solve_ok==0 means the world failed at least one of "
+                "the attempt's solves, so a converged last_solve means the failure was an "
+                "earlier solve of the same attempt (its norms were then zeroed by the "
+                "convergence check). grad_norm vs opt_tol is the residual actually reached vs "
+                "the target (opt_tol = abs_tol + rel_tol*max(p_norm, jc_norm)). Controller "
+                "fields are post-_adapt_dt: for a non-diverged failing world dt was already "
+                "shrunk by _DRAKE_MIN_SHRINK, hence dt_attempted_est = ideal_dt/0.1; a "
+                "diverged-latch world keeps dt untouched (dt_attempted_est = dt). last_error "
+                "for a failing world is the divergence threshold, not a physical error. "
+                "phi0 is the per-slot signed distance at the last solve's Jacobian anchor "
+                "state (negative = penetration). joint_q/joint_qd are the state the failing "
+                "attempt solved FROM (the attempt rejected, so it was never overwritten)."
+            ),
+            "meta": {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "world_count": int(self._world_count),
+                "coords_per_world": int(self._coords_per_world),
+                "dofs_per_world": int(self._dofs_per_world),
+                "mode": self._mode,
+                "tol": self._tol,
+                "optimality_abs_tol": float(self._sap.optimality_abs_tol),
+                "optimality_rel_tol": float(self._sap.optimality_rel_tol),
+                "inner_max_iterations": int(self._sap.max_iterations),
+                "line_search_variant": str(getattr(self._sap, "line_search_variant", "")),
+                "line_search_max_iterations": int(getattr(self._sap, "line_search_max_iterations", -1)),
+                "solve_dtype": str(cs.solve_dtype),
+                "dt_min": self._dt_min,
+                "dt_max": self._dt_max,
+                "max_substeps": self._max_substeps,
+                "boundary_iterations": int(self._iteration_count_buf.numpy()[0]),
+                "cum_iterations": int(self._cum_iters.numpy()[0]),
+                "frame_counter": int(self._frame_counter),
+                "newton_max_reached": int(cs.newton_max_reached.numpy()[0]),
+            },
+            "failing_worlds": [int(w) for w in failing],
+            "contact_count_all_worlds": {
+                "min": int(ncon_all.min()),
+                "mean": float(ncon_all.mean()),
+                "max": int(ncon_all.max()),
+                "per_world": [int(x) for x in ncon_all],
+            },
+            "worlds": [self._failure_dump_world_record(int(w), arrays) for w in failing],
+        }
+
+        jl_lo = getattr(self.model, "joint_limit_lower", None)
+        jl_hi = getattr(self.model, "joint_limit_upper", None)
+        if jl_lo is not None and jl_hi is not None and len(failing) > 0:
+            w0 = int(failing[0])
+            dpw = self._dofs_per_world
+            dump["joint_limit_lower"] = [float(x) for x in jl_lo.numpy()[w0 * dpw : (w0 + 1) * dpw]]
+            dump["joint_limit_upper"] = [float(x) for x in jl_hi.numpy()[w0 * dpw : (w0 + 1) * dpw]]
+
+        if self._failure_replay_caps and len(failing) > 0:
+            dt_attempted = np.where(
+                arrays["diverged"],
+                arrays["dt"],
+                arrays["ideal_dt"] / np.float32(_DRAKE_MIN_SHRINK),
+            ).astype(np.float32)
+            dump["replay"] = self._replay_failing_attempt(failing, dt_attempted)
+
+        path = self._failure_dump_path
+        if os.path.exists(path):
+            path = f"{path}.{int(time.time())}"
+        with open(path, "w") as f:
+            json.dump(dump, f, indent=1)
+
+    def _replay_failing_attempt(self, failing: np.ndarray, dt_attempted: np.ndarray) -> dict:
+        """NEWTON_SAP_FAILURE_REPLAY: re-run the failing attempt's inner solves
+        restricted to the failing worlds, at a ladder of inner iteration caps,
+        recording each solve's convergence state per failing world.
+
+        Runs only after the raise decision, eagerly (no capture active), so
+        host syncs are legal. Validity rests on the raise-point invariants
+        stated in :meth:`_dump_solve_failure`: unchanged ``_state_cur``,
+        unchanged boundary contact set/slot ranks, and the warm-start chain
+        being reconstructed exactly as ``_substep_body`` builds it (full from
+        v_t, half-1 from the (v_t+v_full)/2 average, half-2 from v_full).
+        Deterministic reductions make each per-world solve independent of the
+        active mask, so restricting to the failing worlds reproduces their
+        original solves.
+        """
+        dev = self.model.device
+        n = self._world_count
+        cs = self._sap.contact_solve
+
+        mask = np.zeros(n, dtype=np.int32)
+        mask[failing] = 1
+        wa = wp.array(mask, dtype=wp.int32, device=dev)
+        dt_np = dt_attempted.astype(np.float32)
+        dt_arr = wp.array(dt_np, dtype=wp.float32, device=dev)
+        dt_half_arr = wp.array(dt_np * np.float32(0.5), dtype=wp.float32, device=dev)
+
+        def run_attempt(dt_arr_a, dt_half_arr_a, cap: int) -> dict:
+            self._sap.max_iterations = int(cap)
+            plan = [("full", self._state_cur, self._scratch_full, dt_arr_a)]
+            if self._do_doubling:
+                plan.append(("half1", self._state_cur, self._scratch_mid, dt_half_arr_a))
+                plan.append(("half2", self._scratch_mid, self._scratch_double, dt_half_arr_a))
+            rec: dict = {"cap": int(cap), "solves": []}
+            all_conv = True
+            for name, s_in, s_out, d in plan:
+                if name == "full":
+                    self._copy_state_velocity_to_sap_guess(self._state_cur, self._vt)
+                    guess = self._vt
+                elif name == "half1":
+                    wp.copy(self._vfull, cs.v_flat)
+                    self._average_velocity_guess(self._vt, self._vfull, self._vhalf1)
+                    guess = self._vhalf1
+                else:
+                    guess = self._vfull
+                wp.launch(_reset_solve_convergence, dim=n, inputs=[self._solve_ok], device=dev)
+                self.substep(s_in, s_out, self._sap_control, self._sap_contacts, d, guess=guess, world_active=wa)
+
+                conv = cs.converged_env.numpy()
+                opt = cs.optimality_reached_env.numpy()
+                n_it = cs.newton_iterations_env.numpy()
+                gn = np.sqrt(np.maximum(cs.grad_norm2.numpy(), 0.0))
+                pn = np.sqrt(np.maximum(cs.p_norm2.numpy(), 0.0))
+                jn = np.sqrt(np.maximum(cs.jc_norm2.numpy(), 0.0))
+                ot = float(self._sap.optimality_abs_tol) + float(self._sap.optimality_rel_tol) * np.maximum(pn, jn)
+                al = cs.alpha.numpy()
+                lst = cs.ls_status.numpy()
+                per_world = []
+                for w in failing:
+                    w = int(w)
+                    per_world.append(
+                        {
+                            "world": w,
+                            "converged": int(conv[w]),
+                            "optimality_reached": int(opt[w]),
+                            "newton_iterations": int(n_it[w]),
+                            "grad_norm": float(gn[w]),
+                            "opt_tol": float(ot[w]),
+                            "alpha": float(al[w]),
+                            "ls_status": int(lst[w]),
+                        }
+                    )
+                    if int(conv[w]) == 0:
+                        all_conv = False
+                rec["solves"].append({"solve": name, "worlds": per_world})
+            rec["all_failing_worlds_converged"] = bool(all_conv)
+            return rec
+
+        saved_cap = self._sap.max_iterations
+        result: dict = {
+            "caps": [int(c) for c in self._failure_replay_caps],
+            "dt_attempted": [float(dt_np[int(w)]) for w in failing],
+            "ladder": [],
+        }
+        try:
+            for cap in self._failure_replay_caps:
+                rec = run_attempt(dt_arr, dt_half_arr, cap)
+                result["ladder"].append(rec)
+                if rec["all_failing_worlds_converged"]:
+                    break
+            if self._failure_replay_dt_scales:
+                # dt sensitivity at the ORIGINAL cap: the counterfactual for
+                # the controller's shrink-and-retry (its reject path re-runs
+                # the same attempt shape at a smaller step from the same
+                # held state and warm-start construction).
+                result["dt_sweep"] = []
+                for scale in self._failure_replay_dt_scales:
+                    dt_s = (dt_np * np.float32(scale)).astype(np.float32)
+                    d_arr = wp.array(dt_s, dtype=wp.float32, device=dev)
+                    d_half = wp.array(dt_s * np.float32(0.5), dtype=wp.float32, device=dev)
+                    rec = run_attempt(d_arr, d_half, saved_cap)
+                    rec["dt_scale"] = float(scale)
+                    result["dt_sweep"].append(rec)
+        finally:
+            self._sap.max_iterations = saved_cap
+        return result
+
+    def _note_contained_failures(self) -> None:
+        """Rare-path host accounting for a boundary whose march contained at
+        least one per-world solve failure (the sticky slot-1 latch fired).
+
+        Reads the per-world event counters, updates the cumulative host
+        counters, and emits a rate-limited warning naming the world count.
+        Runs strictly post-march with no capture active, so the host read is
+        legal; the hot loop itself never syncs for this. The failure's
+        dynamics were already handled on device: the failing attempt was
+        rejected (or the world floor-latched ``diverged``, reported via
+        :attr:`diverged` for the consumer's reset/termination path), so the
+        unconverged result was never consumed.
+        """
+        counts = self._solve_fail_world.numpy().astype(np.int64)
+        total = int(counts.sum())
+        new_events = total - self._solve_failure_events
+        new_worlds = int((counts > self._fail_world_prev).sum())
+        self._solve_failure_events = total
+        self._fail_world_prev = counts
+        self._solve_failure_boundaries += 1
+        if self._fail_warn_emitted < 5 or self._solve_failure_boundaries % 100 == 0:
+            self._fail_warn_emitted += 1
+            warnings.warn(
+                "SolverSAPAdaptive: contained inner-solve failure(s) this boundary: "
+                f"{new_worlds} world(s), {new_events} rejected attempt(s) "
+                f"(cumulative {self._solve_failure_events} events over "
+                f"{self._solve_failure_boundaries} failing boundaries). Failing worlds "
+                "retry at a shrunken dt and latch diverged at the dt floor (read "
+                "solver.diverged after the boundary call to reset/terminate them); "
+                "no unconverged result is ever committed. "
+                "NEWTON_SAP_CONTAINMENT=0 restores strict converge-or-throw.",
+                stacklevel=3,
+            )
+
+    def _raise_if_solve_failed(self, status: int) -> None:
+        """Converge-or-throw (strict mode): a status-2 boundary word means some
+        world's inner solve did not reach its optimality tolerance and its
+        result must never be consumed. Containment mode never folds status 2
+        (the failure stays per-world), so this is a no-op there."""
+        if status >= 2:
+            # Forensics first (env-gated, host-only, post-decision): a dump
+            # failure must never mask the converge-or-throw contract.
+            if self._failure_dump_path is not None:
+                try:
+                    self._dump_solve_failure()
+                except Exception as exc:  # noqa: BLE001
+                    warnings.warn(
+                        f"SolverSAPAdaptive: failure dump failed ({exc}).",
+                        stacklevel=2,
+                    )
+            raise RuntimeError(
+                "SolverSAPAdaptive inner SAP solve failed to converge to "
+                f"optimality_rel_tol={self._optimality_rel_tol:.3e}."
+            )
+
     def _run_substep_loop(self, eff_dt_max: float, dt_outer: float) -> None:
         """March substeps until every world reaches its boundary, capped at ``max_substeps``.
 
-        The body is captured once and replayed per iteration (or run eagerly while warming /
-        if capture fails). After each iteration the 4-byte ``_unfinished`` flag is read back
-        -- the single accepted host sync in the step path -- to stop as soon as all worlds
-        land instead of grinding fixed no-op substeps.
+        Tiers (first applicable wins):
+        1. Conditional mode + outer capture recording -> contribute the while-node
+           (no host reads are possible there; see :meth:`_external_capture_active`).
+        2. Conditional mode, warmed -> replay the whole-march conditional graph,
+           then ONE 4-byte post-march status read (the converge-or-throw check).
+        3. Default / warmup / post-failure: replay the per-iteration body graph
+           (or run eagerly while warming / if capture fails), reading the 4-byte
+           ``_unfinished`` status between iterations to stop as soon as all
+           worlds land instead of grinding fixed no-op substeps.
         """
+        if self._conditional_enabled:
+            if self._external_capture_active():
+                self._march_conditional(eff_dt_max)
+                if self._march_iters is not None:
+                    wp.copy(self._march_iters, self._iteration_count_buf)
+                return
+            if self._conditional_warm_boundaries >= self._CONDITIONAL_WARM_BOUNDARIES:
+                if self._launch_conditional_march(eff_dt_max, dt_outer):
+                    # ONE post-march read of the 2-int32 status word: slot 0 is
+                    # the boundary status (strict converge-or-throw check),
+                    # slot 1 the sticky containment failure latch (rare path).
+                    st = self._unfinished.numpy()
+                    self._raise_if_solve_failed(int(st[0]))
+                    self._raise_if_march_compact_poisoned()
+                    if self._containment and int(st[1]) != 0:
+                        self._note_contained_failures()
+                    if self._march_iters is not None:
+                        wp.copy(self._march_iters, self._iteration_count_buf)
+                    return
+            else:
+                self._conditional_warm_boundaries += 1
+
         graph = self._body_graph(eff_dt_max, dt_outer)
+        fail_latched = 0
         for _ in range(self._max_substeps):
-            self._unfinished.zero_()
             if graph is not None:
                 try:
                     wp.capture_launch(graph)
@@ -950,28 +2660,20 @@ class SolverSAPAdaptive:
                     self._substep_body(eff_dt_max)
             else:
                 self._substep_body(eff_dt_max)
-            status = int(self._unfinished.numpy()[0])
-            if status >= 2:
-                raise RuntimeError(
-                    "SolverSAPAdaptive inner SAP solve failed to converge to "
-                    f"optimality_rel_tol={max(1.0e-3 * self._tol, 1.0e-8):.3e}."
-                )
+            st = self._unfinished.numpy()
+            status = int(st[0])
+            # Slot 1 is sticky across the boundary's iterations, so the last
+            # read carries every failure this march contained.
+            fail_latched = int(st[1])
+            self._raise_if_solve_failed(status)
             if status == 0:
                 break
+        self._raise_if_march_compact_poisoned()
+        if self._containment and fail_latched != 0:
+            self._note_contained_failures()
 
-        # Land every world the quantile stop abandoned. _clamp_dt_to_boundary (top of the
-        # body) hands each one exactly its remainder and gives landed worlds dt=0, so one
-        # more body with force_accept latched finishes the batch. Time becomes exact for
-        # every world; only that step's local error exceeds tol.
-        if self._quantile_stop.enabled and self._quantile_stop.any_abandoned():
-            self._quantile_stop.force_accept.fill_(1)
-            try:
-                if graph is not None:
-                    wp.capture_launch(graph)
-                else:
-                    self._substep_body(eff_dt_max)
-            finally:
-                self._quantile_stop.force_accept.fill_(0)
+        if self._march_iters is not None:
+            wp.copy(self._march_iters, self._iteration_count_buf)
 
     # ------------------------------------------------------------------- integrate
     def integrate(self, state, control, dt_outer: float):
@@ -986,7 +2688,7 @@ class SolverSAPAdaptive:
         dt_outer = float(dt_outer)
         eff_dt_max = min(self._dt_max, dt_outer)
 
-        self._sap_control = sap_control_from_newton(control)
+        self._sap_control = sap_control_from_newton(control, target_remap=self._target_remap)
 
         # Load the incoming Newton state into the internal working buffer.
         self._copy_state(self._state_cur, sap_state_from_newton(state))
@@ -1010,11 +2712,74 @@ class SolverSAPAdaptive:
         )
         self._substeps_frame.zero_()
         self._diverged.zero_()
+        self._iteration_count_buf.fill_(0)
+        self._guard_hits.fill_(0)
+        if self._containment:
+            # Clear the sticky slot-1 failure latch for the new boundary (slot 0
+            # is reset in-body every iteration regardless). A device fill, so it
+            # records correctly when an outer capture wraps this boundary.
+            self._unfinished.zero_()
+            self._containment_boundaries += 1
+        if self._march_log_path is not None:
+            self._reject_count_buf.fill_(0)
 
-        # Masked substep march: each attempt rebuilds contacts at q_t and, for
-        # step-doubling, at q_{t+h/2}. The loop stops as soon as every world reaches
+        # Boundary contact pass (default cadence, mirroring
+        # SolverMuJoCoAdaptive's once-per-boundary contact injection): ONE
+        # CollisionPipeline pass at the boundary-entry state; every attempt
+        # reuses this contact SET, re-anchored to its own eval state by the
+        # per-attempt Jacobian rebuild. Runs OUTSIDE the captured substep
+        # body by construction. Per-attempt mode collides inside the body
+        # instead (diagnostic-only).
+        if not self._contact_refresh_per_attempt:
+            self._collide_from(self._state_cur)
+            if self._sap.contact_jacobian.det_slots_external:
+                self._sap.contact_jacobian.compute_deterministic_contact_slots(self._sap_contacts)
+
+        # Masked substep march: the loop stops as soon as every world reaches
         # its boundary (one 4-byte flag read per iteration; count is scene-dependent).
         self._run_substep_loop(eff_dt_max, dt_outer)
+
+        # Once per boundary, outside the captured body: no per-iteration cost.
+        if self._dt_hist_trunc is not None:
+            wp.launch(
+                _count_boundary_truncation,
+                dim=1,
+                inputs=[self._march_iters, self._max_substeps, self._dt_hist_trunc],
+                device=device,
+            )
+            wp.launch(
+                _count_unfinished_worlds,
+                dim=n,
+                inputs=[self._sim_time, self._next_time, self._dt_hist_trunc],
+                device=device,
+            )
+
+        # Bound truncation damage BEFORE the next boundary consumes the carried
+        # state; device-only work, legal graphs on or off. A completed march
+        # makes this a no-op.
+        wp.launch(
+            _debt_guard,
+            dim=n,
+            inputs=[
+                self._sim_time,
+                self._next_time,
+                dt_outer,
+                self._dt_inner_init,
+                self._ceiling_init,
+                self._ideal_dt,
+                self._dt_ceiling,
+                self._consec_rej,
+                self._guard_hits,
+            ],
+            device=device,
+        )
+
+        # Opt-in telemetry readout: host reads of post-march state, which are only
+        # legal outside an active capture -- hence gated, never unconditional. Runs
+        # after the guard, so resid reflects the bounded carry while n_guard reports
+        # the worlds it touched.
+        if self._march_log_path is not None:
+            self._log_march_boundary()
 
         # Optional per-world spread telemetry (diagnostic; one host sync, throttled).
         self._frame_counter += 1
@@ -1032,14 +2797,69 @@ class SolverSAPAdaptive:
         self._copy_state(sap_state_from_newton(state), self._state_cur)
         return state
 
+    def _log_march_boundary(self) -> None:
+        """Append one CSV row of post-march telemetry for the finished boundary.
+
+        Pure observer: reads the boundary's counters and the controller-carry
+        arrays the march has already committed; writes nothing back to solver
+        state. Host reads are illegal while a capture is recording, so the
+        caller gates this on the opt-in env var instead of running it
+        unconditionally.
+        """
+        if self._march_log_file is None:
+            # Line-buffered so a killed run keeps its tail.
+            self._march_log_file = open(self._march_log_path, "a", buffering=1)
+            self._march_log_file.write(
+                "boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,"
+                "resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard,"
+                "eworld,qmax_i,qmax,ncon\n"
+            )
+        iters = int(self._iteration_count_buf.numpy()[0])
+        cum = int(self._cum_iters.numpy()[0])
+        ideal = self._ideal_dt.numpy()
+        resid = self._next_time.numpy() - self._sim_time.numpy()
+        rejects = int(self._reject_count_buf.numpy()[0])
+        err_arr = self._last_error.numpy()
+        err_max = float(err_arr.max())
+        # Name the worst world's largest-magnitude coordinate: which joint_q
+        # slot, and how big. Identifies WHAT the error norm is reading when
+        # err_max pins at a grid constant.
+        eworld = int(err_arr.argmax())
+        q_abs = np.abs(
+            self._state_cur.joint_q.numpy()[
+                eworld * self._coords_per_world : (eworld + 1) * self._coords_per_world
+            ]
+        )
+        qmax_i = int(q_abs.argmax())
+        qmax = float(q_abs[qmax_i])
+        # The solver-side contact count is a fixed capacity, so the ncon column
+        # reports the collision pipeline's live rigid-contact count instead.
+        ncon = int(self._contacts.rigid_contact_count.numpy()[0])
+        n_debt = int((resid > 0.0).sum())
+        n_subfloor = int((ideal < self._dt_min).sum())
+        n_guard = int(self._guard_hits.numpy()[0])
+        self._march_log_file.write(
+            f"{self._march_log_boundary},{iters},{cum},"
+            f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"
+            f"{resid.min():.6e},{resid.max():.6e},"
+            f"{rejects},{err_max:.6e},{n_debt},{n_subfloor},{n_guard},"
+            f"{eworld},{qmax_i},{qmax:.6e},{ncon}\n"
+        )
+        self._march_log_boundary += 1
+        if self._dt_hist is not None and self._march_log_boundary % self._march_log_hist_every == 0:
+            self._march_log_file.write(f"HIST {self.dt_histogram_stats()}\n")
+
     # ------------------------------------------------------------------- step
     def step(self, state_in, state_out, control, contacts=None, dt=None, apply_forces=None):
         """Newton-signature boundary call ``(state_in, state_out, control, contacts, dt)``.
 
         Thin adapter over :meth:`integrate`: ``state_in`` is advanced in place by ``dt``
         (= ``dt_outer``) and returned; ``state_out`` is accepted for signature uniformity
-        and returned unchanged. ``contacts`` is accepted but UNUSED; the integrator rebuilds
-        its internal contact set at each adaptive attempt's start and midpoint state.
+        and returned unchanged. ``contacts`` is accepted but UNUSED; the integrator builds
+        its internal contact set once per boundary at the entry state (default; each
+        attempt re-anchors it via the Jacobian rebuild) or, in the diagnostic
+        per-attempt mode (``NEWTON_ADAPTIVE_CONTACT_REFRESH=attempt``), at each
+        attempt's start and midpoint state.
         """
         if dt is None:
             raise ValueError("SolverSAPAdaptive.step requires dt (the outer boundary period).")
@@ -1070,6 +2890,8 @@ class SolverSAPAdaptive:
                 self._next_time,
                 self._diverged,
                 self._accepted,
+                self._dt_ceiling,
+                self._ceiling_init,
             ],
             device=self.model.device,
         )

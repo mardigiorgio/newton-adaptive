@@ -259,20 +259,25 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
 # **Fast** — ``(float_flip(score) << 32) | contact_id``.
 #   Full 32-bit score precision, no fingerprint. Contact_id in low 32 bits.
 #
-# **Deterministic** — ``(float_flip(score)>>10 << 42) | (fp << 20) | (id & 0xFFFFF)``.
-#   22-bit score, 22-bit fingerprint tiebreaker, 20-bit contact_id.
+# **Deterministic** — ``(float_flip(score)>>SCORE_SHIFT << 45) | (fp << 25) | (id & CONTACT_ID_MASK)``.
+#   19-bit score, 20-bit fingerprint tiebreaker, 25-bit contact_id.
 # ---------------------------------------------------------------------------
 
-# 22-bit fingerprint is wide enough to distinguish any two contacts that share
-# the same truncated score within a single reduction slot.  The remaining 20
-# bits for contact_id support up to 1,048,575 buffered contacts.
-FINGERPRINT_BITS = wp.constant(wp.uint64(22))
-CONTACT_ID_BITS = wp.constant(wp.uint64(20))
-CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
-FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
+# Bit budget: contact_id must index every BUFFERED candidate contact, and the
+# buffer capacity scales with the scene-sized triangle-pair cap, so large
+# multi-env mesh scenes need well over 2^20 ids. 25 id bits (33.5M contacts)
+# cover scene-sized caps; the score keeps its TOP bits (19 plain / 18 spatial)
+# and the fingerprint 20, which only re-balances which contact wins a
+# reduction tie -- the packed value remains a total order (id bits included),
+# so determinism is unaffected by the widths.
+FINGERPRINT_BITS = wp.constant(wp.uint64(20))
+CONTACT_ID_BITS = wp.constant(wp.uint64(25))
+CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 25) - 1))
+FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 20) - 1))
 # Plain Python int (not wp.constant) because it is used inside wp.static()
 # which requires a Python-level value for compile-time evaluation.
-SCORE_SHIFT = 10
+# 32-bit flipped score >> 13 keeps the top 19 bits: 19 + 20 + 25 = 64.
+SCORE_SHIFT = 13
 
 
 # -- Fast (non-deterministic) variants -------------------------------------
@@ -402,7 +407,7 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
         contact_id: Index into the contact buffer (from ``atomic_add``).
     """
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(45))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -422,7 +427,7 @@ def _make_preprune_probe_det(score: float, fingerprint: int) -> wp.uint64:
     (score and fingerprint), never on the non-deterministic contact_id.
     """
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(45))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | CONTACT_ID_MASK
     )
@@ -437,7 +442,7 @@ def _make_spatial_contact_value_det(score: float, is_inner: bool, fingerprint: i
     score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
     return (
         (priority << wp.uint64(63))
-        | (score_bits << wp.uint64(42))
+        | (score_bits << wp.uint64(45))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -452,17 +457,17 @@ def _make_spatial_preprune_probe_det(score: float, is_inner: bool, fingerprint: 
     score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
     return (
         (priority << wp.uint64(63))
-        | (score_bits << wp.uint64(42))
+        | (score_bits << wp.uint64(45))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | CONTACT_ID_MASK
     )
 
 
 @wp.func_native("""
-return static_cast<int32_t>(packed & 0xFFFFFull);
+return static_cast<int32_t>(packed & 0x1FFFFFFull);
 """)
 def _unpack_contact_id_det(packed: wp.uint64) -> int:
-    """Extract contact_id (low 20 bits) — deterministic variant."""
+    """Extract contact_id (low CONTACT_ID_BITS bits) — deterministic variant."""
     ...
 
 

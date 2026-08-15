@@ -63,7 +63,7 @@ from ...core.types import override
 from ...sim import BodyFlags, Contacts, Control, Model, State
 from ...sim.articulation import eval_articulation_fk
 from ...utils.benchmark import event_scope
-from ..adaptive_boundary import QuantileBoundaryStop
+from ..adaptive_boundary import mark_unfinished
 from .kernels import convert_mj_coords_to_warp_kernel
 from .mjw_alloc_cache import MjwStepAllocCache
 from .solver_mujoco import SolverMuJoCo
@@ -589,11 +589,32 @@ def _boundary_reset(flag: wp.array[wp.int32]):
 
 
 @wp.kernel
+def _write_coupled_solref(
+    dt: wp.array[wp.float32],
+    mask: wp.array2d[wp.bool],
+    solref: wp.array2d[wp.vec2],
+):
+    """Write timeconst = 2 * dt_attempt per world onto every coupled contact.
+
+    Runs once per attempt AFTER the boundary clamp so both step-double
+    trials integrate the same contact stiffness. Landed worlds (dt = 0) are
+    skipped; dampratio is preserved.
+    """
+    w, g = wp.tid()
+    if not mask[w, g]:
+        return
+    d = dt[w]
+    if d <= wp.float32(0.0):
+        return
+    solref[w, g] = wp.vec2(wp.float32(2.0) * d, solref[w, g][1])
+
+
+@wp.kernel
 def _iters_exhausted_stop(iter_count: wp.array[wp.int32], max_iters: int, flag: wp.array[wp.int32]):
     """Latch the boundary loop closed once ``max_substeps`` attempts have run.
 
-    Runs AFTER the quantile test so the cap wins: the safety bound must stop the loop
-    regardless of how many worlds are still short.
+    Runs AFTER the boundary-exit check so the cap wins: the safety bound must
+    stop the loop regardless of how many worlds are still short.
     """
     if iter_count[0] >= max_iters:
         flag[0] = 0
@@ -757,7 +778,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         *,
         tol: float = 1e-3,
         dt_inner_init: float = 0.01,
-        dt_inner_min: float = 1e-6,
+        dt_inner_min: float = 1e-12,
         dt_inner_max: float | None = None,
         dt_mode: str = "per_world",
         tiling: str = "ragged",
@@ -970,6 +991,32 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._timestep_buf = wp.full(world_count, dt_inner_init, dtype=wp.float32, device=device)
         self.mjw_model.opt.timestep = self._timestep_buf
 
+        # dt-coupled contact regularization (NEWTON_ADAPTIVE_CONTACT_COUPLING,
+        # default ON; set 0 to keep authored materials): every positive-
+        # timeconst contact runs at timeconst = 2 * THE ATTEMPT'S dt, written
+        # per world per iteration BEFORE the step-double trials. The write is
+        # per-ATTEMPT, not per-evaluation, because the error estimator's
+        # foundation requires the full step and the two half steps to
+        # integrate IDENTICAL contact parameters — letting refsafe re-derive
+        # the timeconst per sub-evaluation hands the half steps 4x the full
+        # step's stiffness and the full-vs-half difference then converges to
+        # a constant (~ the standing penetration depth) instead of vanishing
+        # with dt. With 2*dt_attempt >= 2*dt_eval the refsafe clamp stays
+        # inactive for both evals. Constraint enforcement still tightens as
+        # dt^-2 wherever the controller refines. Non-positive entries are
+        # direct k/b specifications and are never touched; dampratio is
+        # preserved; landed worlds (dt = 0) keep their previous values, which
+        # nothing commits.
+        self._coupled_solref_targets: list = []
+        if os.environ.get("NEWTON_ADAPTIVE_CONTACT_COUPLING", "0") == "1":
+            for attr in ("geom_solref", "pair_solref"):
+                arr = getattr(self.mjw_model, attr, None)
+                if arr is None or arr.shape[1] == 0:
+                    continue
+                host = arr.numpy()
+                mask = wp.array((host[..., 0] > 0.0), dtype=wp.bool, device=device)
+                self._coupled_solref_targets.append((arr, mask))
+
         # ---- tail-compaction scratch (see _build_active_worlds) ----
         if self._tail_compact:
             # counts[0] = active-set size (worlds attempting a step this
@@ -1004,7 +1051,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # cancels in the comparison). So dist/pos are re-anchored to the CURRENT
         # marching state at every iteration via the conversion kernel's fast path
         # (frame/solref/friction stay from the boundary full pass).
-        self._contact_refresh_enabled = self._use_newton_contacts
+        # NEWTON_ADAPTIVE_CONTACT_REFRESH=0 is a DIAGNOSTIC-ONLY escape hatch for
+        # cost attribution: without the refresh the error estimate is blind to
+        # contact (the energy-pumping defect returns), so it must never run as
+        # an experiment arm.
+        self._contact_refresh_enabled = (
+            self._use_newton_contacts and os.environ.get("NEWTON_ADAPTIVE_CONTACT_REFRESH", "1") != "0"
+        )
         self._refresh_state = self.model.state() if self._contact_refresh_enabled else None
         self._refresh_contacts = None
         self._refresh_contacts_key = None
@@ -1022,13 +1075,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             _is_cuda = False
         self._is_cuda = _is_cuda
         self._graph_enabled = _is_cuda and os.environ.get("NEWTON_MJ_ADAPTIVE_GRAPH", "1") != "0"
-        # Quantile stop: march until at least ``landed_fraction`` of worlds have reached the
-        # boundary, then force-complete the rest. 1.0 == wait for every world (default).
-        # Full-integrity boundary bookkeeping only: every world marches to its
-        # boundary; there is no abandonment or forced completion.
-        self._quantile_stop = QuantileBoundaryStop(
-            world_count, device, landed_fraction=1.0, graph_enabled=self._graph_enabled
-        )
         self._march_graph_cache: dict = {}
         self._march_warmed = False
 
@@ -1438,6 +1484,16 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 device=dev,
             )
 
+        # Attempt-consistent contact coupling: both step-double trials must see
+        # identical contact parameters (see the constructor block).
+        for _arr, _mask in self._coupled_solref_targets:
+            wp.launch(
+                _write_coupled_solref,
+                dim=(n, _arr.shape[1]),
+                inputs=[self._dt, _mask, _arr],
+                device=dev,
+            )
+
         # Re-anchor injected contacts to the current committed state BEFORE the
         # trials: they must not push against boundary-stale penetration (energy
         # injection at footfall — the "flying robots" failure).
@@ -1490,7 +1546,14 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             device=dev,
         )
         wp.launch(_boundary_reset, dim=1, inputs=[self._boundary_flag], device=dev)
-        self._quantile_stop.mark_boundary(self._sim_time, self._next_time, self._boundary_flag, dev)
+        # Full-integrity boundary exit: every world marches to its boundary —
+        # no abandonment, no forced completion.
+        wp.launch(
+            mark_unfinished,
+            dim=n,
+            inputs=[self._sim_time, self._next_time, self._boundary_flag],
+            device=dev,
+        )
         wp.launch(
             _iters_exhausted_stop,
             dim=1,
