@@ -64,30 +64,59 @@ Provenance: journal of wf_55df0381-9e4, agents a07793410/a6e00add.
 - Snapshot commits: newton-adaptive march-counter-log 9c9dc934, sap_warp
   main 79e43bd, IsaacLab develop 82c0679d88.
 
+## Closed: mixed-precision line search (2026-08-15 loop pass 2 — MEASURED
+## DEAD END, reverted; full diff preserved at scratchpad
+## mixed_ls_attempt.patch, logs mx_*/mxg_*)
+
+Attempted per the refinement plan; three decisive findings:
+(1) THE PLAN'S PREMISE WAS STALE: the production preset (approx32) ALREADY
+runs the blocked-Cholesky factorize/solve, free-motion, and weights in
+fp32 (solver_sap.py preset table; contact_linear_solve_precision=fp32) —
+the fp64->fp32 "refinement target" is pre-satisfied WITHOUT refinement and
+converges to 1e-8 (production gates). The remaining fp64 cost is the
+contact_solve_precision region: projection/gamma evals, gradient/Hessian
+assembly, cost reductions, LINE-SEARCH TRIAL EVALS (the 37.6-trips hot
+path — what this attempt made f32).
+(2) SLOP LAW (kept knowledge): the LS accept slop must scale with the
+dtype of the quantities COMPARED, not the mode — an f32-scaled slop on the
+f64 alpha-max derivative accept admits ascent steps and cycles Newton
+(measured: construct-mixed 1170 substeps + 59 contained failures at the
+wrong slop vs 225 + 0, EXACTLY matching fp64, once reverted — dump
+mx_fail_dump.json shows alpha pinned 1.25, ls_iterations 0, cost rising,
+grad frozen 6.47e-3 at caps 30 AND 60).
+(3) THE STRUCTURAL KILL: f32 evaluation of the FULL trial cost is
+information-blind in mid-convergence on PD/multi-contact rigs — the body
+must decide where |true dcost| < eps32*|cost_total|, and rounding a
+dominant total (pd or many-contact) buries the decision; the f64
+alpha-max accept covers only the endgame. Splitting pd/limit slots back
+to f64 (contact-only f32) still failed the full Trossen rig within 25 s
+of marching (contained failures in the determinism worker,
+sap_det_probe_0zugulgg/run1.log). No cost-comparison-based LS can run
+below the eval dtype's cancellation floor: f32 LS trial evaluation on
+this rig class is dead by mechanism, not by tuning. Gradient/Hessian
+assembly must stay f64 (certificate); Hessian-only-f32 adds a kernel
+without removing one. VERDICT: no viable mixed-precision seam remains in
+the LS/eval chain; per-slab fp64 cost is structural under the 1e-8
+contract. Wall relief must come from work-DELETION (shared assembly,
+overlap, narrowing) not precision.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Mixed-precision iterative refinement: fp32 factorization/GEMM + fp64
-   residual + refinement loop — targets fp64-class accuracy at fp32 rate;
-   the fp32 campaign PROVED the split's premise (per-substep 2-3.2x
-   cheaper; only the error/residual path needs fp64). Flagship. Start
-   with the factorize/solve pair (now list-indexed, easy to twin at
-   fp32) + fp64 residual check + one refinement pass; gate class:
-   physics-visible (invariant gates + penetration + before/after).
-2. Shared assembly between full and half1 solves: same anchor state q_t =>
+1. Shared assembly between full and half1 solves: same anchor state q_t =>
    byte-identical contact set/Jacobians/Delassus; only R(dt) and vhat
    differ. Compute once, read twice — bitwise by construction. Est. ~10-15%
    if assembly is ~1/3 of slab.
-3. Stream overlap of full and half1 solves (data-independent; half2 depends
+2. Stream overlap of full and half1 solves (data-independent; half2 depends
    on half1). Hides one solve's latency where kernels underfill the GPU.
    Canonical-per-solve reductions keep det mode compatible.
-4. LS-interior compaction isolated A/B at 1024 production scale: the ONE
+3. LS-interior compaction isolated A/B at 1024 production scale: the ONE
    stack feature never isolated at scale; micro-scene measured it 1.6-1.8%
    SLOWER. If negative at scale too: default it OFF (one env var, free wall).
-5. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
+4. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
    GEMM tiles): structural surgery, authorized; measure kernel-level first.
-6. Remaining un-narrowed env-axis launches outside contact_solve.py
+5. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-7. Housekeeping: run pre-commit across the accumulated commits and
+6. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
