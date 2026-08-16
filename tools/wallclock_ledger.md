@@ -306,27 +306,68 @@ FEASIBILITY TABLE (4000 iterations; plateau x 4000; assumptions stated):
 2000-iter @1024 det-unset ~ 22.6 h. 4096-at-4k remains infeasible on this
 card regardless of the OOM fix; 1024 is the trainable scale point.
 
+POST-GEMM KERNEL RE-PROFILE (2026-08-15, loop pass 10 — measurement only,
+repos untouched; re-ranks the remaining backlog and closes two items):
+(A) Eager flail rig at 512 (pass-6 method rerun on the current stack,
+3086 slabs): the solver slab is now FLAT — no group above ~21%. Solver-
+only shares: LS trial chain 21.3%, Hessian pack+GEMM 20.0% (was 68%;
+pack is now ~65% of the pair), free-motion/assembly 15.4%, projection/
+gamma 11.3%, small assembly/misc ~25% spread thin, Cholesky 2.6%,
+gradient/cost 2.5%, controller/lists 1.9%, error metric 0.3%. Known
+skew: eager-at-512 understated the pair pre-GEMM by ~1.4x vs production,
+so its true plateau share is plausibly ~25-30%. Grouping note: kernel-
+name keyword 'ls_' substring-matches Warp's '__locals__' mangling —
+grouping scripts must use strict patterns (bug caught and fixed this
+pass; pass-6 CSVs were grouped by hand and are unaffected).
+(B) Production anchor at 1024 (3-iteration real training under nsys,
+graph granularity; walls 7.24/7.92/8.67 s match pass-9 within ~2%):
+graph (march) executions 20.01 s = ~96% of collection; eager kernels
+1.43 s of which collision-group 1.21 s (85%). COLLISION REFRESH AT
+PRODUCTION: 4.21 ms/boundary at 1024 (mesh_triangle 2.61 ms + BVH +
+narrow-phase reducers), instance-normalized over 288 boundaries ->
+0.404 s per 96-boundary iteration = 0.99% of the 40.78 s plateau
+iteration (5.5% of an early 7.4 s iteration). VERDICT: collision-refresh
+attack CLOSED — full elimination would buy <1% at the plateau where the
+money is; the old '44% of gentle regimes' was probe-scene arithmetic
+with almost no slabs, not a training cost. ms/slab cross-check: 20.01 s
+/ 3063 telemetry slabs = 6.5 ms/slab early-1024, consistent with
+pass-9's 8.21 ms/substep at the deeper-tail plateau.
+(C) tf32/fp32-Hessian bound (honest ceiling): pair share ~25-30% of
+plateau slab x pair-level speedup bound ~2.6x (pack is memory-bound,
+~2x from f32 operand traffic; truncated GEMM tile ~35% of pair, up to
+~6x compute-side) -> MAX ~15-18% of slab, realistic ~10-14% plateau
+wall. Physics-visible (inexact-Newton direction), full invariant-gate
+burden, Marco-gated. Escalation updated with this number; implement
+only on his word.
+CONCLUSION: no dominant kernel target remains — percent-scale bitwise
+grinding is near exhaustion; remaining levers are Marco-gated (tf32
+~10-14%) or hygiene. Provenance: pass10_prof_eager.nsys-rep +
+pass10_eager_cuda_gpu_kern_sum.csv (grouped totals in this entry),
+pass10_prof_train.{nsys-rep,sqlite} + pass10_train_cuda_gpu_kern_sum.csv,
+pass10_run_{eager,train}.log, pass10_{eager,train}.telemetry.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Collision-refresh cost (~1.05 ms/boundary constant at 512; share at
-   the 1024 engaged plateau is small (~0.25% of a 425 ms boundary) but it
-   DOMINATES gentle regimes (44% of GPU in press+swing) and scales with
-   envs: profile mesh_triangle_contacts_to_reducer at 1024/4096; check
-   whether the BVH rebuild cadence (cuBQL every refresh) can key on
-   motion bounds (bitwise-visible only in contact ORDER? verify) —
-   measure first. Re-ranked #1 by default of the GEMM landing; its
-   engaged-regime ceiling is small — treat as a bounded win.
-2. fp32/tf32 Hessian GEMM (physics-visible, Marco-gated escalation):
-   inexact-Newton direction; gradient + certificate stay fp64; opt-in
-   flag, full invariant gates + iteration-count watch. Re-estimate from
-   a fresh engaged profile first — the fp64 pair halved, so the prize
-   shrank; the remaining GEMM share at the plateau is the number to get.
+1. Housekeeping (promoted — hygiene before any long training): run
+   pre-commit across the accumulated commits and re-gate (hooks were
+   deferred to keep certified bytes exact); fix the TAIL_COMPACT =="1"
+   exact-match footgun; make the march-compact OFF-cell leak guard
+   non-vacuous (review finding).
+2. fp32/tf32 Hessian GEMM — ESCALATION-ONLY (bound measured pass 10:
+   ~10-14% plateau wall realistic, ceiling ~15-18% of slab): inexact-
+   Newton direction; gradient + certificate stay fp64; opt-in flag, full
+   invariant gates + iteration-count watch. Do not implement without
+   Marco's word.
 3. Remaining un-narrowed env-axis launches outside contact_solve.py
-   (full-width consumers listed in agent a06d1420 notes).
-4. Housekeeping: run pre-commit across the accumulated commits and
-   re-gate (hooks were deferred to keep certified bytes exact); fix the
-   TAIL_COMPACT =="1" exact-match footgun; make the march-compact
-   OFF-cell leak guard non-vacuous (review finding).
+   (full-width consumers listed in agent a06d1420 notes) — few-percent
+   class, mechanical, bitwise.
+4. Collision-refresh attack: CLOSED (pass 10: 0.99% of plateau
+   iteration at 1024 — elimination ceiling <1%).
+5. Coordinator note: with the profile flat and the two dead-end
+   closures, the loop's autonomous percent backlog is near exhaustion
+   after item 1; recommend idling or stopping pending Marco's
+   escalation decisions (tf32, ACR enable, tri-pair right-size, phantom
+   body, det-tax choice for long runs).
 
 ## Rails (non-negotiable)
 
@@ -351,6 +392,10 @@ without Marco).
 - Enable NEWTON_SAP_ATTEMPT_CONSISTENT_R for trainings? (measured -11%
   ramp wall, ~0 at plateau, penetration clean)
 - fp32 default flip (opt-in exists; awaiting his read of the A/B)
+- tf32/fp32 Hessian GEMM implementation (pass-10 bound: realistic
+  ~10-14% plateau wall, ceiling ~15-18% of slab; physics-visible
+  inexact-Newton, full invariant-gate burden — worth it only if that
+  margin matters to him)
 - Phantom body fix: follower_left_ee_gripper_link active=false overlay
   (one line in stationary_ai_task.usda, mirrors right twin) — kernel-width
   savings 7/22 coords per world + closes latent-risk surface
