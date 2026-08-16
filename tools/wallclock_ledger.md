@@ -8,11 +8,14 @@ every pass; Marco redirects the loop by editing it.
 ## Objective
 
 Make a 4000-iteration training feasible. Primary metric: projected 4k-iter
-wall from measured plateau curves at 1024 and 4096 envs. Reference points:
-MuJoCo-adaptive plateau ~5.1 s/iter @1024 (4k ≈ 5.7 h). SAP-adaptive
-pre-campaign plateau ~78 s/iter @1024 (4k ≈ 87 h). dt healthy band: Marco
-accepts any demand profile with dt ≥ 1e-4 across worlds (measured equilibrium
-1.2–1.5e-3 — criterion met with margin; demand axis is NOT the fight).
+wall from measured plateau curves at 1024 and 4096 envs. Reference points
+(pass-9 re-measure, 2026-08-15 late): MuJoCo-adaptive plateau ~5.1 s/iter
+@1024 (4k ≈ 5.7 h); SAP-adaptive CURRENT plateau 40.8 s/iter @1024
+det-unset (4k ≈ 45.3 h); historical pre-campaign plateau was ~78 (dated
+2026-08-15 morning, det ON — kept for scale). dt healthy band: Marco
+accepts any demand profile with dt ≥ 1e-4 across worlds (measured
+equilibrium 1.2–1.5e-3 — criterion met with margin; demand axis is NOT
+the fight).
 
 ## Measured decomposition (2026-08-15, wf_55df0381-9e4 compare phase)
 
@@ -260,26 +263,67 @@ vs pass-7 baseline same seed/flags: it0 7.21 vs 14.09 (-48.8%), it3
 p8_g2_flag_equiv.log, p8_g345.log, p8_{det1_on,det1_off,prod_on}.{log,
 telemetry}, p8_speed_chain.log.
 
+## Plateau re-measure + feasibility (2026-08-15 late, loop pass 9 —
+## MEASURED; the table Marco decides from)
+
+Runs (production defaults = det unset unless stated; seed 42; provenance
+scratchpad p9_*.{log,telemetry,gpumem,stamps}):
+(1) 1024x25 det-unset: walls 7.21 -> 41.87; PLATEAU (iters 19-24) mean
+40.78 s/iter forming ~iter 19 (residual slope ~+0.3/iter at window end);
+substeps plateau ~4972/iter; ms/substep FLAT 8.21 (was 15.6 pre-GEMM era,
+47.7 at 4096 pre-GEMM). Sanity: physics_diverged fired 0, containment
+warnings 0, capacity warnings 0. GPU peak 20,398 MiB (see OOM finding).
+(2) 4096x10 det-unset: FAILED — CUDA OOM at construction (single
+2,304,000,000-byte alloc). ROOT-CAUSED BY FLAG BISECT (1-iter arms, all
+20.4 GB: ctrl/gemm0/shas0/march0/cond0 identical; det1 arm = 9,390 MiB
+bit-exact baseline): 2.304e9 = 192e6 authored max_triangle_pairs x 12 B.
+Deterministic mode's CONTACT_ID_BITS=25 clamp silently capped the pool at
+33.5M in EVERY historical run; the det-OFF default flip removed the clamp
+and the full authored 192M pool family now allocates (+11 GB @1024, OOM
+@4096). The task's 192M was authored blind under the always-det era; live
+demand measured 8.2% of 33.5M ~ 2.8M pairs. Fix is a task-config
+right-size (Marco escalation) — NOT a solver defect.
+(3) 4096x10 det=1 (the honest available 4096 point): walls 28.29, 39.02,
+39.96, 43.30, 46.04, 57.22, 71.77, 83.57, 93.10, 107.89 — still rising at
+window end; substeps BIT-IDENTICAL to the pre-GEMM det-ON baseline series
+(1282..5596), so the comparison is pure speedup: vs 55.83..210.84 =
+x1.95 at it9; ms/substep 47.7 -> 19.3-20.6 late. Peak 26,570 MiB.
+(4) 1024x10 det=1: substeps BIT-IDENTICAL to the pre-campaign baseline
+(1045..3782) — CAMPAIGN TOTAL AT MATCHED WORK: x1.67-1.89 per iteration
+(x1.74 late); walls 8.51..34.01 vs 16.12..59.01. Fresh det tax on the new
+stack: ms/substep 8.9-9.0 (det=1) vs 8.21 (det-unset) ~ +8.5%.
+
+FEASIBILITY TABLE (4000 iterations; plateau x 4000; assumptions stated):
+- MuJoCo-adaptive @1024: 5.1 s/iter -> 5.7 h (ledger provenance).
+- SAP pre-campaign @1024 det-ON: 78 -> 86.7 h (historical).
+- SAP NOW @1024 det-unset: 40.78 measured plateau -> 45.3 h.
+- SAP NOW @1024 det=1: ~44.4 est (40.78 x 1.088 tax) -> ~49 h.
+- SAP NOW @4096 det=1: plateau PROJECTED ~174 s/iter (substep saturation
+  multiplier 1.554 from the fresh 1024 curve applied to it9 subs 5596,
+  x ~20 ms/sub) -> ~193 h. Window ends still rising; projection.
+- SAP NOW @4096 det-unset: blocked by the OOM until the tri-pair cap is
+  right-sized; then est ~159 s/iter (174 x 0.915) -> ~177 h.
+2000-iter @1024 det-unset ~ 22.6 h. 4096-at-4k remains infeasible on this
+card regardless of the OOM fix; 1024 is the trainable scale point.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Plateau re-measure on the post-GEMM stack (1024x25 + 4096x10, det
-   unset production config): the 4k feasibility table Marco decides
-   from is stale — pass-8 cut engaged-iteration wall ~40%; the ~78
-   s/iter plateau and ~250-290 s/iter 4096 projection both need fresh
-   numbers. Pure measurement, one pass.
-2. Collision-refresh cost (~1.05 ms/boundary constant, dominates gentle
-   regimes and is a LARGER share now that the GEMM shrank): profile
-   mesh_triangle_contacts_to_reducer at 1024/4096; check whether the BVH
-   rebuild cadence (cuBQL every refresh) can key on motion bounds
-   (bitwise-visible only in contact ORDER? verify) — measure first.
-3. fp32/tf32 Hessian GEMM (physics-visible, Marco-gated escalation):
+1. Collision-refresh cost (~1.05 ms/boundary constant at 512; share at
+   the 1024 engaged plateau is small (~0.25% of a 425 ms boundary) but it
+   DOMINATES gentle regimes (44% of GPU in press+swing) and scales with
+   envs: profile mesh_triangle_contacts_to_reducer at 1024/4096; check
+   whether the BVH rebuild cadence (cuBQL every refresh) can key on
+   motion bounds (bitwise-visible only in contact ORDER? verify) —
+   measure first. Re-ranked #1 by default of the GEMM landing; its
+   engaged-regime ceiling is small — treat as a bounded win.
+2. fp32/tf32 Hessian GEMM (physics-visible, Marco-gated escalation):
    inexact-Newton direction; gradient + certificate stay fp64; opt-in
-   flag, full invariant gates + iteration-count watch. Smaller prize now
-   that the fp64 pair halved — re-estimate from a fresh profile before
-   implementing.
-4. Remaining un-narrowed env-axis launches outside contact_solve.py
+   flag, full invariant gates + iteration-count watch. Re-estimate from
+   a fresh engaged profile first — the fp64 pair halved, so the prize
+   shrank; the remaining GEMM share at the plateau is the number to get.
+3. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-5. Housekeeping: run pre-commit across the accumulated commits and
+4. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
@@ -298,6 +342,12 @@ without Marco).
 
 ## Escalations to Marco (decisions only he makes)
 
+- TRIANGLE-PAIR CAP RIGHT-SIZE (new, unblocks 4096 det-unset + frees
+  ~11 GB @1024): the task cfg authors max_triangle_pairs=192M, sized
+  blind in the always-det era when the CONTACT_ID_BITS clamp silently
+  capped it at 33.5M; live demand ~2.8M. Authoring ~8-16M (3-6x margin)
+  restores the historical footprint under det-off and un-OOMs 4096.
+  One task-config line; task changes are Marco's.
 - Enable NEWTON_SAP_ATTEMPT_CONSISTENT_R for trainings? (measured -11%
   ramp wall, ~0 at plateau, penetration clean)
 - fp32 default flip (opt-in exists; awaiting his read of the A/B)
