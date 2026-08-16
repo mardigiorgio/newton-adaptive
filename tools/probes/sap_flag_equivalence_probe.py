@@ -267,6 +267,7 @@ def _cfg(
     containment: str = "0",
     march: str = "0",
     shared: str = "0",
+    gemm: str = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -286,6 +287,9 @@ def _cfg(
         # Default-ON in the solver; every cell pins it so half-1 assembly
         # reuse is only ever the explicitly varied factor.
         "NEWTON_SAP_SHARED_ASSEMBLY": shared,
+        # Default-ON in the solver; every cell pins it so the live-k bounded
+        # contact-Hessian GEMM pair is only ever the explicitly varied factor.
+        "NEWTON_SAP_GEMM_RESHAPE": gemm,
         # Pinned UNIFORMLY (never the varied factor): the deterministic and
         # legacy accumulation orders are different fp orders by design, so no
         # bitwise contract exists across them. All cells run the new
@@ -401,6 +405,26 @@ CONFIGS = [
         march="1",
         shared="1",
     ),
+    # Live-k bounded contact-Hessian GEMM pair: truncation must be
+    # bitwise-invisible against the full-padded walk in both cadences and
+    # under the full shipping tier (the bounded kernels record a different
+    # launch stream, so the graph tiers must key and replay it correctly).
+    _cfg("gemm-reshape", "0", None, False, gemm="1"),
+    _cfg("boundary-gemm-reshape", "0", None, False, compact="1", refresh="1", gemm="1"),
+    _cfg(
+        "gemm-full-stack",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        conditional="1",
+        march="1",
+        shared="1",
+        gemm="1",
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -417,6 +441,8 @@ BOUNDARY_FAMILY = (
     "boundary-conditional",
     "boundary-shared",
     "shared-full-stack",
+    "boundary-gemm-reshape",
+    "gemm-full-stack",
     "boundary-containment",
 )
 
@@ -523,6 +549,10 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     shared_requested = env.get("NEWTON_SAP_SHARED_ASSEMBLY") == "1"
     assert solver._shared_assembly == shared_requested, (
         f"[{name}] shared-assembly switch did not reach construction"
+    )
+    gemm_requested = env.get("NEWTON_SAP_GEMM_RESHAPE") == "1"
+    assert solver._sap.contact_solve._gemm_reshape == gemm_requested, (
+        f"[{name}] gemm-reshape switch did not reach construction"
     )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
@@ -702,6 +732,24 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         assert sa_execs == 0, (
             f"[{name}] shared-assembly counter advanced with the switch off -- "
             "the reuse path leaked into an OFF cell."
+        )
+
+    # GEMM live-k truncation engagement: the pack increments once per skipped
+    # k-tile row-block, so a nonzero total proves the bounded pair actually
+    # ran with live truncation (a zero total in an ON cell means every env
+    # filled its full padded k range or the bounded path never launched --
+    # vacuous either way); any count in an OFF cell means the bounded
+    # kernels leaked into the legacy stream. Host read is post-march only.
+    gemm_skips = solver._sap.contact_solve.gemm_reshape_skips()
+    if gemm_requested:
+        assert gemm_skips > 0, (
+            f"[{name}] gemm-reshape truncation never skipped a k-tile "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert gemm_skips == 0, (
+            f"[{name}] gemm-reshape skip counter advanced with the switch off "
+            "-- the bounded path leaked into an OFF cell."
         )
 
     # Host-side pipeline-invocation count. Exact for the boundary cadence in

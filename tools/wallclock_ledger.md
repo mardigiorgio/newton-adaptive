@@ -238,24 +238,48 @@ pass7_train.{nsys-rep,sqlite} (split), pass7_shim/sitecustomize.py
 (method; per-PID output — a late-exiting helper process otherwise
 clobbers the sim process's JSON, root-caused this pass).
 
+GEMM LIVE-K TRUNCATION LANDED (2026-08-15, loop pass 8 — the campaign's
+largest single win): the contact-Hessian pack wrote full padded
+(384x24)x2 fp64 operands and the GEMM walked all 12 k-tiles regardless
+of live contacts (mean live tiles 4.79 of 12 on the engaged
+distribution). NEWTON_SAP_GEMM_RESHAPE (default ON, "0" = legacy
+kernels byte-untouched): bounded pack skips k-tiles past the env's live
+rows, bounded GEMM stops its ascending k-walk there — truncated tiles
+hold only pack-written zeros, surviving tiles accumulate in the same
+order, so ON/OFF are identical bytes (microbench bitwise-equal AND the
+det=1 1024x8 training pair's telemetry files byte-identical). Gates
+6/6: construct (225 fingerprint), flag-equivalence all arms + 3 new
+(gemm-reshape / boundary-gemm-reshape / gemm-full-stack, engagement
+skip-counter + OFF-leak asserts), march-equivalence ([6,25,20,24,19]
+exact), determinism, containment, speed. MEASURED: microbench pair
+x1.96 (16x16 tile variant x1.84 — rejected, inferior + reallocates);
+det=1 A/B whole-run x1.611, late-window x1.547; production (det unset)
+vs pass-7 baseline same seed/flags: it0 7.21 vs 14.09 (-48.8%), it3
+10.22 vs 18.37 (-44.4%), it5 14.18 vs 25.46 (-44.3%), it7 22.54 vs
+37.53 (-39.9%). Provenance: pass8_gemm_microbench.py,
+p8_g2_flag_equiv.log, p8_g345.log, p8_{det1_on,det1_off,prod_on}.{log,
+telemetry}, p8_speed_chain.log.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Contact-Hessian GEMM attack (68% of engaged GPU time pass 6; pass 7
-   confirms GPU-work-dominated wall — this is now unambiguously the top
-   lever): (a) bitwise-safe first — reshape/batch the tile GEMM + fuse
-   its input pack (same fp64 math, better shape/occupancy; bitwise
-   contract needs canonical accumulation order preserved per tile);
-   (b) physics-visible second — fp32/tf32 Hessian GEMM (inexact-Newton
-   direction; gradient + certificate stay fp64), opt-in flag, full
-   invariant gates + iteration-count watch, escalate to Marco with
-   numbers.
+1. Plateau re-measure on the post-GEMM stack (1024x25 + 4096x10, det
+   unset production config): the 4k feasibility table Marco decides
+   from is stale — pass-8 cut engaged-iteration wall ~40%; the ~78
+   s/iter plateau and ~250-290 s/iter 4096 projection both need fresh
+   numbers. Pure measurement, one pass.
 2. Collision-refresh cost (~1.05 ms/boundary constant, dominates gentle
-   regimes): profile mesh_triangle_contacts_to_reducer at 1024/4096; check
-   whether the BVH rebuild cadence (cuBQL every refresh) can key on motion
-   bounds (bitwise-visible only in contact ORDER? verify) — measure first.
-3. Remaining un-narrowed env-axis launches outside contact_solve.py
+   regimes and is a LARGER share now that the GEMM shrank): profile
+   mesh_triangle_contacts_to_reducer at 1024/4096; check whether the BVH
+   rebuild cadence (cuBQL every refresh) can key on motion bounds
+   (bitwise-visible only in contact ORDER? verify) — measure first.
+3. fp32/tf32 Hessian GEMM (physics-visible, Marco-gated escalation):
+   inexact-Newton direction; gradient + certificate stay fp64; opt-in
+   flag, full invariant gates + iteration-count watch. Smaller prize now
+   that the fp64 pair halved — re-estimate from a fresh profile before
+   implementing.
+4. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-4. Housekeeping: run pre-commit across the accumulated commits and
+5. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
