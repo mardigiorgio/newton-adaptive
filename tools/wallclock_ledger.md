@@ -1145,6 +1145,171 @@ p18_flail_cuda_gpu_kern_sum.csv, p18_grouped.txt,
 p18_group_kernels.py, p18_nsys_run.log (PROFILE_WINDOW wall_s=13.304
 slabs=766).
 
+## Plateau re-measure on the post-C stack (2026-08-16, loop pass 19 —
+## MEASUREMENT ONLY, zero solver edits; supersedes the pass-18 headline)
+
+Rig: exact pass-18 replica (p19_run.sh = p18_run.sh byte-for-byte except
+the file prefix; diff-under-rename verified): 1024 envs x 25 iters, seed
+42, production flags (env clean of NEWTON_SAP_* overrides, det unset),
+stack = certified HEADs newton-adaptive e57d36f1 / sap_warp 3bff5c1 /
+IsaacLab b98f247a13 (the pass-18 candidate-C landing).
+- PLATEAU (iters 19-24) mean 14.21 s/iter vs pass-18 pre-C 14.93 = -4.8%
+  (vs pass-16 18.98 = -25.1%, pass-9 40.78 = -65.2%). Walls it0 4.25 ->
+  it24 15.16; window 12.59..15.24. The pass-18 A/B's late ratio 0.907
+  realized as 0.952 at the plateau — the same A/B-overweights-the-win
+  pattern as pass-17 (0.734 -> 0.787); the tail-occupancy entry below
+  now explains the mechanism: the plateau mix is ~88% low-occupancy
+  straggler slabs where the saturated-window fusion wins are smaller.
+- Substeps/iter (window) 5170 vs 5146 = +0.5% — demand flat; the
+  matched-trajectory certificates (det=1 954==954, phi0 identical)
+  stand.
+- ms/substep (window) 2.75 vs 2.90 = -5.3% (ratio 0.947; vs pass-9
+  8.20 = 0.335).
+- Whole-run: 250.2 s wall sum, cumulative substeps 89,694 vs p18
+  90,480 (-0.9%; det-unset trajectories diverge — cite the window).
+- Sanity: physics_diverged 0, containment/capacity/overflow warnings 0,
+  late-window inner-dt max-band 8.95e-4..1.56e-3 (same class as p18's
+  5.4e-4..1.28e-3, healthy), GPU peak 20,428 MiB (unchanged).
+- Campaign total at the plateau: 78 (pre-campaign) -> 14.21 = 5.5x;
+  price 8.20 (pass 9) -> 2.75 ms/substep in ten passes.
+- GRANT ARITHMETIC REFRESH: 10 s/iter at plateau demand 5170 needs
+  1.93 ms/substep = a further 0.70x. MJC-adaptive reference 1.5 ->
+  residual 1.83x. Pass-13 estimator arithmetic (marginal 2.3x) prices a
+  single-solve SAP at ~1.20 ms/substep — still below the MJC reference.
+  With the prep/lists lever MEASURED DEAD (entry below), the remaining
+  priced percent levers (fused_update dof-phase shave, few-% class)
+  project ~2.6-2.7 ms/substep ~ 13.4-14.0 s/iter. The last ~1.4x is
+  the estimator rail (escalated) or cross-boundary overlap — whose
+  measured ceiling bracket now STRADDLES the 10 s requirement (entry
+  below).
+Provenance: p19_run.sh, p19_1024x25.{log,telemetry,gpumem,stamps},
+p14_plateau_analyze.py (same arithmetic all runs — no method skew).
+
+## Closed: prep/free-motion + env-list launch consolidation (2026-08-16,
+## loop pass 19 — MEASURED SPEED-NEUTRAL AT PRODUCTION, reverted; full
+## diffs preserved at scratchpad p19_fused_prep_lists_{sapwarp,newton}
+## .patch; restoration proof p19_g1r_restore.log)
+
+Implemented the pass-18 recommendation (2) as two default-ON BITWISE
+flags, fully gated, then reverted on the decisive A/B per the <2% rule
+(pass-12/15c precedent):
+- NEWTON_SAP_FUSED_PREP: ONE elementwise (env, dof) launch replaced the
+  per-solve prepare chain (velocity-input copy, A-diag extraction,
+  attempt-consistent a_inv scales, PD/limit builders, participating-dof
+  clear + model mark; the contact mark kept its contact-parallel
+  launch) — cross-stage values moved through registers with every
+  expression's operand bytes preserved (reader == writer per element
+  throughout the chain, no reductions): bitwise class, ~7 launches per
+  solve deleted.
+- NEWTON_SAP_FUSED_LISTS: every env-list rebuild (reset + atomic build
+  [+ accumulate] [+ capacity guard]) became ONE tiled
+  tile_scan_exclusive kernel emitting the list in canonical ascending
+  order (a legal refinement — consumers are order-insensitive by the
+  list contract; count/poison/total values exact; dev property test
+  p19_tile_rebuild_dev.py green over n_envs 1..4096). ~57 launches/slab
+  deleted; ~78 of the map's ~266 tiny launches/slab total.
+GATES 8/8 ON THE IMPLEMENTED BYTES (chain p19_progress.txt, all exit
+0): construct 225 (p19_g1_construct.log); flag-equivalence 41 arms + 4
+new bitwise arms (prep-fused, boundary-prep-fused, lists-fused,
+preplists-full-stack) bitwise-identical to their family references, 30
+tier-1 guards ok, engagement + OFF-leak counters asserted both ways,
+march-compact expected narrow-site set made fused-prep-aware
+(p19_g2_flag_equiv.log); march-equivalence [6,25,20,24,19] exact
+(p19_g3); determinism 954==954 (p19_g4); containment 35 events
+(p19_g5); err_tol 0/2880, 0 floor, dt_run_min 2.13e-3 (p19_g6); rest 0
+early terminations (p19_g7); phi0 OFF-vs-ON byte-identical JSON
+(deepest -5.584e-5, median P5 -2.756e-5; p19_g8); dev-rig committed
+march BITWISE ON == OFF (p19_prep_smoke.py, p19_smoke_{on,off}.npy).
+DECISIVE A/B (1024x8 seed 42 det unset; p19_ab_{on,off}.*,
+p19_ab_compare.py): ms/substep ON/OFF 1.010 whole-run / 1.004 late-3 —
+SPEED-NEUTRAL (per-iteration ratios straddle 1.0; physics_diverged 0,
+no warnings, GPU peak 20,428 MiB both arms). REVERTED; both repos
+clean at e57d36f1 / 3bff5c1 (restore construct PASS, 225).
+
+DURABLE LAW (the pass's real finding): under the shipping whole-march
+conditional graph, deleting LAUNCH COUNT buys nothing — graph replay
+amortizes launch fixed cost, so the pass-18 map's "launch-fixed-cost
+dominated, ~4-5 us each" pricing of the prep/free-motion/lists groups
+is REFUTED at production. A fusion pays only when it deletes GPU WORK:
+candidate C removed ~0.37 GPU-ms/slab of chain and priced -9.3% at the
+A/B; prep+lists' fusable GPU time is ~0.1-0.15 ms/slab — the sub-1%
+the A/B showed. Read the ranked map by deletable GPU-time, never by
+launches/slab; the "tiny kernels 65.3% of GPU time" statistic stays
+live only as a GPU-time sum. The remaining honest items in these
+groups are the two real kernels (eval_rigid_id 0.218,
+scatter_sap_contacts 0.159 ms/slab at 2/slab — per-solve real work,
+no identified redundancy).
+
+## Tail occupancy + cross-boundary overlap pricing (2026-08-16, loop
+## pass 19 — MEASUREMENT ONLY; march-audit import hook, zero repo
+## edits; prices backlog 2(d) honestly)
+
+Rig: the p19 rig with the march-audit sitecustomize hook (pure
+post-march observer; audited-run walls excluded from plateau claims —
+host reads cost ~4-5%/iter). Two full 25-iter runs: p19_occ_1024x25
+(histograms) and p19_pers_1024x25 (+ per-boundary top-16 straggler
+identities). Late window = boundaries 1824-2400 (iters 19-24), ~9,915
+march iterations, rejects 0 (accepts-based active counts exact).
+- ACTIVE-WORLD DISTRIBUTION per march iteration: mean 12.8% of 1024,
+  p10 0.0%, p50 0.6% (~6 worlds), p90 98.8% — bimodal: ~2 near-full
+  iterations per boundary (the 2-accept bulk), then a straggler tail.
+  88.4% of iterations run below 25% active (all of those below 6.25%
+  = the march-compact narrow predicate; narrow share 82.5%).
+  REPLICATED across both runs (mean 0.1282 / 0.1268, identical p90 and
+  <25% share).
+- GPU-TIME AT LOW OCCUPANCY: the <25%-active iterations carry between
+  33% (cost proportional to active fraction, floored at the narrow
+  budget) and 88% (uniform cost) of late-window GPU time — the models
+  bracket the truth (list-indexed kernels are live-bounded;
+  full-width-by-design kernels are not). Work-weighted mean active
+  fraction 0.90: the WORK is high-occupancy, the SLABS are not. NOTE:
+  every profile map so far (p14/p15b/p18) scoped the SATURATED
+  512-eager flail window — the regime that is 88% of plateau slabs has
+  never been profiled.
+- OVERLAP CEILING (backlog 2d): one policy action spans decimation=4
+  boundaries (120 Hz outer step), so a world may legally run ahead
+  across boundaries only inside its 4-boundary action window.
+  Slab-count ceiling from per-world window sums: identity-blind
+  full-rotation bound 70.2%; identity-aware bound (top-16 accepts
+  tails) 45.8% of late-window slabs mergeable. Straggler persistence:
+  top-set overlap 0.374 at lag 1, 0.188 lag 2, 0.074 lag 4, 0.020 lag
+  8 — stragglers ROTATE within an action window (transient contact
+  events, not a fixed slow world), so the persistent-straggler
+  objection is refuted by measurement. Wall-time value of the
+  mergeable slabs: 16.7% (proportional cost) to 45.8% (uniform) of the
+  late window — i.e. plateau ~14.21 -> ~11.8..7.7 s/iter at ceiling.
+  THE BRACKET STRADDLES THE 10 s GOAL.
+- VERDICT: overlap survives as the ONLY factor-scale lever inside the
+  grant rails — RECOMMEND a pass-20 design measurement, not a build.
+  Named blockers to resolve first: (a) the plateau-window profile that
+  converts the [17%, 46%] bracket into a number (what does a 6-active
+  slab actually cost?); (b) collision cadence — the boundary collide
+  is batch-wide at one boundary state, so worlds at different
+  boundary indices need per-group collision (structural); (c) the
+  IsaacLab per-physics-step host pipeline between boundaries (actuator
+  /event updates) must be shown state-decoupled within the action
+  window; (d) prefer a per-world boundary-index SINGLE march (no
+  second workspace — sidesteps the pass-4 memory concern) over
+  two-instance overlap.
+Provenance: p19_occ_run.sh, p19_occ_1024x25.{log,telemetry,audit,
+stamps}, p19_pers_run.sh + p19_audit_hook/ (top-16 extension),
+p19_pers_1024x25.{log,telemetry,audit,stamps}, p19_occ_analyze.py,
+p19_pers_analyze.py; march_audit_hook/ (the straggler-era hook,
+unmodified).
+
+PASS-20 RECOMMENDATION: (1) PROFILE THE PLATEAU WINDOW — nsys scoped
+to late iterations of the 1024 rig (not the 512-eager flail window),
+slabs grouped by active-count regime: prices the straggler slab's
+fixed cost, converts the overlap bracket into a number, and re-ranks
+the percent levers for the regime that is 88% of plateau slabs. (2) On
+that evidence, either open the overlap design (blockers (b)-(d) above)
+or kill it with a number. (3) fused_update dof-phase occupancy shave
+(~few-% class) only if the plateau map confirms fused_update is
+material in the straggler mix. (4) The estimator escalation to Marco
+stands and is sharpened: percent levers project ~13.4-14.0 s/iter;
+the two routes to 10 s are overlap (bracket straddles it) and the
+estimator rail (~1.20 ms/substep single-solve arithmetic).
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -1174,12 +1339,19 @@ slabs=766).
    recommendation C (fused update eval) LANDED default-ON
    (-9.3%/-9.5% per-substep, entry above, projected ~13.5 s/iter);
    fresh post-C map + pass-19 recommendation in the pass-18
-   discovery entry. Next in line: post-C plateau re-measure,
-   prep/free-motion consolidation, tail-occupancy measurement;
+   discovery entry. Pass-19 DONE: post-C plateau 14.21 s/iter / 2.75
+   ms/substep measured; prep/free-motion + env-list consolidation
+   MEASURED SPEED-NEUTRAL and reverted (launch-count law — closure
+   entry above); plateau-tail occupancy measured and the overlap
+   ceiling priced (entry above). Next in line: the pass-20 plateau-
+   window profile (the unprofiled 88%-of-slabs regime), then the
+   overlap design-or-kill decision;
    (c) per-boundary D2H readback chain: DEPRIORITIZED (pass-7
    overlap evidence, pass-18 note); (d) cross-boundary overlap of
-   independent worlds' marches (capture mechanics proven pass 4;
-   occupancy measurement first, no code).
+   independent worlds' marches: PRICED pass 19 (ceiling bracket
+   [17%, 46%] of the late window inside the 4-boundary action
+   window, straggler rotation measured; blockers named in the
+   pass-19 occupancy entry) — design measurement next, no build.
 3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
