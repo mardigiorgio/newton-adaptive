@@ -240,6 +240,61 @@ def _sap_range_kernel(
     sap_range_out[idx] = limit - local_shape_id - 1
 
 
+# Chunked inclusive integer scan (three fixed-dim launches, no temp
+# allocation). Replaces wp.utils.array_scan for the sweep-range cumulative
+# sum: the CUB-backed scan allocates temp device memory on every call, which
+# a conditional CUDA-graph body (callers capturing launch() inside
+# wp.capture_if/wp.capture_while) cannot contain. Integer arithmetic, so the
+# output is exactly the scan it replaces.
+_SCAN_CHUNK = 256
+
+
+@wp.kernel(enable_backward=False)
+def _scan_chunk_reduce(
+    vals: wp.array[int],
+    n: int,
+    chunk: int,
+    chunk_sums: wp.array[int],
+):
+    b = wp.tid()
+    lo = b * chunk
+    hi = wp.min(lo + chunk, n)
+    s = int(0)
+    for i in range(lo, hi):
+        s = s + vals[i]
+    chunk_sums[b] = s
+
+
+@wp.kernel(enable_backward=False)
+def _scan_chunk_offsets(
+    chunk_sums: wp.array[int],
+    n_chunks: int,
+    chunk_offsets: wp.array[int],
+):
+    """Serial exclusive scan over the (small) per-chunk sums (dim=1)."""
+    acc = int(0)
+    for b in range(n_chunks):
+        chunk_offsets[b] = acc
+        acc = acc + chunk_sums[b]
+
+
+@wp.kernel(enable_backward=False)
+def _scan_chunk_emit_inclusive(
+    vals: wp.array[int],
+    n: int,
+    chunk: int,
+    chunk_offsets: wp.array[int],
+    out: wp.array[int],
+):
+    b = wp.tid()
+    lo = b * chunk
+    hi = wp.min(lo + chunk, n)
+    acc = chunk_offsets[b]
+    for i in range(lo, hi):
+        acc = acc + vals[i]
+        out[i] = acc
+
+
 @wp.func
 def _process_single_sap_pair(
     pair: wp.vec2i,
@@ -445,6 +500,13 @@ class BroadPhaseSAP:
         self.sweep_thread_count_multiplier = sweep_thread_count_multiplier
         self.sort_type = _normalize_sort_mode(sort_type)
         self.tile_block_dim_override = tile_block_dim  # Store user override if provided
+        # Cached zero-size placeholders for optional launch() inputs (lazily
+        # allocated on first use so launch() records no allocation nodes --
+        # required when captured inside a conditional CUDA-graph body).
+        self._empty_gap = None
+        self._empty_body = None
+        self._empty_flags = None
+        self._empty_filter_pairs = None
 
         # Convert to numpy if it's a warp array
         if isinstance(shape_world, wp.array):
@@ -512,6 +574,10 @@ class BroadPhaseSAP:
         self.sap_sort_index = wp.zeros(2 * total_elements, dtype=wp.int32, device=device)
         self.sap_range = wp.zeros(total_elements, dtype=wp.int32, device=device)
         self.sap_cumulative_sum = wp.zeros(total_elements, dtype=wp.int32, device=device)
+        # Chunked-scan scratch (see _scan_chunk_* kernels above).
+        self._scan_n_chunks = (total_elements + _SCAN_CHUNK - 1) // _SCAN_CHUNK
+        self._scan_chunk_sums = wp.zeros(max(self._scan_n_chunks, 1), dtype=wp.int32, device=device)
+        self._scan_chunk_offsets = wp.zeros(max(self._scan_n_chunks, 1), dtype=wp.int32, device=device)
 
         # Segment indices for segmented sort (needed for graph capture)
         # [0, max_shapes_per_world, 2*max_shapes_per_world, ..., world_count*max_shapes_per_world]
@@ -590,17 +656,29 @@ class BroadPhaseSAP:
         if device is None:
             device = shape_lower.device
 
-        # If no gaps provided, pass empty array (kernel will use 0.0 gaps)
+        # If no gaps provided, pass empty array (kernel will use 0.0 gaps).
+        # The empty placeholders are cached per instance: a fresh zero-size
+        # allocation per launch would record an allocation node, which a
+        # conditional CUDA-graph body (callers capturing this launch inside
+        # wp.capture_if/wp.capture_while) cannot contain.
         if shape_gap is None:
-            shape_gap = wp.empty(0, dtype=wp.float32, device=device)
+            if self._empty_gap is None:
+                self._empty_gap = wp.empty(0, dtype=wp.float32, device=device)
+            shape_gap = self._empty_gap
         if shape_body is None:
-            shape_body = wp.empty(0, dtype=wp.int32, device=device)
+            if self._empty_body is None:
+                self._empty_body = wp.empty(0, dtype=wp.int32, device=device)
+            shape_body = self._empty_body
         if body_flags is None:
-            body_flags = wp.empty(0, dtype=wp.int32, device=device)
+            if self._empty_flags is None:
+                self._empty_flags = wp.empty(0, dtype=wp.int32, device=device)
+            body_flags = self._empty_flags
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
-            filter_pairs_arr = wp.empty(0, dtype=wp.vec2i, device=device)
+            if self._empty_filter_pairs is None:
+                self._empty_filter_pairs = wp.empty(0, dtype=wp.vec2i, device=device)
+            filter_pairs_arr = self._empty_filter_pairs
             n_filter = 0
         else:
             filter_pairs_arr = filter_pairs
@@ -668,8 +746,32 @@ class BroadPhaseSAP:
             record_tape=False,
         )
 
-        # Compute cumulative sum of ranges
-        wp.utils.array_scan(self.sap_range, self.sap_cumulative_sum, True)
+        # Compute cumulative sum of ranges. Chunked integer scan instead of
+        # wp.utils.array_scan: exactly the same output, but free of the CUB
+        # scan's per-call temp allocation so the launch stream can be
+        # captured inside a conditional CUDA-graph body.
+        total_elements = int(self.world_count * self.max_shapes_per_world)
+        wp.launch(
+            kernel=_scan_chunk_reduce,
+            dim=self._scan_n_chunks,
+            inputs=[self.sap_range, total_elements, _SCAN_CHUNK, self._scan_chunk_sums],
+            device=device,
+            record_tape=False,
+        )
+        wp.launch(
+            kernel=_scan_chunk_offsets,
+            dim=1,
+            inputs=[self._scan_chunk_sums, self._scan_n_chunks, self._scan_chunk_offsets],
+            device=device,
+            record_tape=False,
+        )
+        wp.launch(
+            kernel=_scan_chunk_emit_inclusive,
+            dim=self._scan_n_chunks,
+            inputs=[self.sap_range, total_elements, _SCAN_CHUNK, self._scan_chunk_offsets, self.sap_cumulative_sum],
+            device=device,
+            record_tape=False,
+        )
 
         # Estimate number of sweep threads
         total_elements = self.world_count * self.max_shapes_per_world

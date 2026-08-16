@@ -15,6 +15,7 @@ from ..geometry.sdf_texture import (
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
+from .capture_safe_scan import capture_safe_scan_int32
 from .contact_reduction_global import (
     GlobalContactReducerData,
     export_and_reduce_contact_centered_two_spatial_depths,
@@ -907,8 +908,10 @@ def compute_mesh_mesh_block_offsets_scan(
         device=device,
         record_tape=record_tape,
     )
-    # Step 2: inclusive scan to get total in last element
-    wp.utils.array_scan(block_counts, weight_prefix_sums, inclusive=True)
+    # Step 2: inclusive scan to get total in last element (capture-safe:
+    # wp.utils.array_scan allocates temp memory per call, which a
+    # conditional CUDA-graph body cannot contain)
+    capture_safe_scan_int32(block_counts, weight_prefix_sums, inclusive=True, device=device, record_tape=record_tape)
     # Step 3: compute per-pair block counts using adaptive threshold
     wp.launch(
         kernel=compute_block_counts_from_weights,
@@ -924,8 +927,9 @@ def compute_mesh_mesh_block_offsets_scan(
         device=device,
         record_tape=record_tape,
     )
-    # Step 4: exclusive scan of block counts → block_offsets
-    wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
+    # Step 4: exclusive scan of block counts → block_offsets (in-place,
+    # capture-safe)
+    capture_safe_scan_int32(block_offsets, block_offsets, inclusive=False, device=device, record_tape=record_tape)
 
 
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(

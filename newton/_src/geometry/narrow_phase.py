@@ -62,6 +62,7 @@ from ..utils.heightfield import (
     get_triangle_shape_from_heightfield,
     heightfield_vs_convex_midphase,
 )
+from .capture_safe_scan import capture_safe_scan_int32
 
 
 @wp.struct
@@ -1071,7 +1072,9 @@ def compute_mesh_plane_block_offsets_scan(
         record_tape=record_tape,
     )
     # Step 2: inclusive scan to get total
-    wp.utils.array_scan(block_counts, weight_prefix_sums, inclusive=True)
+    # Capture-safe: wp.utils.array_scan allocates temp memory per call,
+    # which a conditional CUDA-graph body cannot contain.
+    capture_safe_scan_int32(block_counts, weight_prefix_sums, inclusive=True, device=device, record_tape=record_tape)
     # Step 3: compute per-pair block counts using adaptive threshold
     wp.launch(
         kernel=compute_block_counts_from_weights,
@@ -1088,7 +1091,7 @@ def compute_mesh_plane_block_offsets_scan(
         record_tape=record_tape,
     )
     # Step 4: exclusive scan of block counts → block_offsets
-    wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
+    capture_safe_scan_int32(block_offsets, block_offsets, inclusive=False, device=device, record_tape=record_tape)
 
 
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
@@ -2071,8 +2074,13 @@ class NarrowPhase:
             # Launch mesh-mesh contact processing kernel.
             # The kernel uses texture SDF for fast sampling, with BVH fallback via shape_sdf_index,
             # as well as on-the-fly heightfield evaluation via heightfield_data.
+            # The empty placeholder is cached per instance: a fresh zero-size
+            # allocation per launch would record an allocation node, which a
+            # conditional CUDA-graph body cannot contain.
             if texture_sdf_data is None:
-                texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
+                if getattr(self, "_empty_texture_sdf_data", None) is None:
+                    self._empty_texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
+                texture_sdf_data = self._empty_texture_sdf_data
             if mesh_edge_indices is None:
                 mesh_edge_indices = self._empty_edge_indices
             if self.mesh_mesh_contacts_kernel is not None:
