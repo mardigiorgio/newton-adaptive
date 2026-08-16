@@ -16,20 +16,23 @@ excluded: task/scene files (tri-pair cap fixed manager-side instead), tol
 1e-3 and the step-doubling estimator (comparison semantics), optimality
 1e-8, dt floor 1e-12 (rails). Physics-visible solver changes may now land
 DEFAULT ON after full invariant gates (OFF escape hatch retained).
-10 s/iter @1024 = 1.9x below the current 18.98 plateau (pass-16
+10 s/iter @1024 = 1.9x below the last MEASURED plateau 18.98 (pass-16
 re-measure on the fused-LS stack; was 3.5x vs the pass-14 35.35, 4.0x
-vs the pass-9 40.78); the identified pass-17 levers (ladder alpha-max
-fold + pack rewrite + update-eval fusion, ceilings in the pass-16
-entry) project to ~13-15 s/iter — 10 s still needs one further
-factor-scale find beyond them.
+vs the pass-9 40.78). Pass-17 LANDED two of the three identified
+levers (alpha-max fold + per-contact pack, entry below): per-substep
+-26.3% vs that stack at 1024x8 -> projected ~13.9 s/iter (25-iter
+plateau re-measure pending); 10 s still needs the update-eval fusion
+(pass-16 recommendation C) plus one further factor-scale find.
 
 ## Objective
 
 Make a 4000-iteration training feasible. Primary metric: projected 4k-iter
 wall from measured plateau curves at 1024 and 4096 envs. Reference points:
 MuJoCo-adaptive plateau ~5.1 s/iter @1024 (4k ≈ 5.7 h); SAP-adaptive
-CURRENT plateau 18.98 s/iter @1024 det-unset (pass-16 re-measure on the
-fused-LS stack, 4k ≈ 21.1 h); prior points kept for scale: 35.35
+last MEASURED plateau 18.98 s/iter @1024 det-unset (pass-16 re-measure
+on the fused-LS stack, 4k ≈ 21.1 h; the pass-17 landing prices
+-26.3%/substep below that stack at 1024x8 — projected ~13.9 s/iter,
+plateau re-measure pending); prior points kept for scale: 35.35
 (pass 14, ACR-default pre-fused-LS, 2026-08-16), 40.78 (pass 9,
 pre-ACR-default, 2026-08-15 late), ~78 (pre-campaign, det ON,
 2026-08-15 morning). dt healthy band: Marco
@@ -870,6 +873,96 @@ p16_p14_regrouped.txt (same-method p14 re-run), p15b_prof_flail.
 not re-profiled), source anchors sap_warp sim/contact_solve.py at
 f49b20b.
 
+## Landed: alpha-max fold + per-contact pack (2026-08-16, loop pass 17
+## — implements pass-16 recommendations A and B; sap_warp a79539a (A)
+## + 1ff0ea0 (B), newton-adaptive e5154ee0 (A) + 2574c070 (B))
+
+A. NEWTON_SAP_FUSED_ALPHAMAX (default ON, effective only under the
+fused ladder; "0" restores the per-trip alpha-max trial launch chain
+byte-for-byte): rung 0 of the fused ladder kernel evaluates the
+alpha_max trial cost and its ray derivative in-kernel and applies the
+chain's accept rule verbatim — accept iff dl/da < 0 or dl/da <
+(rel_slop/10)*max(1, 0.5(|ell|+|ell0|)), ell_slop write moved
+in-kernel, every compared quantity in the solve dtype (pass-2 slop law
+by construction) — deleting the whole per-Newton-trip trial chain
+(LS-list rebuilds, axpy, trial eval, cost replace, serial derivative,
+accept: the pass-16 mechanism-(1) block, ~11-12 launches/trip) and its
+trial_* array round-trips. The cost advances along the ray as
+vc0 + a*dvc; the derivative is the analytic (dell_a0 + a*d2ell_a)
+- sum gamma(vc).dvc - sum dv_i*(pd_gamma_i + limit_grad_i), via a new
+gamma+cost projection helper sharing the cost variant's arithmetic
+expression-for-expression. Trailing-fp-digit differences from the
+chain -> physics-visible class: flagged, keyed into BOTH graph cache
+keys, own flag-equivalence family (fusedam/-repeat/-graph/
+-conditional, variable UNSET, own oracle), device engagement counter
+with OFF-leak asserts. The rejected-at-cap-1 corner keeps the env
+LS-active, matching the chain's no-ladder-budget state.
+
+B. NEWTON_SAP_PACK_PERCONTACT (default ON, effective only under the
+bounded GEMM pair; "0" restores the per-row bounded pack
+byte-for-byte): (i) the pack's work item becomes one (contact, dof)
+pair that loads the contact's three Jacobian rows and its G block
+ONCE for all three gj rows — register staging rather than the
+recommendation's shared-memory tiles (same read-once outcome, no
+cross-thread sync, no tile-load OOB surface); the per-element gj
+expression is kept verbatim -> identical operand bytes for everything
+the bounded GEMM reads = bitwise class, judged bitwise in three probe
+arms (pack-percontact vs reference, boundary-pack-percontact,
+pack-full-stack) with engagement counter + OFF-leak asserts; the
+bounded pack's skip-counter accounting is preserved exactly (ON/OFF
+totals equal on the dev rig, 7194 == 7194). (ii) J-side hoist: the
+trip-invariant j_flat half moves to ONE launch per solve over the
+world-active list; every trip's pack writes only the G-dependent gj
+half. Precondition MEASURED FIRST per the pass-16 instruction
+(p17_j_invariant_probe.py + p17_j_invariant.log): J, j_flat and the
+live contact count byte-stable across trips within every solve — 101
+trip-pairs over 38 multi-trip solves on a live friction march, zero
+mismatches.
+
+GATES 8/8 ON FINAL BYTES (chain p17_progress.txt, all exit 0):
+(1) construct PASS (p17_g1a_construct.log after A,
+p17_g1b_construct.log on final bytes).
+(2) flag-equivalence PASS all 35 arms, 27 tier-1 guards ok: fusedam
+family (BOTH ladder flags at unset defaults, production stack shape,
+own repeat oracle; graph + conditional replay the folded stream
+bitwise) and the three pack arms bitwise against their family
+references; every engagement/OFF-leak counter assert armed
+(p17_g2_flag_equiv.log).
+(3) march-equivalence [6,25,20,24,19] exact (p17_g3_march_equiv.log).
+(4) determinism certificate PASS, 954 substeps both workers — equal
+to the pass-13/15 stack count (p17_g4_determinism.log).
+(5) containment PASS, 35 contained events (p17_g5_containment.log).
+(6) err_tol 0/2880 violations, 0 floor visits, dt_run_min 1.59e-3, 0
+samples < 1e-4 (p17_g6_err_tol.json).
+(7) rest smoke 0 early terminations (p17_g7_rest.json).
+(8) penetration phi0 alphamax-OFF vs default-ON IDENTICAL TO THE LAST
+DIGIT in every phase (deepest -5.584e-5, median P5 -2.756e-5;
+p17_g8_phi0_{off,on}.json).
+
+DECISIVE A/B (1024x8, seed 42, production det-unset, final bytes;
+both-ON default vs both pinned OFF; p17_ab_{on,off}.{log,telemetry,
+stamps,gpumem}, p17_ab_compare.py): ms/substep (collection wall) ON
+3.119 vs OFF 4.229 whole-run (0.737, -26.3%), late-3-window 2.849 vs
+3.882 (0.734, -26.6%) — the >5% default-ON bar cleared by 5x, and
+beyond the pass-16 A+B ceiling (~20-25% of flail-slab GPU): the fold
+also deletes launch/stream overhead and LS-trip list rebuilds the
+GPU-time ceiling did not price. Raw walls ON 44.38 vs OFF 59.98 s
+coll whole-run (0.740), late 22.44 vs 31.14 (0.721). Cumulative
+substeps ON 14,230 vs OFF 14,182 (1.003; late 0.982) — demand flat
+this seed; matched-trajectory demand-neutrality is certified by the
+det=1 rig (954 == 954) and G8's identical penetration.
+physics_diverged 0 all iterations, 0 containment/capacity/overflow
+warnings either arm; GPU peak 20,428 MiB both arms (footprint
+unchanged). Projected plateau: pass-16's 18.98 s/iter at the late
+price ratio 0.734 -> ~13.9 s/iter (projection, not a measurement — a
+25-iter plateau re-measure is the pass-18 opener).
+
+Provenance: p17_j_invariant_probe.py, p17_j_invariant.log,
+p17_alphamax_smoke.py, p17_pack_smoke.py + p17_pack_{on,off}.npz,
+p17_full_chain.sh, p17_ab_run.sh, p17_ab_compare.py, gate artifacts
+named above; source anchors sap_warp sim/contact_solve.py +
+sim/sap_helpers.py at 1ff0ea0.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -892,7 +985,11 @@ f49b20b.
    foreclosed at ~1% class (closure paragraph in the pass-15 entry).
    Pass-16 DONE: plateau 18.98 s/iter / 3.76 ms/substep measured;
    next-lever map + pass-17 recommendation (ladder alpha-max fold,
-   bitwise pack rewrite, update-eval fusion) in the pass-16 entry;
+   bitwise pack rewrite, update-eval fusion) in the pass-16 entry.
+   Pass-17 DONE: recommendations A+B LANDED default-ON (entry above:
+   -26.3%/-26.6% per-substep at 1024x8, projected ~13.9 s/iter);
+   next in line: 25-iter plateau re-measure, then recommendation C
+   (update-eval fusion, ~8% ceiling in the pass-16 entry);
    (c) per-boundary D2H readback chain
    (~48/boundary, overlapped today but serializing the march's
    conditional structure?); (d) cross-boundary overlap of independent
