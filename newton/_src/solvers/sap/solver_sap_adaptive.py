@@ -2284,6 +2284,10 @@ class SolverSAPAdaptive:
             # chain and swaps the ladder kernel, so the flag selects a
             # different launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_alphamax", False)),
+            # The per-contact pack swaps the bounded pack kernel and adds a
+            # per-solve j_flat build launch, so the flag selects a different
+            # launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_pack_percontact", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
@@ -2384,6 +2388,10 @@ class SolverSAPAdaptive:
             # chain and swaps the ladder kernel, so the flag selects a
             # different launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_alphamax", False)),
+            # The per-contact pack swaps the bounded pack kernel and adds a
+            # per-solve j_flat build launch, so the flag selects a different
+            # launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_pack_percontact", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,

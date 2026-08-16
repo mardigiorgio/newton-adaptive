@@ -259,6 +259,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_ATTEMPT_CONSISTENT_R",
     "NEWTON_SAP_FUSED_LS",
     "NEWTON_SAP_FUSED_ALPHAMAX",
+    "NEWTON_SAP_PACK_PERCONTACT",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -318,6 +319,7 @@ def _cfg(
     acr: str | None = "0",
     fused: str | None = "0",
     alphamax: str | None = "0",
+    pack: str = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -340,6 +342,13 @@ def _cfg(
         # Default-ON in the solver; every cell pins it so the live-k bounded
         # contact-Hessian GEMM pair is only ever the explicitly varied factor.
         "NEWTON_SAP_GEMM_RESHAPE": gemm,
+        # Default-ON in the solver (effective only under the bounded GEMM
+        # pair); every cell pins it so the per-contact read-once pack +
+        # per-solve j_flat hoist is only ever the explicitly varied factor.
+        # Bitwise class: ON keeps the per-element gj arithmetic and the
+        # operand bytes the bounded GEMM reads identical, so pack arms are
+        # judged bitwise against their family reference.
+        "NEWTON_SAP_PACK_PERCONTACT": pack,
         # Pinned UNIFORMLY (never the varied factor): the deterministic and
         # legacy accumulation orders are different fp orders by design, so no
         # bitwise contract exists across them. All cells run the new
@@ -502,6 +511,28 @@ CONFIGS = [
         shared="1",
         gemm="1",
     ),
+    # Per-contact read-once pack + per-solve j_flat hoist: must be
+    # bitwise-invisible against the per-row bounded pack in both cadences
+    # and under the full shipping tier (the pack kernels and the per-solve
+    # j_flat build record a different launch stream, so the graph tiers
+    # must key and replay it correctly).
+    _cfg("pack-percontact", "0", None, False, gemm="1", pack="1"),
+    _cfg("boundary-pack-percontact", "0", None, False, compact="1", refresh="1", gemm="1", pack="1"),
+    _cfg(
+        "pack-full-stack",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        conditional="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+    ),
     # ---- attempt-consistent-law family (the solver default: flag UNSET) ----
     # Boundary cadence (the shipping cadence) with shared assembly and the
     # bounded GEMM pair on uniformly (both certified bitwise-invisible by
@@ -550,9 +581,33 @@ CONFIGS = [
     # folded single-kernel stream bitwise. Engagement is the device
     # alphamax-env counter (asserted > 0 here and == 0 in every
     # pinned-off cell).
-    _cfg("fusedam", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
-    _cfg("fusedam-repeat", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
-    _cfg("fusedam-graph", "1", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
+    _cfg("fusedam", "0", None, False, refresh="1", shared="1", gemm="1", pack="1", acr=None, fused=None, alphamax=None),
+    _cfg(
+        "fusedam-repeat",
+        "0",
+        None,
+        False,
+        refresh="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+    ),
+    _cfg(
+        "fusedam-graph",
+        "1",
+        None,
+        False,
+        refresh="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+    ),
     _cfg(
         "fusedam-conditional",
         "1",
@@ -562,6 +617,7 @@ CONFIGS = [
         conditional="1",
         shared="1",
         gemm="1",
+        pack="1",
         acr=None,
         fused=None,
         alphamax=None,
@@ -584,6 +640,8 @@ BOUNDARY_FAMILY = (
     "shared-full-stack",
     "boundary-gemm-reshape",
     "gemm-full-stack",
+    "boundary-pack-percontact",
+    "pack-full-stack",
     "boundary-containment",
 )
 
@@ -970,6 +1028,16 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     # vacuous); any count in a pinned-off cell means the folded kernel
     # leaked into the certified launch-chain stream. Host read is
     # post-march only.
+    # Per-contact pack: absent or "1" resolves ON, but only under the
+    # bounded GEMM pair (the pack is that pair's operand builder).
+    # Construction proof is the resolved switch; engagement is the device
+    # env-launch counter, asserted after the march below.
+    pack_expected = gemm_requested and env.get("NEWTON_SAP_PACK_PERCONTACT") != "0"
+    assert solver._sap.contact_solve._pack_percontact == pack_expected, (
+        f"[{name}] pack-percontact switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_PACK_PERCONTACT')!r} -> expected {pack_expected})"
+    )
+
     fused_alphamax_envs = solver._sap.contact_solve.fused_alphamax_envs()
     if alphamax_expected:
         assert fused_alphamax_envs > 0, (
@@ -979,6 +1047,24 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     else:
         assert fused_alphamax_envs == 0, (
             f"[{name}] alphamax counter advanced with the switch off -- the folded path leaked into an OFF cell."
+        )
+
+    # Per-contact pack engagement: the counter accumulates once per env per
+    # gj-pack launch, so a nonzero total proves the read-once kernel really
+    # built the GEMM operands (a zero total in an ON cell means the bounded
+    # hessian assembly never ran -- vacuous); any count in an OFF cell means
+    # the per-contact kernel leaked into the certified per-row stream. Host
+    # read is post-march only.
+    pack_execs = solver._sap.contact_solve.pack_percontact_execs()
+    if pack_expected:
+        assert pack_execs > 0, (
+            f"[{name}] per-contact pack never launched an env "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert pack_execs == 0, (
+            f"[{name}] pack-percontact counter advanced with the switch off "
+            "-- the per-contact path leaked into an OFF cell."
         )
 
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
@@ -996,6 +1082,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "sa_execs": sa_execs,
         "fused_ladder_envs": fused_ladder_envs,
         "fused_alphamax_envs": fused_alphamax_envs,
+        "pack_execs": pack_execs,
     }
 
 
@@ -1313,6 +1400,7 @@ def main() -> int:
             "NEWTON_SAP_ATTEMPT_CONSISTENT_R": "0",
             "NEWTON_SAP_FUSED_LS": "0",
             "NEWTON_SAP_FUSED_ALPHAMAX": "0",
+            "NEWTON_SAP_PACK_PERCONTACT": "0",
         },
         z0,
         vz,
