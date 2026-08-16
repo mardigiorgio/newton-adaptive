@@ -81,6 +81,17 @@ Provenance: journal of wf_55df0381-9e4, agents a07793410/a6e00add.
   assembly-heavy scenes. Provenance: scratchpad sharedasm_g12.log,
   sharedasm_g3456.log, sharedasm_ab_{det1,prod}_{on,off}.{log,telemetry};
   sap_warp commit b1e48a3.
+- LS-interior compaction isolated A/B (2026-08-15, loop pass 5): at 1024x8
+  production scale, LS-compact ALONE (march-compact pinned off both arms)
+  is a consistent +0.8% wall win (OFF/ON 1.0077 whole-run, 1.0084 late,
+  positive sign at all 8 iterations; run-repeat noise today ~0.1-0.3%) —
+  the micro-scene 1.6-1.8% slowdown inverts at scale. Disabling it in the
+  production config costs 14.1% whole-run / 19.6% late because
+  march-compact hard-requires it (solver_sap_adaptive.py:1464: enable
+  condition includes contact_solve._ls_compact) and normalizes itself off.
+  DEFAULT STAYS ON; no code changed. Bitwise tripwires: all four arms'
+  telemetry byte-identical (det=1), cross-pair trajectory match confirmed.
+  Provenance: scratchpad p5_lsc_{on1,off1,iso_on,iso_off}.{log,telemetry}.
 - Snapshot commits: newton-adaptive march-counter-log 9c9dc934, sap_warp
   main 79e43bd, IsaacLab develop 82c0679d88.
 
@@ -152,14 +163,11 @@ construct probe re-run PASS as restoration proof).
 
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. LS-interior compaction isolated A/B at 1024 production scale: the ONE
-   stack feature never isolated at scale; micro-scene measured it 1.6-1.8%
-   SLOWER. If negative at scale too: default it OFF (one env var, free wall).
-2. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
+1. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
    GEMM tiles): structural surgery, authorized; measure kernel-level first.
-3. Remaining un-narrowed env-axis launches outside contact_solve.py
+2. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-4. Housekeeping: run pre-commit across the accumulated commits and
+3. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
