@@ -2847,6 +2847,301 @@ p26_train_{fixed,adaptive}.log; p26_acr_run.sh, p26_acr_run2.sh,
 p26_run3.sh, p26_run4.sh, p26_gates.sh, p26_acr_chain.log;
 p26_g{1..8}_*.{json,log}, p26_gate_progress.txt.
 
+## PASS 27 — THE COMPARISON-FAIRNESS MATRIX + CONTACT-SENSOR VERDICT
+## 2026-08-16. Sweeps systematically for the F8 class ("the two arms differ
+## for a reason that is not timestepping"), which pass 26 found by accident.
+## MEASUREMENT + SOURCE AUDIT ONLY. ZERO CODE EDITS in all three repos.
+
+Stack: newton-adaptive c5502d33 (march-counter-log), sap_warp 345c9fe
+(main), IsaacLab 13e049ead1 (develop) — all three verified at the
+certified HEADs, worktrees clean, GPU idle (438 MiB, 0 compute apps)
+before the first launch and after the last. Every value below was dumped
+from LIVE CONSTRUCTED objects at 8 envs on task IsaacContrib-Lift-
+Spatula-Trossen-v0; the pass-25/26 ledger prose was treated as folklore
+and re-derived from source before anything was built on it.
+
+METHOD (why this pass can claim completeness where pass 26 could not).
+Named reads only cover what the author already suspects, so the probe
+HARVESTS GENERICALLY: it walks the solver/manager/env object graph and
+records every reachable scalar attribute and every warp-array shape, then
+diffs the arms row by row. 630 rows on the fixed arm, 803 on the
+adaptive, 312 on MuJoCo. An asymmetry nobody thought to name still shows
+up as a differing row. Three arms were built — fixed SAP, adaptive SAP,
+and the MuJoCo backend every recorded training run actually used —
+sequentially, one GPU process at a time.
+
+### THE HEADLINE: THE SAP SOLVE STACKS ARE ALREADY SYMMETRIC
+
+Comparing like for like — the fixed arm's SolverSAP against the adaptive
+arm's INNER SolverSAP, which is the same object in the same role:
+
+  SolverSAP vs inner SolverSAP    3 differing rows out of ~60
+  contact_solve                   4 differing rows out of 197
+  contact_jacobian                0 differing rows out of 67
+  free_motion                     0 differing rows out of 75
+
+The 3 solver rows are exactly F8 (below). The 4 contact_solve rows are
+exactly the ACR attempt-consistent-R buffers (_constitutive_dt,
+_w_eff_att, _a_inv_pd_att, _a_inv_limit_att), allocated on the adaptive
+arm and None on the fixed arm — which is the estimator semantics, not an
+engineering defect. EVERYTHING ELSE IN THE CONTACT LAW AND THE SOLVE
+STACK IS IDENTICAL, measured off the objects: max_iterations 30,
+optimality_abs_tol 1e-14, line_search_max_iterations 40, armijo_c, rho,
+line_search_variant armijo_decay, contact_beta 1.0, contact_sigma 1e-3,
+contact_tau_d, fallback_stiffness, fallback_mu, diag_shift,
+preset approx32 and all four precision knobs, contact_weight_mode,
+contact_point_mode, position_integration, use_f64_boundary_pose,
+static_substep False (8/6), graph_conditional True, per-world contact
+budget 2048. Pass 26's capacity and env-var fixes hold on final bytes.
+
+### THE MATRIX
+
+Classification: (i) LEGITIMATE = the difference IS the thesis;
+(ii) MUST-FIX-IN-GRANT = engineering asymmetry, no timestepping content;
+(iii) MARCO'S = task/scene/tolerance/estimator/comparison semantics;
+(iv) BENIGN = differs, PROVED it cannot affect behaviour;
+(v) UNKNOWN = could not resolve, reason named.
+
+| # | ROW | FIXED | ADAPTIVE | CLASS |
+|---|-----|-------|----------|-------|
+| 1 | optimality_rel_tol | 1e-6 | 1e-8 | iii (F8, red line) |
+| 2 | cost_abs_tol | 1e-30 | 0.0 | iii (F8, red line) |
+| 3 | cost_rel_tol | 1e-15 | 0.0 | iii (F8, red line) |
+| 4 | optimality_abs_tol | 1e-14 | 1e-14 | same |
+| 5 | max_iterations (Newton cap) | 30 | 30 | same |
+| 6 | line_search cap / variant | 40 / armijo_decay | 40 / armijo_decay | same |
+| 7 | armijo_c, rho, ls_rel_slop | identical | identical | same |
+| 8 | static_substep (+ its 2 caps) | False, 8, 6 | False, 8, 6 | same |
+| 9 | R inputs: beta, sigma, tau_d, k | 1.0, 1e-3, 0.02, 1250 | same | same |
+| 10 | cone / soft-norm tol / mu | shared sap_helpers | shared | same |
+| 11 | ACR constitutive-dt buffers | absent | allocated, s in (2,4) | i |
+| 12 | preset + 4 precision knobs | approx32 / fp64 | approx32 / fp64 | same |
+| 13 | per-world SAP contact budget | 2048 | 2048 | same |
+| 14 | contact_jacobian (67 rows) | — | — | same |
+| 15 | free_motion (75 rows) | — | — | same |
+| 16 | contact SOURCE | manager CollisionPipeline | solver-owned pipeline | iv (row 17-19) |
+| 17 | broad_phase | explicit (2104 allow-list) | sap (3720 cap, 2104 deny) | iv, PROVED |
+| 18 | pipeline rigid_contact_max | 8,000,000 pooled | 16,384 pooled | iv, PROVED |
+| 19 | max_triangle_pairs | 192e6 | 192e6 | same |
+| 20 | truncated contacts / headroom | 0 / >=21x | 0 / >=11x | same |
+| 21 | num_substeps per boundary | 2 | 1 (+adaptive march) | i |
+| 22 | solver_dt | 4.16667e-3 | 8.33333e-3 | i |
+| 23 | ADVANCE PER DECIMATION TICK | 8.33333e-3 | 8.33333e-3 | iv, PROVED |
+| 24 | collision cadence | 1/tick (collision_decimation 0) | 1/boundary at entry | iv (row 23) |
+| 25 | per-substep Jacobian re-anchor | yes | yes | same |
+| 26 | warm start | 1 GLOBAL flag, shape (1,) | per-world + CENIC v_t/v_half/v_full | ii |
+| 27 | reset granularity | global reset_runtime_state() | per-world masked reset | ii |
+| 28 | reset host sync per step | local_mask.numpy().any() | none | ii |
+| 29 | convergence certificate | last_converged, 0 consumers | raises RuntimeError | ii |
+| 30 | containment: dt shrink-retry | absent | present | i |
+| 31 | containment: latch/freeze/isolate | absent | present | ii (=F5) |
+| 32 | physics_diverged termination | PERMANENT NO-OP | live | iii (=F5) |
+| 33 | shared sap_warp env flags (8) | all reach it | all reach it | same |
+| 34 | NEWTON_SAP_PRESET/LS/PRECISION | reaches it | reaches it | same |
+| 35 | NEWTON_SAP_DETERMINISTIC | solve only, NOT pipeline | solve AND pipeline | ii |
+| 36 | adaptive-only env flags (19) | n/a | n/a | i |
+| 37 | manager CUDA-graph capture | False | False | same |
+| 38 | solver-internal graph | none | graph + conditional | ii (wall only) |
+| 39 | MDP terms (all 6 managers) | identical | identical | same |
+| 40 | contact-sensor force channel | 0.0 | 0.0 | same (see below) |
+
+ROW 17-18 ARE PROVED BENIGN BY MEASUREMENT, NOT BY ARGUMENT. The two
+arms run DIFFERENT broadphase algorithms over differently-built pair
+structures, which is not equivalent by construction, so the fixed arm was
+run BOTH ways (probe-local cfg override, no repo edit) and compared:
+  deepest phi0, explicit vs sap, IDENTICAL TO 6 SIGNIFICANT FIGURES in
+  every quasi-static phase (rest -5.39571e-5, press -5.39552e-5,
+  swing -5.39552e-5 on both);
+  max contacts in one world 54 vs 54 in all three phases;
+  total contact samples within 0.09% (25597/25574, 38428/38401,
+  51245/51235) — a handful of marginal pairs at the collision margin,
+  not a structural difference.
+Row 18 is benign because neither cap binds: truncated contacts 0 on both
+arms, and both arms are throttled by the SAME 2048/world SOLVER budget
+downstream of whatever the pipeline produced. RESIDUAL RISK: equivalence
+was established in the quasi-static phases only; flail trajectories have
+already diverged so that phase cannot test it.
+
+ROW 23 IS THE ONE THAT MATTERED MOST AND IT PASSES. num_substeps and
+solver_dt differ (that is the experiment), but their PRODUCT — the wall
+of simulated time each arm advances per decimation tick — is
+8.33333333e-3 s on BOTH arms, read live off the manager. The arms
+integrate the same interval; only the subdivision differs. Had this row
+disagreed, every wall-clock and success number in the campaign would
+have been comparing different amounts of physics.
+
+### WHAT MARCO MUST DECIDE (iii rows), with the exact change
+
+ M1 F8 — rows 1-3. UNCHANGED from pass 26 and still the loudest. The
+    fixed arm accepts a contact-solve residual 100x looser and may stop
+    on a cost plateau where the adaptive arm structurally cannot. One
+    kwarg triple at the SolverSAP construction site
+    (mjwarp_manager.py:382-390): `optimality_rel_tol=1e-8,
+    cost_abs_tol=0.0, cost_rel_tol=0.0`. Red-line item (optimality_rel_tol
+    is named in the pass-25 VALIDITY RED LINE), so a loop may not land it
+    even on an arm with no campaign record. Until it is aligned, any
+    "fixed fails" result is partly attributable to tolerance, not to
+    timestepping.
+ M2 Row 32 — `physics_diverged` is an ACTIVE termination term that is a
+    PERMANENT NO-OP on the fixed SAP arm AND on the MuJoCo arm, confirmed
+    live this pass (get_diverged_env_mask() returns None on both;
+    mdp.py:174 then returns all-False). One arm can excise a broken world
+    from the training distribution and the other cannot. Task-side (F5).
+    Either give the fixed arm an equivalent or state it in the paper.
+ M3 Row 35 — NEWTON_SAP_DETERMINISTIC reaches the adaptive arm's
+    collision pipeline (canonical contact sort) but NOT the fixed arm's,
+    because the manager pipeline reads the cfg field instead. With det=1
+    the adaptive arm is order-canonical and the fixed arm is not, so a
+    determinism comparison between arms is apples-to-oranges. One line:
+    `NewtonCollisionPipelineCfg(..., deterministic=True)` in the task
+    cfg, or an env-var propagation in mjwarp_manager gated on the fixed
+    SAP arm. Left alone because the cfg field is shared with the MuJoCo
+    backend, whose established trajectories it would move.
+
+### WHY THIS PASS LANDED NOTHING (the (ii) rows, and why each is blocked)
+
+Rows 26-29, 31, 35, 38 are real engineering asymmetries with no
+timestepping content. NONE was landed, and the reason is structural
+rather than a judgement call:
+  * Rows 26/27 (warm start, reset granularity). The fixed arm's
+    warm-start gate is a SINGLE GLOBAL flag —
+    `_contact_solve_v_guess_active` has shape (1,), confirmed in the live
+    dump — cleared wholesale by reset_runtime_state() whenever ANY world
+    resets, where the adaptive arm resets per-world under a mask. Making
+    it per-world means new state in sap_warp's contact solve, which the
+    adaptive arm's inner SolverSAP also runs; it cannot be shown
+    byte-inert for the adaptive arm, so it is not a fairness edit but a
+    feature. INCIDENCE IS (v) UNKNOWN: measured 0 drops over 390 steps
+    including a flail phase, but this rig did not independently confirm
+    that env resets reached the manager mask, so that 0 says nothing
+    about the training regime. Measuring the training-regime rate is the
+    first thing the next pass should do.
+  * Row 29 (convergence certificate). SolverSAP records `last_converged`
+    and NOTHING in any of the three repos reads it — grep is exhaustive,
+    2 hits, both writes. So an unconverged fixed-arm solve is committed
+    silently and invisibly, where the adaptive arm raises quoting
+    optimality_rel_tol=1.000e-08. Fix is a counter in mjwarp_manager
+    gated on the fixed SAP arm; deferred because it is observability that
+    belongs with the first real fixed-arm comparison run, not churn now.
+  * Rows 17/18/31/38 would all have to be equalized by changing the
+    ADAPTIVE arm, which the byte-unchanged gate forbids — and 17/18 turned
+    out BENIGN on measurement anyway, so landing them would have been
+    churn against a proof of no effect.
+NET: after pass 26's fixes, there is no in-grant fairness edit left that
+is both landable and non-speculative. The remaining asymmetries are
+red-lined, task-side, or blocked by the adaptive arm's byte-unchanged
+contract.
+
+### CONTACT-SENSOR VERDICT (task 2)
+
+CONSUMERS: NONE. Exhaustive source sweep of every MDP surface —
+observations (5 terms, one `policy` group), rewards (6), terminations
+(6), curriculum (2), events (2), commands (1), actions (2), the task's
+own mdp.py, the RSL-RL cfg, recorders and wrappers. Not one term reads
+`pad_handle_contact` or `arm_body_contact`. The two names appear exactly
+twice in the whole tree: their definition sites
+(trossen_spatula_lift_env_cfg.py:214, :223). The task's mdp.py DOES
+contain contact readers — `_sensor_force_mag` (:51-63, reads
+force_matrix_w only) and its eight callers `handle_contact`,
+`body_contact`, `pad_contact_bipolar`, `handle_grasped`,
+`handle_ee_distance`, `lift_progress_by_handle`,
+`object_lifted_by_handle`, `object_goal_distance_by_handle` — and every
+one of them is DEAD CODE, referenced by nothing. Note zero-weight reward
+terms would NOT be pruned (reward_manager.py:145-148 keeps them and only
+short-circuits evaluation), so "no consumer" is not hiding behind a
+weight of 0; there simply is no term.
+
+THE CHANNEL, HOWEVER, IS NOT SYMMETRIC ACROSS BACKENDS — and this pass
+resolves the pass-25 R4 ambiguity ("sensors dead" vs "my scripted actions
+never satisfied the filters") by reading the SOURCE array globally
+instead of the sensor's filtered output. `SensorContact.update` reads
+`contacts.force`; that array was read unfiltered, every row, on all three
+arms over rest/press/flail:
+    MuJoCo    contacts.force absmax 0.0671 (rest), 0.0671 (press),
+              PEAK 8.962 over flail  -> THE WRITEBACK IS LIVE
+    SAP fixed contacts.force absmax 0.0 everywhere, flail peak 0.0
+    SAP adapt contacts.force absmax 0.0 everywhere, flail peak 0.0
+So SolverMuJoCo.update_contacts genuinely fills the frontend force array
+even under use_mujoco_contacts=False, while BOTH SAP arms' update_contacts
+are the documented no-ops and leave it identically zero. The two SAP arms
+agree with each other exactly, so the SAP-vs-SAP comparison is unaffected.
+
+VERDICT. SAP training and MuJoCo training ARE the same task today, but
+only because the channel is unused: no MDP term reads it, so a live
+force array and a zero force array produce identical observations,
+rewards, terminations, curricula and events. This is a coincidence of the
+current task definition, not a property of the stack. THE MOMENT ANY
+CONTACT-DERIVED TERM IS ADDED — and eight such functions are already
+written and sitting in this task's mdp.py — SAP and MuJoCo become
+DIFFERENT TASKS, with SAP's term reading a constant zero. That is the
+finding: not a live defect, a loaded one.
+
+RESIDUAL RISK, NAMED. A live sensor READING was not demonstrated on any
+arm: `newton_sensor[...].total_force` was 0.0 on all three arms in all
+phases, including MuJoCo where the underlying array is live. Sensing
+objects and counterparts both resolved correctly (shapes [16]/[16,3] for
+the 2 carriage bodies x 3 handle shapes, [48]/[48,9] for the 6 arm links
+x 9 wall/base shapes), so the filters are wired; the scripted phases
+simply never brought those specific pairs into contact. The verdict above
+does not depend on that gap — it rests on the exhaustive zero-consumer
+sweep and on the global force-array measurement, neither of which needs a
+filtered reading.
+
+### CHARACTERIZATION (one draw, 8 envs, NOT the killer comparison)
+
+    arm        ms/step   rest/press/swing phi0   flail phi0
+    MuJoCo      9.617    n/a (no SAP jacobian)   n/a
+    SAP adapt  27.102    -5.5838e-5              -1.4816e-2
+    SAP fixed  31.078    -5.3957e-5              -7.1775e-3
+Adaptive cumulative_accepted_steps 14542 over 360x4x8 = 11520
+world-boundaries (~1.26/boundary) vs the fixed arm's 2/boundary. The
+fixed arm's quasi-static phi0 again equals the ACR-OFF value exactly
+(s == 1 by construction with no doubling), the third independent
+confirmation of the ACR mechanism from a solver that never runs it.
+Peak per-world contact demand 97-102 (fixed) vs 173 (adaptive) in flail
+— confounded by chaos, not a capacity finding; the quasi-static phases
+agree at 54/54.
+
+### ADAPTIVE ARM: BYTE-UNCHANGED, TRIVIALLY
+
+Zero bytes changed in newton-adaptive, sap_warp or IsaacLab this pass
+(`git status --porcelain` empty in all three at pass end; the only write
+is this ledger entry). The 8-gate chain is therefore not applicable —
+there are no "final bytes" distinct from the certified HEADs. The
+campaign invariant was nonetheless re-measured incidentally by the
+fairness probe on the unmodified stack: adaptive deepest phi0
+-5.5838e-5 in rest, press AND swing, i.e. the -5.584e-5 held since
+pre-campaign, unchanged.
+
+### FINDINGS ADDED
+
+F9  The contact-force channel is LIVE on MuJoCo and IDENTICALLY ZERO on
+    both SAP arms (measured on contacts.force globally, not on a filtered
+    sensor output). Currently inert because no MDP term consumes it, and
+    symmetric across the two SAP arms. Becomes a live cross-backend
+    defect the instant a contact-derived term is added — and eight such
+    functions already exist unreferenced in the task's mdp.py.
+F10 The fixed arm has NO convergence certificate: `last_converged` is
+    written twice and read nowhere in any of the three repos, so an
+    unconverged fixed-arm contact solve is committed silently, where the
+    adaptive arm raises. Compounds F8.
+F11 The fixed arm's contact-solve warm start is a SINGLE GLOBAL flag
+    (shape (1,)) dropped wholesale on any world's reset, against the
+    adaptive arm's per-world masked reset. Structural; firing rate in the
+    training regime UNMEASURED.
+CLEAN — the SAP solve stacks themselves. 3 tolerance rows and 4 ACR
+    buffers is the entire difference across ~400 compared attributes in
+    SolverSAP, contact_solve, contact_jacobian and free_motion. Contact
+    law, caps, preset, precision and capacity are identical by
+    measurement. Broadphase and pipeline-capacity asymmetries are proved
+    benign. Both arms advance exactly the same simulated time per tick.
+
+Provenance (all p27_ prefix, no p13-p26 artifact overwritten):
+p27_fairness_probe.py + p27_arm_{fixed,adaptive,mujoco}.{json,log};
+p27_sensor_probe.py + p27_sens_{fixed,adaptive,mujoco}.{json,log};
+p27_asym_probe.py + p27_asym_{explicit,sap,warmstart}.{json,log};
+p27_diff.py.
+
 ## Rails (non-negotiable)
 
 optimality_rel_tol 1.0e-8 fp64 (pinned; fp32 path uses its derived
@@ -2910,6 +3205,21 @@ goal.
   capped it at 33.5M; live demand ~2.8M. Authoring ~8-16M (3-6x margin)
   restores the historical footprint under det-off and un-OOMs 4096.
   One task-config line; task changes are Marco's.
+- FIXED-ARM INNER TOLERANCES (F8, raised pass 26, re-confirmed as the
+  loudest row of the pass-27 matrix): the fixed arm solves to
+  optimality_rel_tol 1e-6 with cost tols 1e-30/1e-15 where the adaptive
+  arm pins 1e-8 with the cost early-exit disabled. One kwarg triple at
+  mjwarp_manager.py:382-390. Red-line item, so no loop may land it.
+- physics_diverged IS A NO-OP ON THE FIXED ARM AND ON MUJOCO (pass-27
+  live confirmation of F5): an active termination term that can excise a
+  broken world on one arm only. Give the fixed arm an equivalent or state
+  it in the paper text.
+- CONTACT-DERIVED MDP TERMS ARE NOW A TRAP (pass 27, F9): contacts.force
+  is live on MuJoCo (flail peak 8.96) and identically zero on both SAP
+  arms. Nothing reads it today, so the backends are equivalent; the eight
+  unreferenced contact functions already sitting in the task's mdp.py
+  would each silently read a constant zero under SAP. Any decision to add
+  one needs the writeback (M2 of pass 26) first.
 - Phantom body fix: follower_left_ee_gripper_link active=false overlay
   (one line in stationary_ai_task.usda, mirrors right twin) — kernel-width
   savings 7/22 coords per world + closes latent-risk surface
