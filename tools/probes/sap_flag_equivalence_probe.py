@@ -91,6 +91,21 @@ Oracle argument (why this is not a tautology or a snapshot):
     committed march must differ from the ACR-off boundary family's, and
     every other flag separating those cells is individually certified
     bitwise-invisible, so any byte difference is the law's.
+
+    NEWTON_SAP_FUSED_LS (default ON, "0" disables) is likewise NOT a
+    scheduling switch: the fused armijo ladder evaluates trial costs in a
+    different fp order (ray-advanced contact velocities, tile-parallel
+    regularizer reduction) than the launch chain, so no bitwise relation
+    across its states exists or is asserted. Every legacy cell pins "0"
+    (preserving the launch-chain stream those cells certify, and arming
+    the OFF-leak counter assert); the fused-LS family cells leave the
+    variable UNSET so the default resolution is itself under test, with
+    their own reference + repeat oracle and graph/conditional arms
+    certifying that the single-kernel ladder stream captures and replays
+    bitwise. Ladder engagement is proven by the device ladder-env counter
+    (> 0 in family cells, == 0 in every pinned-off cell) -- not by
+    divergence, which a scene without threshold-adjacent accept decisions
+    legally never shows.
     The correct output of a switch-on run is therefore exactly computable by an
     independent route: the switch-off run of the identical scenario, same
     process, same build, same device, same seed. The probe asserts bitwise
@@ -233,6 +248,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_MARCH_COMPACT_WIDTH",
     "NEWTON_SAP_SHARED_ASSEMBLY",
     "NEWTON_SAP_ATTEMPT_CONSISTENT_R",
+    "NEWTON_SAP_FUSED_LS",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -290,6 +306,7 @@ def _cfg(
     shared: str = "0",
     gemm: str = "0",
     acr: str | None = "0",
+    fused: str | None = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -326,6 +343,15 @@ def _cfg(
     # the default resolution itself is the thing under test.
     if acr is not None:
         env["NEWTON_SAP_ATTEMPT_CONSISTENT_R"] = acr
+    # Fused armijo line-search ladder (default ON in the solver) is a
+    # DIFFERENT fp reduction/evaluation order for the trial costs, so no
+    # bitwise contract exists across its states: every legacy cell pins
+    # "0" (the launch-chain stream, byte-for-byte the pre-flag behavior),
+    # and the fused-LS family cells pass None to leave the variable unset
+    # so the default resolution is itself under test, with their own
+    # reference + repeat oracle and graph/conditional arms.
+    if fused is not None:
+        env["NEWTON_SAP_FUSED_LS"] = fused
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -467,6 +493,31 @@ CONFIGS = [
     _cfg("acr-repeat", "0", None, False, refresh="1", shared="1", gemm="1", acr=None),
     _cfg("acr-graph", "1", None, False, refresh="1", shared="1", gemm="1", acr=None),
     _cfg("acr-conditional", "1", None, False, refresh="1", conditional="1", shared="1", gemm="1", acr=None),
+    # ---- fused-LS family (the solver default: flag UNSET) ----
+    # The production stack shape (boundary cadence, shared assembly, bounded
+    # GEMM, attempt-consistent law -- each certified by its own arms above)
+    # with the fused armijo ladder at its unset default. The fused walk is a
+    # different fp evaluation order for the ladder's trial costs, so the
+    # family carries its own reference + repeat oracle; varied factors
+    # within it are graph capture and the whole-march conditional tier,
+    # which must record and replay the single-kernel ladder stream bitwise.
+    # Engagement is the device ladder-env counter (asserted > 0 here and
+    # == 0 in every pinned-off cell).
+    _cfg("fusedls", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None),
+    _cfg("fusedls-repeat", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None),
+    _cfg("fusedls-graph", "1", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None),
+    _cfg(
+        "fusedls-conditional",
+        "1",
+        None,
+        False,
+        refresh="1",
+        conditional="1",
+        shared="1",
+        gemm="1",
+        acr=None,
+        fused=None,
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -494,6 +545,14 @@ ACR_FAMILY = (
     "acr-repeat",
     "acr-graph",
     "acr-conditional",
+)
+
+# Arms judged bitwise against "fusedls" (scheduling-only changes under the
+# fused armijo ladder's trial-cost evaluation order).
+FUSEDLS_FAMILY = (
+    "fusedls-repeat",
+    "fusedls-graph",
+    "fusedls-conditional",
 )
 
 
@@ -620,6 +679,15 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         assert solver._sap.contact_solve._constitutive_dt is None, (
             f"[{name}] constitutive dt reached the contact solve in an ACR-off cell (leak)"
         )
+    # Fused armijo ladder: absent or "1" resolves ON (default-ON
+    # convention); "0" disables. Construction proof is the resolved switch
+    # itself; engagement is the device ladder-env counter, asserted after
+    # the march below.
+    fused_expected = env.get("NEWTON_SAP_FUSED_LS") != "0"
+    assert solver._sap.contact_solve._fused_ls == fused_expected, (
+        f"[{name}] fused-LS switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_FUSED_LS')!r} -> expected {fused_expected})"
+    )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
         march_requested
@@ -812,6 +880,24 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             "-- the bounded path leaked into an OFF cell."
         )
 
+    # Fused-LS engagement: the counter accumulates once per env that enters
+    # the in-kernel armijo ladder (an env still line-searching after the
+    # alpha-max derivative accept), so a nonzero total proves the fused walk
+    # actually executed ladder trips (a zero total in an ON cell means the
+    # scene never backtracked past alpha_max -- vacuous for this flag); any
+    # count in an OFF cell means the fused kernel leaked into the legacy
+    # launch-chain stream. Host read is post-march only.
+    fused_ladder_envs = solver._sap.contact_solve.fused_ls_ladder_envs()
+    if fused_expected:
+        assert fused_ladder_envs > 0, (
+            f"[{name}] fused armijo ladder never walked an env "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert fused_ladder_envs == 0, (
+            f"[{name}] fused-ladder counter advanced with the switch off -- the fused path leaked into an OFF cell."
+        )
+
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
     # every mode (the collide runs outside the captured body); exact for the
     # per-attempt cadence only on eager (graph=0) arms -- graph replays do
@@ -825,6 +911,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "mc_execs": (mc_narrow, mc_wide),
         "narrow_sites": sorted(narrow_sites),
         "sa_execs": sa_execs,
+        "fused_ladder_envs": fused_ladder_envs,
     }
 
 
@@ -1018,6 +1105,21 @@ def main() -> int:
             is not None,
         }
     )
+    # Fused-LS family: its own contact/divergence vacuity certificate plus
+    # ladder engagement via the device counter (the per-arm assert already
+    # hard-fails; the guard surfaces it in the tier-1 report). No divergence
+    # guard against the acr family: the fused walk changes only the trial
+    # costs' fp evaluation order, so a bitwise-identical march is a legal
+    # outcome on a scene whose accept decisions never sit within an ulp of a
+    # threshold -- the counter, not divergence, is the engagement proof.
+    fref = runs["fusedls"]
+    guards.update(
+        {
+            "fusedls arm produced pipeline contacts": extras["fusedls"]["ncon_seen"] > 0,
+            "fusedls arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in fref),
+            "fused armijo ladder engaged (device ladder-env counter > 0)": extras["fusedls"]["fused_ladder_envs"] > 0,
+        }
+    )
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -1031,6 +1133,7 @@ def main() -> int:
         ("reference", "reference-repeat"),
         ("boundary", "boundary-repeat"),
         ("acr", "acr-repeat"),
+        ("fusedls", "fusedls-repeat"),
     ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
@@ -1042,12 +1145,23 @@ def main() -> int:
     # --- Tier 3: feature equivalence (within each family) -----------------
     failed = False
     for name, _env_cell, _ in configs:
-        if name in ("reference", "reference-repeat", "boundary", "boundary-repeat", "acr", "acr-repeat"):
+        if name in (
+            "reference",
+            "reference-repeat",
+            "boundary",
+            "boundary-repeat",
+            "acr",
+            "acr-repeat",
+            "fusedls",
+            "fusedls-repeat",
+        ):
             continue
         if name in BOUNDARY_FAMILY:
             family = "boundary"
         elif name in ACR_FAMILY:
             family = "acr"
+        elif name in FUSEDLS_FAMILY:
+            family = "fusedls"
         else:
             family = "reference"
         where = first_divergence(runs[family], runs[name])
@@ -1093,6 +1207,7 @@ def main() -> int:
             "NEWTON_SAP_CONTAINMENT": "0",
             "NEWTON_SAP_MARCH_COMPACT": "0",
             "NEWTON_SAP_ATTEMPT_CONSISTENT_R": "0",
+            "NEWTON_SAP_FUSED_LS": "0",
         },
         z0,
         vz,

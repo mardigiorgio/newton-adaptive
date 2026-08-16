@@ -2276,6 +2276,10 @@ class SolverSAPAdaptive:
             self._contact_refresh_per_attempt,
             bool(getattr(self._sap.contact_solve, "_ls_compact", False)),
             bool(getattr(self._sap.contact_solve, "_gemm_reshape", False)),
+            # The fused armijo ladder replaces the conditional backtracking
+            # trip subgraph with a single-kernel walk, so the flag selects a
+            # different launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_ls", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
@@ -2368,6 +2372,10 @@ class SolverSAPAdaptive:
             self._contact_refresh_per_attempt,
             bool(getattr(self._sap.contact_solve, "_ls_compact", False)),
             bool(getattr(self._sap.contact_solve, "_gemm_reshape", False)),
+            # The fused armijo ladder replaces the conditional backtracking
+            # trip subgraph with a single-kernel walk, so the flag selects a
+            # different launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_ls", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
