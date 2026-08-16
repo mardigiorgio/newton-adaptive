@@ -5,18 +5,19 @@ here carries provenance (log path or run dir); entries without provenance are
 folklore — re-measure before building on them. The loop updates this file
 every pass; Marco redirects the loop by editing it.
 
-## Marco's grant (2026-08-15 late): ALL SOLVER CHANGES AUTHORIZED
+## Marco's grant (2026-08-15 late, renewed 2026-08-16): ALL SOLVER CHANGES
+## AUTHORIZED; GOAL IS NOW "AS LOW AS PHYSICALLY POSSIBLE"
 
 "go ahead with all permissions to make any and all changes to the solver.
-40s is unacceptable." Scope: solver + physics-layer plumbing (sap_warp,
-newton-adaptive solvers, mjwarp_manager). Still excluded: task/scene files
-(tri-pair cap fixed manager-side instead), tol 1e-3 and the step-doubling
-estimator (comparison semantics), optimality 1e-8, dt floor 1e-12 (rails).
-Physics-visible solver changes may now land DEFAULT ON after full invariant
-gates (OFF escape hatch retained). Re-ranked: 1) tf32-Hessian GEMM default
-ON (~10-14% plateau bound), 2) manager-side tri-pair sane cap (fixes 4096
-det-unset OOM), 3) ACR default ON (ramp -11%), 4) remaining full-width
-launches, 5) plateau re-measure + fresh table.
+40s is unacceptable. bellow 40s is not the goal the goal to be as low as
+physically possible. 10s would be ideal." Scope: solver + physics-layer
+plumbing (sap_warp, newton-adaptive solvers, mjwarp_manager). Still
+excluded: task/scene files (tri-pair cap fixed manager-side instead), tol
+1e-3 and the step-doubling estimator (comparison semantics), optimality
+1e-8, dt floor 1e-12 (rails). Physics-visible solver changes may now land
+DEFAULT ON after full invariant gates (OFF escape hatch retained).
+10 s/iter @1024 = 4.0x below the current 40.78 plateau; the percent-scale
+backlog cannot reach it — structural levers must be found and measured.
 
 ## Objective
 
@@ -382,24 +383,68 @@ probes require CHECK_OUT env — the first G6/G7 attempt failed on the
 missing variable, not physics). Commits: newton-adaptive 718ebf7a,
 IsaacLab b98f247a13.
 
-## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
+## Closed: fp32-Hessian GEMM (2026-08-15/16, loop pass 12 — MEASURED
+## SPEED-NEUTRAL, reverted; full diff preserved at scratchpad
+## pass12_hessian_fp32_{sapwarp,newton}.patch, logs p12_*)
 
-1. fp32/tf32 Hessian GEMM — ESCALATION-ONLY (bound measured pass 10:
-   ~10-14% plateau wall realistic, ceiling ~15-18% of slab): inexact-
-   Newton direction; gradient + certificate stay fp64; opt-in flag, full
-   invariant gates + iteration-count watch. Do not implement without
-   Marco's word.
+Implemented under the grant (NEWTON_SAP_HESSIAN_PRECISION, fp32 pack+GEMM
+of the contact-Hessian pair, gradient/certificate fp64, cache-keyed in
+both graph keys). Gates G2-G8 ALL GREEN on the implementation: construct,
+flag-equivalence, march-equivalence, determinism, containment, err_tol
+0/2880 viol (dt_run_min 2.9e-3), rest smoke, penetration phi0 IDENTICAL
+TO THE LAST DIGIT vs fp64 in every phase. The decisive 1024x16 det-unset
+training A/B (agent af90f473, killed by Marco just before writeup; arms
+complete in scratchpad): raw walls hfp32 356.9 s vs hfp64 398.0 s (-10.3%)
+BUT cumulative substeps 45,027 vs 50,208 (-10.3%) — the wall gap is
+trajectory luck. HONEST METRIC: whole-run 7.917 vs 7.920 ms/substep
+(0.0%); late-6-iter window 7.875 vs 8.030 (-1.9%, within trajectory-mix
+noise; <=  ~-2.5% under generous learner-overhead subtraction). The
+pass-10 bound (~10-14% plateau) is REFUTED: post-live-k-truncation the
+pack+GEMM pair is latency/memory-latency-bound at 1024-scale tile sizes,
+not FLOP- or bandwidth-bound — operand dtype does not move it. VERDICT:
+speed-neutral + physics-visible fails the >5% default-ON requirement;
+reverted to certified HEAD (verified clean both repos). DURABLE
+KNOWLEDGE: (a) the ENTIRE cheaper-math axis on the Hessian pair is now
+dead at the trainable scale (fp64->fp32 operand halving bought ~0);
+remaining levers on the pair are launch-count/layout/fusion class, not
+arithmetic; (b) the kill also invalidates any future tf32/tensor-core
+estimate built on the pass-10 FLOP roofline. Side finding: scratchpad
+probe_newton_profile.py is STALE vs the current solver (wraps
+_substep_body assuming graphs off; its .numpy() syncs now fire inside
+capture -> CUDA 906) — do not reuse it without setting
+NEWTON_SAP_ADAPTIVE_GRAPH=0 in the run env. Provenance: p12_chain.log
+(G2-G7 exit 0), p12_g6b_err_tol.json, p12_g7b_rest.json,
+p12_g8_phi0_{hfp32,hfp64}.json, p12_ab16_hfp32.{log,telemetry},
+p12_ab16b_hfp64.{log,telemetry}, p12_np_hfp32.log (probe crash).
+
+## Backlog (ranked for the 10 s goal; teardown of contact_solve
+## internals is AUTHORIZED)
+
+1. ACR default ON (NEWTON_SAP_ATTEMPT_CONSISTENT_R): measured -9..-11%
+   substeps ramp, -14.9% late wall in its A/B, ~0 at violent plateau,
+   penetration clean, 9/9 gates already run on the opt-in. Under the
+   renewed grant this is in-scope: flip default, re-run the full gate
+   suite on final bytes, fixed-seed before/after confirm. Cheapest
+   remaining measured win.
 2. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes) — few-percent
    class, mechanical, bitwise.
-3. Collision-refresh attack: CLOSED (pass 10: 0.99% of plateau
-   iteration at 1024 — elimination ceiling <1%).
-4. Coordinator note: with housekeeping complete, the profile flat, and
-   the dead-end closures recorded, the loop's autonomous percent
-   backlog is exhausted except item 2 (few-percent, mechanical);
-   recommend idling or stopping pending Marco's
-   escalation decisions (tf32, ACR enable, tri-pair right-size, phantom
-   body, det-tax choice for long runs).
+3. STRUCTURAL DISCOVERY (the only route to 10 s): the slab is FLAT
+   (no group >21%), GPU-busy 99.9%, dtype-insensitive — so the next
+   factor-scale lever is work-count, not work-price. Candidates to
+   measure, all in-grant: (a) Newton-iteration/LS-trip budget per solve
+   at plateau (how many of the 3x solves' inner iterations actually
+   move the state? warm-start quality half1/half2 vs full); (b) launch/
+   fusion consolidation of the ~25% "small assembly/misc spread thin"
+   + solve-misc groups (16726 tiny launches at 512 — persistent-kernel
+   or megakernel candidates); (c) per-boundary D2H readback chain
+   (~48/boundary, overlapped today but serializing the march's
+   conditional structure?); (d) cross-boundary overlap of independent
+   worlds' marches (capture mechanics proven feasible pass 4).
+   Each candidate gets a MEASUREMENT first, no code.
+4. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
+   CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
+   Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
 
 ## Rails (non-negotiable)
 
@@ -421,13 +466,6 @@ without Marco).
   capped it at 33.5M; live demand ~2.8M. Authoring ~8-16M (3-6x margin)
   restores the historical footprint under det-off and un-OOMs 4096.
   One task-config line; task changes are Marco's.
-- Enable NEWTON_SAP_ATTEMPT_CONSISTENT_R for trainings? (measured -11%
-  ramp wall, ~0 at plateau, penetration clean)
-- fp32 default flip (opt-in exists; awaiting his read of the A/B)
-- tf32/fp32 Hessian GEMM implementation (pass-10 bound: realistic
-  ~10-14% plateau wall, ceiling ~15-18% of slab; physics-visible
-  inexact-Newton, full invariant-gate burden — worth it only if that
-  margin matters to him)
 - Phantom body fix: follower_left_ee_gripper_link active=false overlay
   (one line in stationary_ai_task.usda, mirrors right twin) — kernel-width
   savings 7/22 coords per world + closes latent-risk surface
