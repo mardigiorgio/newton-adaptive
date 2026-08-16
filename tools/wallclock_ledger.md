@@ -1677,6 +1677,185 @@ p21_ab_run.sh -> p21_ab_{on,off}.*, p21_ab_compare.py, p21_prof_run.sh
 p20_split_kernels.py -> p21_split.txt, p21_run.sh -> p21_plateau.*,
 p21_det_run.sh -> p21_det_{on,off}.*, p14_plateau_analyze.py.
 
+## PASS-22 — RUN-AHEAD single march LANDED, DEFAULT OFF (2026-08-16;
+## implements the pass-20 design; newton-adaptive 45e07db2+7ea7f34e+
+## e41cc070+8f3ef7e3, sap_warp 2a119d2; the default flip is Marco's
+## one-line decision — consent question sharpened below with the
+## measured value)
+
+IMPLEMENTATION (NEWTON_SAP_RUNAHEAD, "1" enables; OFF = the per-boundary
+march byte-for-byte — G2's 42 bitwise cells and G3's unchanged iteration
+vector pin it):
+1. THE MARCH (solver_sap_adaptive.py): a world reaching its boundary
+   target inside the action window does not park — the device crossing
+   kernel _ra_advance_boundary bumps its next_time by one float32
+   dt_outer add (capped at the window end), applies its boundary
+   bookkeeping in place (_seed_dt's clamp of ideal_dt into dt/dt_half,
+   per-world substeps_frame rollover) and flags it crossed.
+   _clamp_dt_to_boundary and _adapt_dt are BIT-UNTOUCHED (the
+   estimator/accept-reject/per-world-dt rail held); every world lands
+   exactly on each T_j via the existing clamp (landing-sliver and
+   boundary-commit semantics preserved per world). Call-return
+   predicate: mark_unfinished_{contained,with_status}_target (additive
+   kernels in adaptive_boundary.py — the MuJoCo twin's kernels are
+   byte-untouched; run-ahead is SAP-ONLY) compares sim_time against a
+   per-call device scalar written at integrate entry (graph-replay
+   safe); the LAST call of the window returns only when every world
+   sits at the window end — action-edge state stays batch-synchronized.
+   Window bookkeeping: NEWTON_SAP_RUNAHEAD_WINDOW (default 4; MUST
+   equal the env decimation) + NEWTON_SAP_RUNAHEAD_PHASE (call-stream
+   offset). Host-side per-window float32 add-chain targets are
+   bit-identical to the device next_time chain, so window-end parking
+   and the reset-resync signature (next_time == 0, exact) compare
+   exactly. Clocks rebase once per WINDOW (Fix B's per-boundary rebase
+   becomes per-window inside the window — the one construction-level
+   fp deviation from OFF, see the oracle). A mid-window manager reset
+   is re-seated at the current call start and flagged crossed (fresh
+   contact set at its post-reset state). A floor-latch world does NOT
+   run ahead: the crossing kernel parks it at the window end, latch
+   visible for the post-call read (G5b). The debt guard is judged
+   against the call target (_debt_guard_target; per-world carry bound
+   verbatim); max_substeps caps per call as before.
+2. COLLISION: boundary collides become ONE crossing-batched conditional
+   node at the top of the march body — wp.capture_if(any crossed)
+   { masked collide + ADOPT + disarm }. Masking = new
+   compute_shape_aabbs_masked (collide(world_mask=...)): non-crossing
+   worlds' shapes emit INVERTED sentinel AABBs (fail the interval
+   overlap test against every partner), so broadphase yields no pairs
+   for them and pair-parallel downstream work scales with the crossing
+   subset; global-world shapes (ground plane) always participate. The
+   window-open call runs the full-batch collide+adopt eagerly (every
+   world crosses into its first boundary there) — today's cadence.
+   CAPTURE-SAFETY (blockers the pass-20 design did not anticipate; all
+   fixed at the root): a conditional CUDA-graph body may not contain
+   allocation nodes, and the pipeline allocated per pass —
+   wp.utils.array_scan (native temp alloc per call) at FIVE per-collide
+   sites (broadphase sweep-range cumsum, mesh-mesh + mesh-plane
+   block-offset scans x2) replaced by an exact chunked int32 scan
+   (byte-identical integer output; new geometry/capture_safe_scan
+   module), and per-launch zero-size placeholders cached. The
+   deterministic contact sorter's native temp alloc is bypassed:
+   in-march collides skip the global sort (collide(sort_contacts=
+   False)) and the adopt derives the SAME canonical per-env slot order
+   from the per-contact sort keys directly (two-pass key-ranked walk;
+   the global sort is a stable sort by those keys, tiebreak = buffer
+   index = stable arrival order). radix/segmented sorts are
+   capture-safe as-is (bisected).
+3. CONTACT SPLIT (sap_warp contact_jacobian.py): the per-attempt
+   scatter splits into ADOPT (global buffer -> per-env SET store, once
+   per crossing batch, crossed worlds only; raw dtypes) and ANCHOR
+   (per-env set + body_q -> phi0/jac/R_WC per attempt, world-gated).
+   ANCHOR per-row arithmetic is copied VERBATIM from the direct
+   scatter (f32-pose and f64-pose variants; f64 contact buffers
+   refused explicitly) — G8 phi0 ON==OFF to the digit. Per-world
+   contact cadence and anchoring are semantically identical to the
+   per-boundary march; under det-off only buffer packing order changes
+   (today's atomic arrival-order class). capture_local_snapshots
+   refused (its full-width fills would erase non-crossing rows).
+4. KEYS/TRIPWIRES/TWINS: NEWTON_SAP_RUNAHEAD in BOTH graph cache key
+   tuples; engagement counters (crossings, consumed adopt batches)
+   allocated unconditionally so OFF reads are real observations;
+   emission-time adopt/anchor site tags; OFF-leak asserts in every
+   pinned-off G2 cell. mjwarp_manager: NO changes (the design's claim
+   held — call signature/cadence unchanged; the manager's per-call
+   diverged-mask reset is absorbed by the resync kernel). Telemetry
+   drift under ON (only): dt_histogram unfinished_worlds and the
+   march-log resid/n_debt columns count run-ahead worlds mid-boundary
+   at call exits (an engagement measure, not under-advance).
+
+WINDOW ALIGNMENT (measured, probe_runahead_alignment.py ->
+p22_alignment.json): env construction and reset consume 0 boundary
+calls; every env.step consumes exactly decimation=4; required phase 0;
+verdict ALIGNED. The W==decimation contract is configuration — the
+default flip should keep the alignment probe in the launch checklist.
+
+GATES (all green on final bytes, p22_ artifacts): G1 construct OFF+ON;
+G2 flag-equivalence 48 cells — every legacy cell pins runahead "0" and
+re-passes BITWISE (OFF path byte-preserving), the new runahead family
+carries its own repeat oracle (determinism-in-mode; a run-ahead march
+is a different LEGAL schedule, so no cross-mode bitwise contract
+exists) with graph + whole-march-conditional arms bitwise and
+engagement/leak green; G3 march-equivalence PASS, iterations
+[6,25,20,24,19] UNCHANGED (the cross-build OFF certificate, covering
+the chunked-scan swap); G4 determinism OFF + ON PASS; G5 containment
+OFF + ON PASS (ON isolation judged at window edges — mid-window batch
+records are mixed-time by design; healthy worlds bitwise vs control at
+every edge, latch visible same call, frozen state held); G6 err_tol ON
+0 violations / 2880, max ratio 0.986, floor 0, dt_run_min 1.36e-3;
+G7 rest ON ok; G8 phi0 ON-vs-OFF identical TO THE DIGIT at
+rest/press/swing.
+
+MIXED-TIME ORACLE (sap_runahead_oracle_probe.py, committed — the
+decisive semantic gate; 8 worlds x 2 windows, det=1, per-world impact
+spread): (a) ISOLATION: every world's batch rows == its SINGLE-WORLD
+solo run, BITWISE, at every window edge (state + controller carries) —
+the run-ahead scheduler couples no worlds; (b) ON-vs-OFF window-edge
+committed state: positions BITWISE identical, velocities max |dqd| =
+3.7e-9 — the predicted float32 per-window-vs-per-boundary clock-rebase
+sliver class, five orders below tol; (c) engagement exact (crossings ==
+the N*(W-1)*windows structural count; max mid-window lead 2.0 ms = a
+full boundary); (d) ON repeat bitwise incl. mid-window clocks.
+Post-march dt is excluded from (a) as attempt-transient dead state
+(trailing no-op clamps zero it a schedule-dependent number of times;
+the carried controller step is ideal_dt, which IS compared).
+
+DECISIVE A/B (1024x8 seed 42, det unset, production flags, both arms on
+final bytes, p22_ab_*): trajectories track through iter 6 (per-iter
+slab counts reproduce each arm's independent replica exactly), then
+det-unset chaos splits iter 7. MATCHED WINDOW (iters 0-6, the
+wide/flail regime): slabs ON 3051 vs OFF 3249 (0.939 — little to merge
+while marches are wide), but wall/slab ON 11.62 vs OFF 8.86 ms
+(+31%): the CATCH-UP COLLIDE FIRE cost — the conditional node fires
+once per march iteration carrying >= 1 crossing, so the wide regime
+pays many masked passes per window against OFF's 4 boundary passes.
+Whole-run ms/substep ON/OFF 1.054; ON's (heavier-draw) iter-7 window
+ran 1493 slabs at 1.86 ms/substep vs OFF-late 2.5-3.7 — merged dense
+marches are cheap per unit work. Both arms exit 0, physics_diverged 0,
+no contained failures, no capture downgrades.
+
+25-ITER PLATEAU (same-bytes pair, det unset, p22_plateau_{off,on}):
+OFF 15.09 s/iter at 5533 evals/iter (2.73 ms/substep), whole run
+249.5 s; ON 12.54 s/iter at 4608 evals/iter (2.72 ms/substep), whole
+run 241.1 s. Plateau wall ON/OFF = 0.831 with the eval(=slab) axis at
+0.833 and per-substep FLAT (0.997): at the plateau the merged schedule
+costs the same per slab (narrow crossing batches make catch-up
+collides cheap) and the wall drops with the slab count — exactly the
+slab-deletion shape pass 20 priced, and the measured 12.54 lands
+inside p20's projected 11.4-12.6 s/iter band (scaled to this pair's
+heavier OFF draw: 15.09 x (1-0.197) ~ 12.1 + masked catch-up ~ 12.3-
+12.6). HONEST LIMIT: det unset means per-world accepted DEMAND is not
+observable in this telemetry (evals = 3 x batch march iterations), so
+the -16.7% slab axis is (deletion) confounded with (trajectory draw);
+the p21 det-pair trick is unavailable because ON is legally not
+bitwise vs OFF. The demand instrument (log cum accepted steps next to
+cumulative_substeps — a one-line telemetry addition, in-grant) is the
+pass-23 decisive measurement. Whole-run net: -3.4% (the wide-regime
+collide-fire cost eats most of the non-plateau win).
+
+VERDICT: landed DEFAULT OFF as directed. The lever's currency (slab
+deletion at a flat per-slab price) is measured live at the plateau;
+its early-window catch-up collide cost is real (+31%/slab in the
+matched wide window) and is the first thing pass 23 should shave
+(bounded crossing-batch throttle: hold crossed worlds parked <= k
+iterations so fires batch, trading a little merge value for far fewer
+masked passes — semantics-preserving because held worlds simply wait
+at their boundary, exactly the OFF behavior, before crossing late).
+
+PASS-23 RECOMMENDATION: (1) put the sharpened consent question to
+Marco (below) — the flip is one line and every semantic gate is green;
+(2) add the accepted-demand counter to the manager telemetry and
+re-run the plateau pair for the unconfounded deletion number;
+(3) collide-fire accounting (the _ra_adopts device counter already
+counts consumed batches — log it) and, if fires/window is large in the
+wide regime, the bounded crossing-batch throttle above; (4) micro:
+none — work-price levers stay closed per pass 21.
+Provenance: p22_final_chain.sh, p22_g1..g8 logs/JSONs, p22_oracle.log,
+sap_runahead_oracle_probe.py (committed), probe_runahead_alignment.py
+-> p22_alignment.json, p22_ab_run.sh -> p22_ab_{on,off}.*,
+p22_ab_compare.py, p22_run.sh -> p22_plateau_{off,on}.*,
+p14_plateau_analyze.py, p22_alloc_trace*.py / p22_condif_bisect*.py
+(the capture-safety forensics), p22_g5_repro.py.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -1723,14 +1902,17 @@ p21_det_run.sh -> p21_det_{on,off}.*, p14_plateau_analyze.py.
    that measurement;
    (c) per-boundary D2H readback chain: DEPRIORITIZED (pass-7
    overlap evidence, pass-18 note); (d) cross-boundary overlap of
-   independent worlds' marches: NOW THE TOP LEVER — it deletes whole
-   slabs (dispatch floor included), the only currency that pays in
-   the dispatch-bound tail. Pass-20 point price 19.7% of late-window
-   GPU at ceiling (~11.4-12.6 s/iter projected) holds ~18-20% after
-   pass-21 (straggler cost share barely moved); run-ahead
-   single-march design written (pass-20 entry), blockers (b)(c)(d)
-   resolved, mid-window-visibility consent pending with Marco —
-   pass-22 implementation target on the post-v3 bytes.
+   independent worlds' marches: BUILT pass 22 (entry above) — the
+   run-ahead single march LANDED DEFAULT OFF (NEWTON_SAP_RUNAHEAD),
+   certified both modes (isolation bitwise vs solo runs; ON-vs-OFF
+   action-edge positions bitwise). Measured ON: plateau 12.54 vs OFF
+   15.09 s/iter (-16.9%, inside the p20 projected band) at FLAT
+   per-slab price, slab axis -16.7% (det-unset demand-confounded —
+   the unconfounded split is the pass-23 measurement); wide-regime
+   catch-up collide fires cost +31%/slab in the matched early window
+   (whole-run net -3.4%). Default flip = Marco's consent (escalation
+   below); pass-23: demand counter, fire accounting, bounded
+   crossing-batch throttle.
 3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
@@ -1755,15 +1937,23 @@ without Marco).
   the current 2.75. Pass-20 arithmetic makes ~10 s reachable WITHOUT
   it (FWBD narrowing + overlap); whether estimator-semantics changes
   are on the table is still his call; nothing has been touched.
-- OVERLAP MID-WINDOW VISIBILITY (new, pass 20): the run-ahead
-  single-march design keeps per-world physics, contact anchoring and
-  estimator semantics bit-for-bit, but lets scene.update/sensor reads
-  BETWEEN boundaries see run-ahead worlds at mixed times inside one
-  action window (action-edge states stay batch-synchronized). Dead
-  reads in this task (contact-sensor rewards are latest-value at
-  action cadence, no history terms) — but it is a batch-stepping
-  semantic change and ships only with his consent + a construction-
-  time assert that no sub-action-cadence state consumer exists.
+- OVERLAP MID-WINDOW VISIBILITY (pass 20; SHARPENED pass 22 — the
+  mode is BUILT, certified and landed DEFAULT OFF; the flip is one
+  line: NEWTON_SAP_RUNAHEAD=1 with window=decimation=4, phase 0
+  measured). What Marco is consenting to, measured: mid-window
+  scene.update/sensor reads see run-ahead worlds at mixed boundary
+  times inside one action window (G6 measured ~5-6 worlds mid-flight
+  per call on the probe cadence); action-edge states stay
+  batch-synchronized and per-world physics is bit-preserved
+  (oracle: batch==solo bitwise; ON-vs-OFF edge positions bitwise,
+  velocities at the 4e-9 clock-sliver class; phi0 anchoring identical
+  to the digit; containment latches and isolates). These reads are
+  dead in this task (contact-sensor rewards are latest-value at
+  action cadence, no history terms) — that invariant is task-level
+  and should ride the flip as a launch-checklist assert. VALUE
+  ATTACHED: plateau 12.54 vs 15.09 s/iter (-16.9%, det-unset
+  demand-confounded; per-slab price flat; whole-run -3.4% until the
+  wide-regime collide-fire cost is shaved — pass-23 items).
 - TRIANGLE-PAIR CAP RIGHT-SIZE (new, unblocks 4096 det-unset + frees
   ~11 GB @1024): the task cfg authors max_triangle_pairs=192M, sized
   blind in the always-det era when the CONTACT_ID_BITS clamp silently
