@@ -81,6 +81,9 @@ import warnings
 
 import numpy as np
 import warp as wp
+
+# sys.path is configured by the package __init__ before this module is imported.
+from sim.contact_solve import _env_grid_capacity_guard
 from sim.sap_runtime import (
     SapTargetRemap,
     sap_contacts_from_newton,
@@ -88,9 +91,6 @@ from sim.sap_runtime import (
     sap_model_from_newton,
     sap_state_from_newton,
 )
-
-# sys.path is configured by the package __init__ before this module is imported.
-from sim.contact_solve import _env_grid_capacity_guard
 from sim.solver_sap import SolverSAP
 
 import newton
@@ -1180,9 +1180,7 @@ class SolverSAPAdaptive:
             # The public->SAP boundary conversion kernels write CANONICAL f64
             # SAP-order velocities; a float32 solve stack needs a staging
             # buffer between that contract and the f32 guess buffers.
-            self._guess_stage_f64 = wp.zeros(
-                int(model.joint_dof_count), dtype=wp.float64, device=device
-            )
+            self._guess_stage_f64 = wp.zeros(int(model.joint_dof_count), dtype=wp.float64, device=device)
         else:
             raise TypeError(f"Unsupported SAP velocity dtype {self._sap.contact_solve.v_flat.dtype!r}.")
         self._solve_ok = wp.ones(wc, dtype=int, device=device)
@@ -1230,7 +1228,7 @@ class SolverSAPAdaptive:
         # scatter, which stay full-width (their global atomic slot assignment
         # must see an identical thread set, else active worlds' contact-slot
         # order -- and downstream fp summation order -- could change).
-        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") == "1"
+        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") != "0"
         if self._tail_compact:
             # counts[0] = active-set size (worlds attempting a step this
             # iteration, post-boundary-clamp dt > 0). Rebuilt on device each
@@ -1386,7 +1384,7 @@ class SolverSAPAdaptive:
         # above the scene's live demand.
         _tri_pairs = int(max_triangle_pairs)
         if self._deterministic:
-            from ...geometry.contact_reduction_global import CONTACT_ID_BITS
+            from ...geometry.contact_reduction_global import CONTACT_ID_BITS  # noqa: PLC0415
 
             _tri_pairs = min(_tri_pairs, 1 << int(CONTACT_ID_BITS))
         self._pipeline = newton.CollisionPipeline(
@@ -1485,9 +1483,7 @@ class SolverSAPAdaptive:
         # per-world dt fill, v_star assembly, and the contact solve itself).
         # Only the first half solve qualifies -- the second anchors at the
         # midpoint state and keeps its own assembly.
-        self._shared_assembly = (
-            os.environ.get("NEWTON_SAP_SHARED_ASSEMBLY", "1") != "0" and self._do_doubling
-        )
+        self._shared_assembly = os.environ.get("NEWTON_SAP_SHARED_ASSEMBLY", "1") != "0" and self._do_doubling
         self._sa_execs = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Engagement counters (dim-1 increments recorded FIRST inside each
@@ -2480,8 +2476,8 @@ class SolverSAPAdaptive:
         boundary contact set (and its deterministic slot ranks) is untouched
         -- which is also what makes the optional replay exact.
         """
-        import json
-        import time
+        import json  # noqa: PLC0415
+        import time  # noqa: PLC0415
 
         cs = self._sap.contact_solve
         cj = self._sap.contact_jacobian
@@ -2646,12 +2642,12 @@ class SolverSAPAdaptive:
                 gn = np.sqrt(np.maximum(cs.grad_norm2.numpy(), 0.0))
                 pn = np.sqrt(np.maximum(cs.p_norm2.numpy(), 0.0))
                 jn = np.sqrt(np.maximum(cs.jc_norm2.numpy(), 0.0))
-                ot = float(self._sap.optimality_abs_tol) + float(self._sap.optimality_rel_tol) * np.maximum(pn, jn)
+                otol = float(self._sap.optimality_abs_tol) + float(self._sap.optimality_rel_tol) * np.maximum(pn, jn)
                 al = cs.alpha.numpy()
                 lst = cs.ls_status.numpy()
                 per_world = []
-                for w in failing:
-                    w = int(w)
+                for w_raw in failing:
+                    w = int(w_raw)
                     per_world.append(
                         {
                             "world": w,
@@ -2659,7 +2655,7 @@ class SolverSAPAdaptive:
                             "optimality_reached": int(opt[w]),
                             "newton_iterations": int(n_it[w]),
                             "grad_norm": float(gn[w]),
-                            "opt_tol": float(ot[w]),
+                            "opt_tol": float(otol[w]),
                             "alpha": float(al[w]),
                             "ls_status": int(lst[w]),
                         }
@@ -2744,7 +2740,7 @@ class SolverSAPAdaptive:
             if self._failure_dump_path is not None:
                 try:
                     self._dump_solve_failure()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     warnings.warn(
                         f"SolverSAPAdaptive: failure dump failed ({exc}).",
                         stacklevel=2,
@@ -2970,9 +2966,7 @@ class SolverSAPAdaptive:
         # err_max pins at a grid constant.
         eworld = int(err_arr.argmax())
         q_abs = np.abs(
-            self._state_cur.joint_q.numpy()[
-                eworld * self._coords_per_world : (eworld + 1) * self._coords_per_world
-            ]
+            self._state_cur.joint_q.numpy()[eworld * self._coords_per_world : (eworld + 1) * self._coords_per_world]
         )
         qmax_i = int(q_abs.argmax())
         qmax = float(q_abs[qmax_i])

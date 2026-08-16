@@ -45,8 +45,8 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, os.environ.get("SAP_WARP_PATH", str(_REPO.parent / "sap_warp")))
 
-import numpy as np
-import warp as wp
+import numpy as np  # noqa: E402
+import warp as wp  # noqa: E402
 
 wp.init()
 
@@ -139,7 +139,7 @@ def main() -> int:
             max_substeps=64,
             line_search_variant=LINE_SEARCH,
         )
-    except Exception as exc:  # noqa: BLE001 -- the probe reports, not raises
+    except Exception as exc:
         check("SolverSAPAdaptive constructs against newton 1.5", False, f"{type(exc).__name__}: {exc}")
         print("SAP-NEWTON15-CONSTRUCT: FAIL")
         return 1
@@ -167,8 +167,11 @@ def main() -> int:
                 finite_all = False
                 first_bad = first_bad or (k, name)
 
-    check(f"state finite in joint_q/joint_qd/body_q/body_qd over {K_BOUNDARIES} boundaries",
-          finite_all, f"first non-finite at {first_bad}" if first_bad else "")
+    check(
+        f"state finite in joint_q/joint_qd/body_q/body_qd over {K_BOUNDARIES} boundaries",
+        finite_all,
+        f"first non-finite at {first_bad}" if first_bad else "",
+    )
     check("collision pipeline produced rigid contacts (> 0)", ncon_max > 0, f"max count {ncon_max}")
     check("no world latched diverged", int(solver.diverged.numpy().sum()) == 0)
     check(

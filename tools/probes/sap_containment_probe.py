@@ -73,8 +73,8 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, os.environ.get("SAP_WARP_PATH", str(_REPO.parent / "sap_warp")))
 
-import numpy as np
-import warp as wp
+import numpy as np  # noqa: E402
+import warp as wp  # noqa: E402
 
 wp.init()
 

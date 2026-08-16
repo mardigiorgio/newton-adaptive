@@ -58,18 +58,21 @@ args, _ = parser.parse_known_args()
 app = AppLauncher(args).app
 
 import gymnasium as gym  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import warp as wp  # noqa: E402
-
 import isaaclab_tasks  # noqa: F401,E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402, TID253
+import warp as wp  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 
 TASK = "IsaacContrib-Lift-Spatula-Trossen-v0"
 PHASES = (
     ("rest", 40, lambda t, act: act.zero_()),
     ("press", 60, lambda t, act: (act.zero_(), act[:, 1:3].fill_(4.0), act[:, 6:].fill_(-1.0))),
-    ("swing", 60, lambda t, act: (act.zero_(), act[:, 0:3].fill_(6.0 * (1 if (t // 15) % 2 else -1)), act[:, 6:].fill_(-1.0))),
+    (
+        "swing",
+        60,
+        lambda t, act: (act.zero_(), act[:, 0:3].fill_(6.0 * (1 if (t // 15) % 2 else -1)), act[:, 6:].fill_(-1.0)),
+    ),
 )
 SAMPLE_EVERY = 10
 CAPS = (30, 120)
@@ -88,9 +91,10 @@ try:
     env = gym.make(TASK, cfg=env_cfg)
     u = env.unwrapped
 
-    from isaaclab_newton.physics.mjwarp_manager import NewtonManager  # noqa: E402
-    from newton.solvers import SolverSAPAdaptive  # noqa: E402
-    from sim.solver_sap import SolverSAP  # noqa: E402
+    from isaaclab_newton.physics.mjwarp_manager import NewtonManager
+    from sim.solver_sap import SolverSAP
+
+    from newton.solvers import SolverSAPAdaptive
 
     solver = NewtonManager._solver
     assert isinstance(solver, SolverSAPAdaptive), type(solver).__name__
@@ -106,17 +110,17 @@ try:
     states: dict[str, tuple] = {}
 
     def build_twins():
-        base_kwargs = dict(
-            max_rigid_contact=int(solver._sap.max_rigid_contact),
-            max_iterations=CAPS[0],
-            optimality_abs_tol=0.0,
-            optimality_rel_tol=UNREACHABLE_REL_TOL,
-            cost_abs_tol=0.0,
-            cost_rel_tol=0.0,
-            contact_tau_d=0.01,
-            contact_preset_variant="approx32",
-            line_search_variant=str(solver._sap.line_search_variant),
-        )
+        base_kwargs = {
+            "max_rigid_contact": int(solver._sap.max_rigid_contact),
+            "max_iterations": CAPS[0],
+            "optimality_abs_tol": 0.0,
+            "optimality_rel_tol": UNREACHABLE_REL_TOL,
+            "cost_abs_tol": 0.0,
+            "cost_rel_tol": 0.0,
+            "contact_tau_d": 0.01,
+            "contact_preset_variant": "approx32",
+            "line_search_variant": str(solver._sap.line_search_variant),
+        }
         twins["fp32"] = SolverSAP(
             solver._sap_model,
             **base_kwargs,
@@ -197,7 +201,11 @@ try:
     for name in ("fp32", "fp64"):
         for cap in CAPS:
             for arm in ("full", "half"):
-                vals = [s["rel_res"] for s in samples if s["dtype"] == name and s["cap"] == cap and s["arm"] == arm and s["engaged"]]
+                vals = [
+                    s["rel_res"]
+                    for s in samples
+                    if s["dtype"] == name and s["cap"] == cap and s["arm"] == arm and s["engaged"]
+                ]
                 if not vals:
                     continue
                 v = np.array(vals)

@@ -857,7 +857,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # identity with the full-batch path and must keep passing for this
         # default to remain ON. Read at construction; the choice is baked into
         # the captured iteration graphs.
-        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") == "1"
+        self._tail_compact = os.environ.get("NEWTON_ADAPTIVE_TAIL_COMPACT", "1") != "0"
         super().__init__(
             model,
             separate_worlds=True,

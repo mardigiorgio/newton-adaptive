@@ -151,8 +151,8 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, os.environ.get("SAP_WARP_PATH", str(_REPO.parent / "sap_warp")))
 
-import numpy as np
-import warp as wp
+import numpy as np  # noqa: E402
+import warp as wp  # noqa: E402
 
 wp.init()
 
@@ -547,9 +547,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     containment_requested = env.get("NEWTON_SAP_CONTAINMENT") == "1"
     assert solver.containment == containment_requested, f"[{name}] containment switch did not reach construction"
     shared_requested = env.get("NEWTON_SAP_SHARED_ASSEMBLY") == "1"
-    assert solver._shared_assembly == shared_requested, (
-        f"[{name}] shared-assembly switch did not reach construction"
-    )
+    assert solver._shared_assembly == shared_requested, f"[{name}] shared-assembly switch did not reach construction"
     gemm_requested = env.get("NEWTON_SAP_GEMM_RESHAPE") == "1"
     assert solver._sap.contact_solve._gemm_reshape == gemm_requested, (
         f"[{name}] gemm-reshape switch did not reach construction"
@@ -568,8 +566,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         # The narrow grid must be genuinely narrower than the batch, else the
         # wide branch is unreachable and the arm is vacuous by construction.
         assert solver.march_compact_width < N_WORLDS, (
-            f"[{name}] march-compact width {solver.march_compact_width} is not "
-            f"narrower than the world count {N_WORLDS}"
+            f"[{name}] march-compact width {solver.march_compact_width} is not narrower than the world count {N_WORLDS}"
         )
 
     records = []
@@ -625,9 +622,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             f"[{name}] whole-march conditional graph never replayed -- the tier silently never executed"
         )
     else:
-        assert solver._conditional_launches == 0, (
-            f"[{name}] conditional-march replay leaked into an OFF cell"
-        )
+        assert solver._conditional_launches == 0, f"[{name}] conditional-march replay leaked into an OFF cell"
     if containment_requested:
         # Engagement: every boundary must have marched through the contained
         # boundary kernel (the counter increments once per contained boundary).
@@ -678,8 +673,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             "routed a full-width iteration; the scene is vacuous for this flag."
         )
         assert int(solver._sap.contact_solve._env_grid_poison.numpy()[0]) == 0, (
-            f"[{name}] march-compact capacity poison latched -- a device env list "
-            "outgrew the narrow grid budget."
+            f"[{name}] march-compact capacity poison latched -- a device env list outgrew the narrow grid budget."
         )
         # Site-level engagement: the narrow body must actually contain every
         # converted list-indexed launch family this scene drives; a missing
@@ -692,8 +686,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         )
     else:
         assert (mc_narrow, mc_wide) == (0, 0), (
-            f"[{name}] march-compact branch counters advanced in an OFF cell -- "
-            "the narrow-grid path leaked."
+            f"[{name}] march-compact branch counters advanced in an OFF cell -- the narrow-grid path leaked."
         )
         assert not narrow_sites, (
             f"[{name}] list-indexed sites emitted with a narrowed grid in an "
@@ -730,8 +723,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         )
     else:
         assert sa_execs == 0, (
-            f"[{name}] shared-assembly counter advanced with the switch off -- "
-            "the reuse path leaked into an OFF cell."
+            f"[{name}] shared-assembly counter advanced with the switch off -- the reuse path leaked into an OFF cell."
         )
 
     # GEMM live-k truncation engagement: the pack increments once per skipped
@@ -819,7 +811,7 @@ def run_smoke(name: str, env: dict[str, str], z0, vz) -> dict:
     _apply_env(env)
     model, s0, s1, control, solver = fresh(z0, vz, dt_hist=False)
     is_cuda = bool(wp.get_device(model.device).is_cuda)
-    for i in range(SMOKE_WARMUP):
+    for _ in range(SMOKE_WARMUP):
         s0, s1 = solver.step_dt(DT_OUTER, s0, s1, control)
     if is_cuda:
         wp.synchronize()
@@ -896,12 +888,9 @@ def main() -> int:
             "boundary arm produced pipeline contacts": extras["boundary"]["ncon_seen"] > 0,
             "boundary arm exercised a rejection (some boundary >= 2 iterations)": bool((b_iters >= 2).any()),
             "boundary arm per-world dt diverged": any(len(np.unique(r["dt"])) > 1 for r in bref),
-            "boundary arm accepted-substep counts diverged": any(
-                len(np.unique(r["substeps_frame"])) > 1 for r in bref
-            ),
+            "boundary arm accepted-substep counts diverged": any(len(np.unique(r["substeps_frame"])) > 1 for r in bref),
             "boundary arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in bref),
-            "boundary cadence engaged (1 collide per boundary)": extras["boundary"]["collide_calls"]
-            == K_BOUNDARIES,
+            "boundary cadence engaged (1 collide per boundary)": extras["boundary"]["collide_calls"] == K_BOUNDARIES,
             "per-attempt cadence counted (2 collides per attempt, eager)": extras["reference"]["collide_calls"]
             == 2 * int(iters.sum()),
             "collision count dropped under boundary cadence": extras["boundary"]["collide_calls"]
@@ -917,9 +906,9 @@ def main() -> int:
     # Inner-solve compaction non-vacuity: heterogeneous per-env Newton
     # convergence (some trip with a partial active set) must occur in the
     # compaction arm itself.
-    guards["inner-solve compaction engaged (heterogeneous Newton convergence)"] = extras[
-        "solve-compact"
-    ]["solve_hetero_seen"]
+    guards["inner-solve compaction engaged (heterogeneous Newton convergence)"] = extras["solve-compact"][
+        "solve_hetero_seen"
+    ]
     # LS-interior compaction non-vacuity: the ON arm's device counter must
     # show compacted LS-trip lists were built nonempty and consumed (the
     # per-arm assert already enforces this; the guard surfaces it in the
@@ -939,9 +928,7 @@ def main() -> int:
     # in the tier-1 report).
     if "march-compact" in extras:
         _mc = extras["march-compact"]["mc_execs"]
-        guards["march compaction engaged (narrow and wide branches both executed)"] = (
-            _mc[0] > 0 and _mc[1] > 0
-        )
+        guards["march compaction engaged (narrow and wide branches both executed)"] = _mc[0] > 0 and _mc[1] > 0
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -961,12 +948,10 @@ def main() -> int:
 
     # --- Tier 3: feature equivalence (within each cadence family) ---------
     failed = False
-    for name, env_cell, _ in configs:
+    for name, _env_cell, _ in configs:
         if name in ("reference", "reference-repeat", "boundary", "boundary-repeat"):
             continue
-        family_ref, family = (
-            ("boundary", "boundary") if name in BOUNDARY_FAMILY else ("reference", "reference")
-        )
+        family_ref, family = ("boundary", "boundary") if name in BOUNDARY_FAMILY else ("reference", "reference")
         where = first_divergence(runs[family_ref], runs[name])
         if where is None:
             print(f"PASS[{name}]: bitwise identical to {family} over {K_BOUNDARIES} boundaries")

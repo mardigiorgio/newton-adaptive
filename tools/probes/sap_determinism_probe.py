@@ -53,21 +53,20 @@ WORKER_ENV = {
 
 
 def worker(out_path: str) -> None:
-    import argparse
+    import argparse  # noqa: PLC0415
 
-    from isaaclab.app import AppLauncher
+    from isaaclab.app import AppLauncher  # noqa: PLC0415
 
     parser = argparse.ArgumentParser()
     AppLauncher.add_app_launcher_args(parser)
     args, _ = parser.parse_known_args()
     app = AppLauncher(args).app  # noqa: F841
 
-    import gymnasium as gym
-    import numpy as np
+    import gymnasium as gym  # noqa: PLC0415
+    import isaaclab_tasks  # noqa: F401, PLC0415
+    import numpy as np  # noqa: PLC0415
     import torch
-
-    import isaaclab_tasks  # noqa: F401
-    from isaaclab_tasks.utils import parse_env_cfg
+    from isaaclab_tasks.utils import parse_env_cfg  # noqa: PLC0415
 
     torch.manual_seed(SEED)
 
@@ -75,8 +74,9 @@ def worker(out_path: str) -> None:
     env = gym.make(TASK, cfg=env_cfg)
     u = env.unwrapped
 
-    from isaaclab_newton.physics.mjwarp_manager import NewtonManager
-    from newton.solvers import SolverSAPAdaptive
+    from isaaclab_newton.physics.mjwarp_manager import NewtonManager  # noqa: PLC0415
+
+    from newton.solvers import SolverSAPAdaptive  # noqa: PLC0415
 
     solver = NewtonManager._solver
     assert isinstance(solver, SolverSAPAdaptive), type(solver).__name__
@@ -108,10 +108,7 @@ def worker(out_path: str) -> None:
         out_path,
         cum=np.array([cum], dtype=np.int64),
         fail_step=np.array([fail_step], dtype=np.int64),
-        **{
-            k: (np.stack(v) if v else np.zeros((0,), dtype=np.float32))
-            for k, v in frames.items()
-        },
+        **{k: (np.stack(v) if v else np.zeros((0,), dtype=np.float32)) for k, v in frames.items()},
     )
     env.close()
     os._exit(0)
@@ -122,7 +119,7 @@ def main() -> int:
         worker(os.environ["SAP_DET_PROBE_OUT"])
         return 0
 
-    import numpy as np
+    import numpy as np  # noqa: PLC0415
 
     scratch = tempfile.mkdtemp(prefix="sap_det_probe_")
     outs = []
@@ -134,7 +131,7 @@ def main() -> int:
         env["SAP_DET_PROBE_OUT"] = out
         log = os.path.join(scratch, f"run{run}.log")
         with open(log, "w") as lf:
-            r = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env, stdout=lf, stderr=lf)
+            r = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env, stdout=lf, stderr=lf, check=False)
         if r.returncode != 0 or not os.path.exists(out):
             print(f"FAIL: worker run {run} exited {r.returncode}; log tail:")
             print(open(log).read()[-2000:])
@@ -179,11 +176,13 @@ def main() -> int:
     if failed:
         print("SAP-DETERMINISM: FAIL")
         return 1
-    print(f"SAP-DETERMINISM: PASS ({N_ENVS} envs, {STEPS} steps, seed {SEED}, det="
-          f"{WORKER_ENV['NEWTON_SAP_DETERMINISTIC']}, ls={WORKER_ENV['NEWTON_SAP_LINE_SEARCH']}, "
-          f"ls_compact={WORKER_ENV['NEWTON_SAP_LS_COMPACT']}, "
-          f"conditional={WORKER_ENV['NEWTON_SAP_ADAPTIVE_CONDITIONAL']}, "
-          f"containment={WORKER_ENV['NEWTON_SAP_CONTAINMENT']})")
+    print(
+        f"SAP-DETERMINISM: PASS ({N_ENVS} envs, {STEPS} steps, seed {SEED}, det="
+        f"{WORKER_ENV['NEWTON_SAP_DETERMINISTIC']}, ls={WORKER_ENV['NEWTON_SAP_LINE_SEARCH']}, "
+        f"ls_compact={WORKER_ENV['NEWTON_SAP_LS_COMPACT']}, "
+        f"conditional={WORKER_ENV['NEWTON_SAP_ADAPTIVE_CONDITIONAL']}, "
+        f"containment={WORKER_ENV['NEWTON_SAP_CONTAINMENT']})"
+    )
     return 0
 
 
