@@ -2531,6 +2531,322 @@ p25_containment.log. Pre-campaign baseline: phi0_{off,on}.json
 (2026-08-15 12:07). Plateau recomputation: p23_plateau_off.log,
 p19_1024x25.log, p14_1024x25.log.
 
+## PASS 26 — ACR TANGENTIAL VERDICT + FIXED-STEP SAP ARM ENABLED
+## 2026-08-16. Closes audit R1 (measurement) and F1/F2/F5-adjacent
+## (code, in-grant only). Task/scene side untouched.
+
+Stack: newton-adaptive 6e9cb932 (march-counter-log), sap_warp 2a119d2
+(main), IsaacLab 135480c7dc (develop), all three clean at the certified
+HEADs and GPU idle (438 MiB, 0 compute apps) before the first launch.
+Every number below was measured this session on the bytes in the tree;
+the pass-25 audit's own wording was treated as folklore and re-derived
+from source before anything was built on it.
+
+### PART 1 — WHAT ACR DOES TO FRICTION. Answer: it doubles the
+### tangential regularization exactly as suspected, and that changes
+### CREEP but NOT HOLDING CAPACITY.
+
+MECHANISM, re-derived from source (not from the audit paragraph).
+`_scale_w_eff_attempt_consistent` (contact_solve.py:4881-4908, launched
+at :9198 before prepare, result rebound onto a shallow copy of the
+jacobian result at :9213) multiplies the contact Delassus argument W by
+s = D(D+tau)/(h(h+tau)). Downstream, in sap_helpers.py:2395-2416 and
+its three replicas:
+    rn_hard = beta^2/(4 pi^2) * W      -> scaled by s
+    rn_soft = 1/(h k (h + tau))        -> reads h, NOT scaled
+    rn      = max(rn_hard, rn_soft)
+    rt      = sigma * W                -> scaled by s, unconditionally
+Because rn_soft(h) already equals s*rn_soft(D) identically, rn as a
+whole equals s*rn(D) and the NORMAL law is genuinely pinned to the
+attempt dt. The tangential law is not pinned to anything: rt/rn changes
+by s wherever the compliant branch wins, which is where 89% of contacts
+sit. That ratio is not cosmetic — the projection's soft cone is
+    mu_tilde = mu*sqrt(rt/rn),   mu_hat = mu*rt/rn
+(sap_helpers.py:2436-2437) and the stick test is `yr <= mu*y.z`, i.e.
+|v_t| <= mu_hat*(vhat_n - v_n). mu_hat IS the stick/slide threshold in
+velocity space, so ACR rescales the stick region itself.
+
+MEASURED, p26_acr_{on,off}.json, 8 envs, rest/press/swing/flail,
+150,647 (ON) / 151,817 (OFF) live contact samples. s is measured per
+contact as rt/(sigma * W_unscaled) — the scale actually applied, not
+the formula re-evaluated:
+  s, ACR OFF : exactly 1.000000 at all 151,817 samples.
+  s, ACR ON  : median 2.344828, mean 2.2956, range [2.00509, 2.344828].
+  Every ON sample lies strictly inside (2,4) — the interval implied by
+  h = D/2 with tau > 0, which is an independent bound the code could
+  have violated and did not, 150,647/150,647.
+  THE AUDIT UNDERSTATED IT. The production accepted dt in
+  rest/press/swing is the FULL 1/120 s boundary (dt_attempt median
+  8.33333e-3; dt_solve median 4.16667e-3 = exactly D/2), giving
+  s = 4(D+tau)/(D+2tau) = 2.3448276 at the measured tau 0.02 — the
+  measured median to 7 significant figures. s falls toward 2.0 only
+  where flail shrinks dt (min 2.00509 <-> D ~ 1.02e-4 s).
+  R_n : median 7.944827 in BOTH arms, ratio 1.000000. The compliant
+        branch is untouched by ACR, confirming the audit's normal-
+        direction result from the R arrays themselves rather than phi0.
+  R_t : 0.0149171 (OFF) vs 0.0349781 (ON), ratio 2.3448. The OFF median
+        is sigma*W = 1e-3 * 14.9171.
+  mu_hat : 0.00179386 (OFF) vs 0.00420628 (ON), ratio 2.3448. Measured
+        mu is 1.0, so the regularized stick region is 0.18% (OFF) /
+        0.42% (ON) of the Coulomb cone: the regularization is nowhere
+        near binding in this scene, which is why doubling it is cheap.
+  CONTACT REGIME CENSUS: across rest/press/swing the stiction/sliding
+  split is IDENTICAL between arms — 2760/240, 4129/371, 5520/480 —
+  i.e. not one of 13,500 forceful contact samples changes regime. Only
+  flail differs (sliding fraction 0.33115 ON vs 0.33082 OFF), and there
+  the two trajectories have already diverged, so that is chaos, not
+  signal. Quasi-static slip speed |v_t| is 3.45e-7 (ON) vs 3.24e-7
+  (OFF) m/s at rest — five orders below anything the task can see.
+
+CONTROLLED LOAD RIG, p26_slip_{on,off}.json. Gravity tilted by theta at
+constant 1 g magnitude, arm commanded still, mug on the tabletop,
+per-env drift accumulated with the accumulator frozen at termination so
+an auto-reset teleport cannot enter the measurement. Measured mu 1.0
+(friction angle 45 deg). The design is a separation, not a level: below
+the friction angle a RIGID Coulomb contact cannot slide at all, so all
+observed drift is regularization creep and R_t governs it; above the
+friction angle the object slides against mu*N, which R_t does not enter,
+so the arms must agree there.
+  theta = 0    : drift 0 in both arms.
+  theta = 20   (well below 45): ON 7.114e-5 m / 2 s = 3.557e-5 m/s;
+                OFF 1.050e-5 m / 2 s = 5.251e-6 m/s; ratio 6.77, and
+                ON > OFF in 8/8 envs. The no-friction bound at this
+                angle is 6.71 m, so both arms sit ~1e5 below it:
+                FRICTION HOLDS IN BOTH; the difference is pure creep.
+  theta = 55/70 (above 45): ratios 0.944 / 1.010, ON > OFF in 3/8 and
+                4/8 envs — a coin flip. THE COULOMB LIMIT IS UNCHANGED.
+  theta = 35   is NOT interpretable and is not used: the mug topples
+                rather than slides (both arms drift ~0.3 m, envs hit
+                object_off_table). Toppling is a geometry threshold,
+                not a friction one.
+  THE RIG'S FIRST BUILD WAS VOID AND ITS OWN TRIPWIRE CAUGHT IT:
+  SapFreeMotion snapshots gravity into its own f64 array at
+  construction (free_motion.py:1890, _make_model_array_f64 copies
+  through numpy), so Model.set_gravity never reaches the SAP kernels and
+  drift was 0 at every angle including 60 deg. The live array must be
+  written directly. Any future pass changing gravity under SAP must do
+  the same or it will measure nothing and not notice.
+
+VERDICT (this is the deliverable). ACR default-ON IS materially
+changing the committed tangential law — 2.34x on R_t and on the soft-
+cone parameter mu_hat, at 100% of contacts, on every committed step —
+and it DOES change grasp-relevant behaviour, but only in one of the two
+channels that matter:
+  * HOLDING CAPACITY: UNCHANGED. Above the friction angle the arms
+    slide identically (0.94-1.01, 3/8 and 4/8 envs). R_t does not enter
+    the Coulomb limit, and R_n is unchanged in the compliant branch
+    where 89% of contacts live. A grasp that holds with ACR OFF holds
+    with ACR ON. The mug-lift success/failure signal is NOT compromised.
+  * SPURIOUS CREEP: ~6.8x LARGER. Under a sustained sub-Coulomb
+    tangential load a held object oozes at 36 um/s (ON) vs 5.3 um/s
+    (OFF) at a 0.34 g tangential load. Over a 5 s episode that is
+    ~180 um vs ~26 um. The task's lift threshold is 8 cm and its
+    tightest reward std is 5 cm, so the difference is ~3 orders of
+    magnitude below the decision scale.
+  * IN THE PRODUCTION PHASES IT IS INVISIBLE: identical stick/slide
+    census over 13,500 forceful samples, |v_t| ~3e-7 m/s.
+So: "is what we are running right now compromised?" — NO for grasp
+success/failure and for every metric this campaign reports; YES for
+sub-millimetre positional fidelity of a held object. ACR's DEFAULT WAS
+NOT CHANGED and must not be changed on this evidence alone: it alters
+what the estimator measures, which is comparison semantics = Marco's.
+
+RESIDUAL RISK, NAMED:
+ R1a The creep ratio (6.77) is NOT the R_t ratio (2.34). The creep
+     channel is super-linear in R_t here and this pass did not isolate
+     why; candidates are the mode-mix shift (sliding fraction 0.1028 ON
+     vs 0.1183 OFF at 20 deg) and creep feeding back into the contact
+     geometry. DIRECTION and ORDER OF MAGNITUDE are measured; the
+     exponent is not.
+ R1b The rig loads the MUG/TABLE pair, not the PAD/MUG pair. s is
+     applied identically at every contact so the mechanism transfers,
+     but W and mu at the pads differ, so absolute pad creep is not
+     measured. A scripted grasp was not attempted; pass 25 could not
+     make the pads report contact either.
+ R1c One draw per arm, 8 envs, 2 s. The 8/8 vs 3/8 split is the
+     evidence; there is no confidence interval behind it.
+ R1d Only the compliant branch was loaded. In the near-rigid 11% both
+     rt and rn scale by s, so rt/rn is ACR-invariant there — predicted
+     null, not measured.
+
+### PART 2 — THE FIXED-STEP SAP ARM NOW RUNS, AND IS FAIRER
+
+2a WRITEBACK. The brief's premise was false and this was verified by
+reading both bodies, not inferred: SolverSAPAdaptive.update_contacts
+(solver_sap_adaptive.py:2182-2185) is a documented NO-OP that ignores
+both arguments; SolverSAP.update_contacts raised NotImplementedError
+behind a 1-argument signature the frontend calls with 2. There is no
+shared sap_warp force-assembly helper either. "Mirror the twin exactly"
+therefore resolves to a signature-matched no-op, and that is what
+landed: sap_warp solver_sap.py `update_contacts(self, contacts,
+state=None) -> None`. Both arms now report the SAME quantity by the
+SAME arithmetic. MEASURED on final bytes, 360 scripted steps, both
+arms: peak |force| 0.0 and 0 non-zero steps on pad_handle_contact and
+arm_body_contact. Nothing in this task consumes those sensors (rewards
+are reach/lift/goal/fine/action_rate/joint_vel; terminations are
+time_out/dropping/off_table/speeding/robot_abnormal/physics_diverged),
+so the dead sensors are symmetric and currently inert — they become a
+live fairness defect the moment a contact-derived term is added.
+
+2b CAPACITY. mjwarp_manager now derives the per-world SAP contact
+budget ONCE, above the arm split, so both arms get
+max(cfg, min(2048, rigid_contact_max // world_count)). MEASURED at 8
+envs on final bytes: per-world budget 2048 on BOTH arms (fixed was
+128). Live demand peaked at 144 contacts in one world on the fixed arm
+during flail — ABOVE the old 128 budget, so the old fixed arm would
+have silently shed contacts in exactly the violent regime the
+comparison is about. Truncated contacts 0 on both arms; headroom 14.2x
+(fixed) / 16.5x (adaptive). TRIANGLE PAIRS NEEDED NO CHANGE: the fixed
+arm owns no pipeline, it consumes the manager's CollisionPipeline built
+from the task's authored NewtonCollisionPipelineCfg (rigid_contact_max
+8e6, max_triangle_pairs 192e6) at newton_manager.py:1919, so its
+triangle-pair budget was already scene-sized.
+
+2c ENV-VAR SURFACE. NEWTON_SAP_PRESET / NEWTON_SAP_LINE_SEARCH /
+NEWTON_SAP_SOLVE_PRECISION are now resolved once above the split and
+reach both constructors. SolverSAP takes four precision knobs where
+SolverSAPAdaptive takes one string, so the expansion is applied
+identically (fp64 passes NO overrides, preserving the default
+construction path exactly). MEASURED, both arms, final bytes:
+preset approx32, line_search armijo_decay, contact_solve_precision
+fp64, beta 1.0, sigma 1e-3, tau_d 0.02, max_iterations 30 — identical.
+
+2d IT RUNS. Invocation derived from _resolve_solver_mode, not from the
+docs: NEWTON_SAP=1 with NEWTON_SAP_ADAPTIVE unset and the task's own
+preset (backend -> sap via the env override; adaptive stays False
+because sap_adaptive is False), num_substeps left at the task default 2
+because the task's substep latch forbids 1 on a non-adaptive solver.
+  * Probe: SolverSAP constructed, 360 scripted steps across
+    rest/press/swing/flail, 0 non-finite steps, rewards finite, contact
+    sensors reported. (p26_arm_fixed.json)
+  * Training: 3 iterations at 64 envs, seed 42, through the normal
+    `isaaclab.sh train` entrypoint. Completed without raising; reward,
+    curriculum and all six termination counters logged.
+    (p26_train_fixed.log) SOLVER IDENTITY PROVEN FROM THE RUN ITSELF,
+    not assumed: params/env.yaml still records backend mujoco (the
+    known F6 hygiene defect), but _supports_cuda_graph_capture
+    (mjwarp_manager.py:697-713) returns False for a NON-adaptive solver
+    ONLY when cls._sap is True, and the fixed run's log carries that
+    eager-execution warning under --solver mujoco. So the arm was SAP.
+  * CHARACTERIZATION ONLY — 8 envs, same script, same machine,
+    sequential, ONE DRAW. THIS IS NOT THE KILLER COMPARISON AND MUST
+    NOT BE QUOTED AS ONE:
+      fixed     2 substeps/boundary          30.39 ms/step
+      adaptive  ~1.26 substeps/world-boundary 26.11 ms/step
+      (adaptive _cum_accepted 14517 over 360 x 4 x 8 = 11520
+       world-boundaries)
+      phi0 rest/press/swing: fixed -5.396e-5, adaptive -5.584e-5
+      phi0 flail:            fixed -1.824e-2, adaptive -8.919e-3
+    The fixed arm's quasi-static phi0 is IDENTICAL to the ACR-OFF
+    value, because the fixed arm has s == 1 by construction (no
+    doubling). That is a third independent confirmation of the ACR
+    mechanism, from a solver that never runs the ACR code path.
+
+### ADAPTIVE ARM: BYTE-UNCHANGED. The campaign record is intact.
+
+By construction: the SolverSAPAdaptive constructor receives
+argument-for-argument identical values — the hoisted expressions are
+character-identical to the ones they replaced and read the same inputs.
+sap_warp's only changed method is SolverSAP.update_contacts, which is
+never reached on the adaptive path (the manager calls SolverSAPAdaptive's
+own no-op). No kernel, no constant, no launch, no tolerance changed.
+By measurement: gate results below.
+
+### NEW FINDING F8 — THE TWO ARMS DO NOT SOLVE TO THE SAME TOLERANCE
+
+Measured live off both solver objects on final bytes
+(p26_arm_{fixed,adaptive}.json):
+    fixed    optimality_rel_tol 1e-06   cost_abs_tol 1e-30  cost_rel_tol 1e-15
+    adaptive optimality_rel_tol 1e-08   cost_abs_tol 0.0    cost_rel_tol 0.0
+mjwarp_manager passes neither tolerance to SolverSAP, so the fixed arm
+takes SolverSAP's own ctor defaults, while SolverSAPAdaptive pins 1e-8
+and disables the cost early-exit (solver_sap_adaptive.py:1369-1401).
+The fixed arm therefore accepts a contact-solve residual 100x looser
+and may stop on a cost plateau where the adaptive arm structurally
+cannot. This is the same class of defect as F2 and it survives this
+pass's fixes. NOT TOUCHED: optimality_rel_tol is named in the pass-25
+VALIDITY RED LINE as physics-being-demonstrated, so changing it — even
+on an arm with no campaign record — is Marco's call, not a loop's. The
+fix is one kwarg triple at the SolverSAP construction site.
+
+### GATES (full chain, final bytes, adaptive arm)
+
+All eight PASS on the final bytes, run strictly sequentially with the
+chain aborting on any non-zero exit. The whole chain took 100 s wall
+because the Warp kernel cache was warm (every module logs "(cached)");
+that is not a skipped chain — each log carries its own PASS lines.
+ G1 construct  PASS (SAP-NEWTON15-CONSTRUCT). Also re-confirms ACR
+    defaults ON with the constitutive dt wired into the contact solve.
+ G2 flag-equivalence + smoke  PASS. Every bitwise arm — acr, fusedls,
+    fusedam, fusedup, narrowv3, runahead, each in graph and conditional
+    form — bitwise identical to its reference over 6 boundaries.
+    Equivalence iterations per boundary reference [11,4,4,3,3,2] ==
+    boundary [11,4,4,3,3,2].
+ G3 march-equivalence  PASS, fingerprint [6, 25, 20, 24, 19] —
+    UNCHANGED since pass 13, which was the stop condition. compact,
+    conditional and compact+conditional all bitwise identical over 5
+    boundaries; all five guards (mjw rows injected, force-capable
+    contacts, rejection exercised, per-world dt diverged, compaction
+    tail engaged) reported ok.
+ G4 determinism  PASS, bitwise over 20 steps at 256 envs, seed 7, det=1
+    on cum / fail_step / joint_q / joint_qd / body_q / body_qd.
+ G5 containment  PASS[b] failing world 2 latched at boundary 0 with
+    state bitwise-frozen and clock pinned through boundary 29;
+    PASS[c] all 5 healthy worlds bitwise identical to control over 30
+    boundaries across 10 fields; PASS[d] strict mode raised at boundary
+    0 quoting optimality_rel_tol=1.000e-08.
+ G6 err_tol  0 violations / 2880 samples; max accepted err/tol 0.7135;
+    per-phase rest 0.0179 / press 0.6137 / swing 0.7135 — identical to
+    every recorded pass from cert_g5 onward. floor samples 0, capped
+    boundaries 0, unfinished worlds 0, dt samples below 1e-4 = 0,
+    dt_run_min 1.4649e-3 (>14x Marco's 1e-4 criterion). Rails confirmed
+    live: tol 1e-3, dt_min 1e-12, inner_rel_tol 1e-8, solve fp64,
+    contact_solve fp64.
+ G7 rest smoke  PASS, z in [0.0198, 0.0210], 0 early terminations.
+ G8 phi0  deepest -5.584e-5 and median boundary P5 -2.756e-5 in every
+    phase, with narrow-v3 ON and OFF identical to each other. THIS IS
+    THE BYTE-UNCHANGED PROOF: those are the pass-25 and pre-campaign
+    ACR-ON values to the digit (-5.584e-5 / -2.756e-5). Penetration,
+    the march fingerprint, determinism and err/tol are all exactly
+    where the campaign record left them.
+
+### WHAT STILL NEEDS MARCO
+
+ M1 F8: align the fixed arm's inner-solve tolerances with the adaptive
+    arm's (optimality_rel_tol 1e-8, cost tolerances 0.0). Red-line item;
+    one kwarg triple. Until then the fixed arm is 100x looser and any
+    "fixed fails" result is partly attributable to that, not to
+    timestepping.
+ M2 A REAL contact-force writeback. The recipe is known
+    (Contacts.force[g] = R_WC[env,slot] @ gamma[env,slot] / dt for each
+    global row with contact_input_env[g] >= 0) but it is NOT a
+    mechanical mirror: the fixed arm's Contacts comes from the manager
+    pipeline with valid geometry, while the adaptive arm's manager
+    Contacts has no geometry writer at all
+    (_needs_collision_pipeline False), so the arms would need different
+    kernels to report the same number; and on the adaptive arm the
+    committed impulse is not identifiable from last_contact_solve_result
+    (that is whichever solve ran last, possibly a discarded trial).
+    Making it identifiable is new plumbing in the estimator's
+    committed-attempt bookkeeping = red line.
+ M3 ACR default: unchanged, and this pass recommends leaving it. The
+    measured cost is sub-millimetre creep on a task whose decision
+    scale is centimetres; the measured benefit is a committed
+    constitutive law consistent with the attempt dt. If the paper's
+    claim ever depends on held-object positional fidelity, revisit.
+ M4 The task-side items from pass 25 are untouched and still block a
+    real comparison: the sap-adaptive validation latch
+    (trossen_spatula_lift_env_cfg.py:474), containment/physics_diverged
+    being adaptive-only (F5), and F6 provenance in params/env.yaml.
+
+Provenance (all p26_ prefix, no p13-p25 artifact overwritten):
+p26_acr_friction_probe.py + p26_acr_{on,off}.{json,log};
+p26_slip_probe.py + p26_slip_{on,off}.{json,log};
+p26_fixedarm_probe.py + p26_arm_{fixed,adaptive}.{json,log};
+p26_train_{fixed,adaptive}.log; p26_acr_run.sh, p26_acr_run2.sh,
+p26_run3.sh, p26_run4.sh, p26_gates.sh, p26_acr_chain.log;
+p26_g{1..8}_*.{json,log}, p26_gate_progress.txt.
+
 ## Rails (non-negotiable)
 
 optimality_rel_tol 1.0e-8 fp64 (pinned; fp32 path uses its derived
