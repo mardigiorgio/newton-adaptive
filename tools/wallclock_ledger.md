@@ -613,6 +613,93 @@ p14_profile_rig.py, p14_group_kernels.py (strict grouping — the naive
 'ls_' keyword substring-matches Warp's '__locals__' mangling),
 p14_tiny_kernels.py.
 
+## Landed: fused armijo line search (2026-08-16, loop pass 15 —
+## implements pass-14 candidate 1; sap_warp f49b20b, newton-adaptive
+## 9757f69e; the campaign's second-largest single win)
+
+NEWTON_SAP_FUSED_LS (default ON, "0" restores the launch chain
+byte-for-byte): after the alpha-max derivative accept — which keeps its
+exact launch-chain kernels — the remaining backtracking trips run inside
+ONE tiled kernel (128-thread block per env) that walks each env's alpha
+ladder in-place and exits at its own accept point. J*dv is computed once
+per Newton trip inside the same kernel, per thread over its own strided
+contact slots (reader == writer per element, no barrier); trials advance
+the contact term as vc0 + alpha*dvc and reduce the regularizer
+tile-parallel; the momentum term reuses the chain's stored quadratic
+line coefficients verbatim. Accept rule, ladder values, slop source,
+trial cap, converged-env masking and output fields are the chain's
+exactly; what differs is fp evaluation/reduction order of trial costs —
+physics-visible class, flagged, keyed into BOTH graph cache keys.
+
+MID-PASS REGRESSION ROOT-CAUSED (durable design law): the first cut
+precomputed J*dv with the monotone path's capacity-wide tiled kernel
+(one 128-thread block per (env, contact) SLOT — 1024x128 blocks/trip at
+production). Measured: that single launch = 10.81 ms/slab = 59% of the
+512-eager flail window's GPU (488 us/launch, 22.15 launches/slab), the
+fused ladder itself only 1.08 ms/slab; decisive A/B regressed ON/OFF
+per-substep to 1.581 whole-run. LAW: a per-Newton-trip helper may not
+launch capacity-wide tile grids; per-contact work at trip cadence must
+be live-bounded and barrier-free (fold it into the consumer kernel).
+The monotone-variant dvc kernel remains in-repo and is fine at ITS
+cadence but is disqualified as an armijo-trip primitive. Provenance:
+p15_ab_{on,off}.{log,telemetry}, p15_prof_flail.nsys-rep +
+p15_flail_cuda_gpu_kern_sum.csv + p15_nsys_run.log.
+
+POST-FIX PROFILE (p14 rig pattern, 512 envs eager, det unset, scoped
+cudaProfilerApi window, 673 slabs): slab GPU 7.81 ms/slab vs 13.7 on
+the pass-14 chain baseline (-43%, inside the predicted 30-50% band;
+cross-run comparison, same rig/protocol). Ladder kernel 1.12 ms/slab
+(51.6 us/launch — folding J*dv in cost +3 us). Trial-machinery groups
+collapsed vs pass-14: proj_gamma 2.64 -> 0.56, ls_chain 2.75 -> 1.10
+(alpha-max trial machinery remains), pd+limit 0.93 -> 0.11, base_cost
+0.62 -> 0.13, lists/masks 0.89 -> 0.27 ms/slab. Provenance:
+p15b_prof_flail.nsys-rep + p15b_flail_cuda_gpu_kern_sum.csv +
+p15b_nsys_run.log (grouping: p14_group_kernels.py).
+
+GATES 8/8 ON FINAL BYTES (chain p15b_progress.txt, all exit 0):
+(1) construct PASS, 225 substeps (p15_g1b_construct.log — post-fix
+bytes; first-cut construct also passed as p15_g1_construct.log).
+(2) flag-equivalence PASS all 30 arms + new fused-LS family
+(fusedls/-repeat/-graph/-conditional, variable UNSET so the default
+resolution is under test, own repeat oracle; graph + conditional replay
+the single-kernel stream bitwise); every legacy cell pins "0"; device
+ladder-env counter asserted > 0 in family cells and == 0 in every
+pinned-off cell (p15b_g2_flag_equiv.log; pre-fix run p15_g2_flag_equiv
++ p15_g2b also passed).
+(3) march-equivalence [6,25,20,24,19] exact (p15b_g3_march_equiv.log).
+(4) determinism certificate PASS, 954 substeps both workers — equal to
+the pass-13 ACR-ON stack count (p15b_g4_determinism.log).
+(5) containment PASS, 35 contained events (p15b_g5_containment.log).
+(6) err_tol 0/2880 violations, 0 floor visits, dt_run_min 1.82e-3, 0
+samples < 1e-4 (p15b_g6_err_tol.json).
+(7) rest smoke 0 early terminations (p15b_g7_rest.json).
+(8) penetration phi0 fused-OFF vs fused-ON IDENTICAL TO THE LAST DIGIT
+in every phase (deepest -5.584e-5, median P5 -2.756e-5, rest/press/
+swing; p15b_g8_phi0_{off,on}.json).
+
+DECISIVE A/B (1024x8, seed 42, production det-unset, final bytes;
+p15_ab_{on2,off2}.{log,telemetry,stamps,gpumem}, p15_ab_compare2.py):
+ms/substep (collection wall) ON 4.358 vs OFF 6.866 whole-run (0.635,
+-36.5%), late-3-window 4.018 vs 7.020 (0.572, -42.8%) — the >5%
+default-ON bar cleared by 7x. Raw walls ON 53.75 vs OFF 106.34 s
+whole-run coll (0.505), late 25.93 vs 60.49 (0.429) — trajectory-
+confounded, cite per-substep. Cumulative substeps ON 12,334 vs OFF
+15,488 (0.796; late window 0.749): demand did NOT inflate — the
+det-unset trajectories diverged with the ON arm running fewer substeps
+this seed; demand-neutrality at matched trajectories is certified by
+the det=1 rig (954 == 954) and by G8's identical penetration, not by
+this pair. physics_diverged 0 all iterations, no containment/capacity/
+overflow warnings either arm. Projected plateau: pass-14's 35.35
+s/iter was 7.25 ms/substep x ~4878 substeps; at the late-window 4.02
+ms/substep the same demand prices at ~19.6 s/iter (projection, not a
+measurement — a 25-iter plateau re-measure is the pass-16 opener).
+
+Scratchpad-provenance caveat: the p13_* gate artifacts in the
+scratchpad carry mtimes ~00:08 2026-08-16 — a prior (killed) agent
+re-ran p13_gates.sh after the pass-13 entry was written. Treat the
+ledger's pass-13 numbers, not the current p13_* files, as pass-13
+evidence.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -628,8 +715,12 @@ p14_tiny_kernels.py.
    remaining open sub-question is the 1024 plateau mix; (b) launch/
    fusion consolidation: MEASURED pass 14 (discovery subsection above)
    — tiny kernels are 84.3% of flail-slab GPU time, LS trial machinery
-   58-63%; pass-15 implements candidate 1 (fused armijo LS) and
-   candidate 2 (direction-chain consolidation); (c) per-boundary D2H readback chain
+   58-63%; pass-15 LANDED candidate 1 (fused armijo LS, entry above:
+   -36.5%/-42.8% per-substep); candidate 2 (direction-chain
+   consolidation: search_direction serial->tiled ~0.68->0.06 ms/slab
+   flagged+gated, GEMM-epilogue absorption of hessian_total+pack_dense
+   bitwise-class) remains OPEN for pass 16, alongside a fresh 25-iter
+   plateau re-measure on the fused stack; (c) per-boundary D2H readback chain
    (~48/boundary, overlapped today but serializing the march's
    conditional structure?); (d) cross-boundary overlap of independent
    worlds' marches (capture mechanics proven feasible pass 4).
