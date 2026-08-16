@@ -261,6 +261,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_FUSED_ALPHAMAX",
     "NEWTON_SAP_PACK_PERCONTACT",
     "NEWTON_SAP_FUSED_UPDATE",
+    "NEWTON_SAP_NARROW_V3",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -302,6 +303,44 @@ EXPECTED_NARROW_SITES = frozenset(
     }
 )
 
+# The narrow-v3 routing's own list-indexed sites (contact_solve side): the
+# fused update eval through the prepare list, the serial LS direction chain
+# (direction data, state init, iteration accumulate) plus its base-cost call
+# through the newton list. They may emit ONLY in narrow-v3 ON cells; any
+# appearance in a pinned-off cell is a leak.
+NARROW_V3_SITES = frozenset(
+    {
+        "fused_update",
+        "ls_search_direction",
+        "ls_init_backtracking",
+        "ls_accumulate_iters",
+    }
+)
+
+# Narrow-site families for march-compact cells running the PRODUCTION fused
+# stack (fused LS ladder + folded alpha-max + fused update eval + per-contact
+# pack): the chain-only trip sites (proj_hessian, axpy_trial_init, proj_gamma
+# / eval / model_terms_grad, proj_gamma_update) never launch there, and
+# base_cost narrows only through the v3 routing. Subset-asserted like the
+# chain set: extra emitted tags are fine, missing ones are lost plumbing.
+EXPECTED_NARROW_SITES_FUSED_STACK = frozenset(
+    {
+        "prep_copy_guess",
+        "prep_a_diag",
+        "prep_build_pd",
+        "prep_build_limit",
+        "prep_clear_pdof",
+        "prep_mark_contact_pdof",
+        "prep_mark_model_pdof",
+        "hessian_total",
+        "commit_ls",
+        "chol_factorize",
+        "chol_solve",
+        "pack_j_solve",
+    }
+)
+EXPECTED_NARROW_SITES_FUSED_STACK_V3 = EXPECTED_NARROW_SITES_FUSED_STACK | NARROW_V3_SITES | {"base_cost"}
+
 
 def _cfg(
     name: str,
@@ -322,6 +361,7 @@ def _cfg(
     alphamax: str | None = "0",
     pack: str = "0",
     fusedupdate: str | None = "0",
+    narrowv3: str | None = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -395,6 +435,15 @@ def _cfg(
     # arms.
     if fusedupdate is not None:
         env["NEWTON_SAP_FUSED_UPDATE"] = fusedupdate
+    # The narrow-v3 routing (default ON in the solver) is BITWISE class: it
+    # only changes which envs launch (list-indexed grids, world-gated
+    # scatter rows) with per-env arithmetic untouched, so unlike the fused
+    # families its ON arm is judged bitwise against a same-stack pinned-off
+    # reference. Every legacy cell pins "0" (the fixed full-width launches,
+    # byte-for-byte the pre-flag behavior); the narrow-v3 family cells pass
+    # None so the default resolution is itself under test.
+    if narrowv3 is not None:
+        env["NEWTON_SAP_NARROW_V3"] = narrowv3
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -703,6 +752,116 @@ CONFIGS = [
         alphamax=None,
         fusedupdate=None,
     ),
+    # ---- narrow-v3 family (the solver default: flag UNSET) ----
+    # The full march-compaction stack (tail + solve + LS compaction, narrow
+    # grid) with the production fused kernels at their unset defaults, under
+    # the rejection-generating law (acr="0": under the attempt-consistent
+    # law this scene accepts every attempt and the compaction machinery has
+    # nothing to engage). The v3 routing is BITWISE class -- list-indexed
+    # launches with unchanged per-env arithmetic; only de-listed envs' dead-
+    # state rewrites are skipped -- so the ON cells are judged bitwise
+    # against the same-stack pinned-off reference. Varied factors within the
+    # family: the v3 default itself, graph capture, and the whole-march
+    # conditional tier (both graph keys carry the new flag). Engagement is
+    # the narrow-site tags (contact_solve: NARROW_V3_SITES; contact_jacobian:
+    # the world-gated scatter record), asserted present here and absent in
+    # every pinned-off cell.
+    _cfg(
+        "narrowv3-ref",
+        "0",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3="0",
+    ),
+    _cfg(
+        "narrowv3-ref-repeat",
+        "0",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3="0",
+    ),
+    _cfg(
+        "narrowv3",
+        "0",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+    ),
+    _cfg(
+        "narrowv3-graph",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+    ),
+    _cfg(
+        "narrowv3-conditional",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        conditional="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -756,6 +915,15 @@ FUSEDUP_FAMILY = (
     "fusedup-repeat",
     "fusedup-graph",
     "fusedup-conditional",
+)
+
+# Arms judged bitwise against "narrowv3-ref" (the narrow-v3 routing is
+# bitwise class: list-indexed launches, unchanged per-env arithmetic).
+NARROWV3_FAMILY = (
+    "narrowv3-ref-repeat",
+    "narrowv3",
+    "narrowv3-graph",
+    "narrowv3-conditional",
 )
 
 
@@ -909,6 +1077,19 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         f"[{name}] fused-update switch did not resolve "
         f"(env {env.get('NEWTON_SAP_FUSED_UPDATE')!r} -> expected {fusedupdate_expected})"
     )
+    # Narrow-v3 routing: absent or "1" resolves ON (default-ON convention);
+    # "0" disables. Construction proof is the resolved switch on BOTH
+    # carriers (contact solve and contact jacobian); engagement is the
+    # narrow-site tags, asserted after the march below.
+    narrowv3_expected = env.get("NEWTON_SAP_NARROW_V3") != "0"
+    assert solver._sap.contact_solve._narrow_v3 == narrowv3_expected, (
+        f"[{name}] narrow-v3 switch did not resolve on the contact solve "
+        f"(env {env.get('NEWTON_SAP_NARROW_V3')!r} -> expected {narrowv3_expected})"
+    )
+    assert solver._sap.contact_jacobian._narrow_v3 == narrowv3_expected, (
+        f"[{name}] narrow-v3 switch did not resolve on the contact jacobian "
+        f"(env {env.get('NEWTON_SAP_NARROW_V3')!r} -> expected {narrowv3_expected})"
+    )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
         march_requested
@@ -1020,6 +1201,28 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     # counter (leak guard). Host reads are post-march only.
     mc_narrow, mc_wide = solver.march_compact_execs()
     narrow_sites = solver._sap.contact_solve.narrow_sites_emitted
+    jac_narrow_sites = solver._sap.contact_jacobian.narrow_sites_emitted
+    # Narrow-v3 engagement / leak guards. Contact-solve side: the v3 site
+    # tags record only under a narrowed grid, so presence is asserted in the
+    # march-narrow branch check below; absence everywhere the flag is off is
+    # asserted here. Jacobian side: the world-gated scatter records whenever
+    # a restricted (non-identity) mask reaches compute(), which tail
+    # compaction guarantees on this scene.
+    if narrowv3_expected:
+        if compact_requested:
+            assert "scatter_world_gate" in jac_narrow_sites, (
+                f"[{name}] narrow-v3 ON with a live world mask but the world-gated "
+                "scatter never recorded -- the gate does not reach the scatter."
+            )
+    else:
+        leaked = narrow_sites & NARROW_V3_SITES
+        assert not leaked, (
+            f"[{name}] narrow-v3 site(s) {sorted(leaked)} emitted with the switch off -- the v3 routing leaked."
+        )
+        assert not jac_narrow_sites, (
+            f"[{name}] world-gated scatter recorded with the switch off "
+            f"({sorted(jac_narrow_sites)}) -- the v3 routing leaked."
+        )
     if march_expected:
         assert mc_narrow > 0, (
             f"[{name}] march-compact narrow branch never executed -- no iteration "
@@ -1035,8 +1238,17 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         # Site-level engagement: the narrow body must actually contain every
         # converted list-indexed launch family this scene drives; a missing
         # tag means a converted site silently never emitted narrowed (dead
-        # branch or lost plumbing), not that the feature is off.
-        missing = EXPECTED_NARROW_SITES - narrow_sites
+        # branch or lost plumbing), not that the feature is off. The chain
+        # cells (fused update pinned off) drive the legacy trip sites; the
+        # production fused stack replaces them, with the v3 routing adding
+        # its own set on top.
+        if fusedupdate_expected:
+            expected_sites = (
+                EXPECTED_NARROW_SITES_FUSED_STACK_V3 if narrowv3_expected else EXPECTED_NARROW_SITES_FUSED_STACK
+            )
+        else:
+            expected_sites = EXPECTED_NARROW_SITES
+        missing = expected_sites - narrow_sites
         assert not missing, (
             f"[{name}] march-compact narrow body never emitted converted "
             f"site(s) {sorted(missing)} -- the narrowing does not reach them."
@@ -1057,15 +1269,20 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     # every built list was empty -- vacuous either way). Host read is
     # post-march only.
     ls_trip_env_total = int(solver._sap.contact_solve._ls_compact_trip_env_total.numpy()[0])
-    if ls_compact_requested:
+    if ls_compact_requested and not alphamax_expected:
         assert ls_trip_env_total > 0, (
             f"[{name}] LS-interior compaction never executed a compacted trip "
             "(engagement counter is zero) -- the flag is untested by this run."
         )
     else:
+        # With the folded alpha-max rung the whole per-trip trial launch
+        # chain (LS-list rebuilds included) is deleted, so the compacted
+        # LS-trip machinery legitimately never runs: a zero counter is the
+        # expected state there, and any nonzero count -- like one in an
+        # ls-compact-off cell -- is a leak.
         assert ls_trip_env_total == 0, (
-            f"[{name}] LS-compaction counter advanced with the switch off -- "
-            "the compacted path leaked into an OFF cell."
+            f"[{name}] LS-compaction counter advanced where the compacted "
+            "trip chain must not run -- the compacted path leaked."
         )
 
     # Shared-assembly engagement: the counter records once per half-1 solve
@@ -1194,6 +1411,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "conditional_launches": int(solver._conditional_launches),
         "mc_execs": (mc_narrow, mc_wide),
         "narrow_sites": sorted(narrow_sites),
+        "jac_narrow_sites": sorted(jac_narrow_sites),
         "sa_execs": sa_execs,
         "fused_ladder_envs": fused_ladder_envs,
         "fused_alphamax_envs": fused_alphamax_envs,
@@ -1437,6 +1655,23 @@ def main() -> int:
             > 0,
         }
     )
+    # Narrow-v3 family: its own contact/divergence vacuity certificate plus
+    # engagement via the emission-time site records (the per-arm asserts
+    # already hard-fail on missing sites in the march-narrow branch; the
+    # guards surface both carriers in the tier-1 report). Bitwise identity
+    # to the pinned-off reference is the family's tier-3 judgment -- the v3
+    # routing changes no arithmetic, so divergence is never a legal outcome.
+    v3ref = runs["narrowv3"]
+    guards.update(
+        {
+            "narrowv3 arm produced pipeline contacts": extras["narrowv3"]["ncon_seen"] > 0,
+            "narrowv3 arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in v3ref),
+            "narrow-v3 solve sites engaged (all v3 tags emitted narrowed)": NARROW_V3_SITES
+            <= set(extras["narrowv3"]["narrow_sites"]),
+            "narrow-v3 scatter gate engaged (world-gated scatter recorded)": "scatter_world_gate"
+            in extras["narrowv3"]["jac_narrow_sites"],
+        }
+    )
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -1453,6 +1688,7 @@ def main() -> int:
         ("fusedls", "fusedls-repeat"),
         ("fusedam", "fusedam-repeat"),
         ("fusedup", "fusedup-repeat"),
+        ("narrowv3-ref", "narrowv3-ref-repeat"),
     ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
@@ -1477,6 +1713,8 @@ def main() -> int:
             "fusedam-repeat",
             "fusedup",
             "fusedup-repeat",
+            "narrowv3-ref",
+            "narrowv3-ref-repeat",
         ):
             continue
         if name in BOUNDARY_FAMILY:
@@ -1489,6 +1727,8 @@ def main() -> int:
             family = "fusedam"
         elif name in FUSEDUP_FAMILY:
             family = "fusedup"
+        elif name in NARROWV3_FAMILY:
+            family = "narrowv3-ref"
         else:
             family = "reference"
         where = first_divergence(runs[family], runs[name])

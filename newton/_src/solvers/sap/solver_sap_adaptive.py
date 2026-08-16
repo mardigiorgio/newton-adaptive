@@ -1908,8 +1908,10 @@ class SolverSAPAdaptive:
         records its engagement counter FIRST (execution proof for the
         tripwires) and then the branch-capacity guard re-checking the routing
         invariant on device. Everything mask-gated or full-width-by-design
-        (the solve's status/init kernels, collision, the contact scatter, the
-        v-guess copies/averages) emits identically in both branches.
+        (the solve's status/init kernels, collision, the world-gated contact
+        scatter, the v-guess copies/averages) emits identically in both
+        branches: any restriction there comes from the mask VALUES read per
+        replay, not from branch structure.
         """
         n = self._world_count
         dev = self.model.device
@@ -2293,6 +2295,14 @@ class SolverSAPAdaptive:
             # hessian projection, so the flag selects a different launch
             # stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_update", False)),
+            # The narrow-v3 routing swaps the full-width trip-cadence
+            # kernels for their list-indexed launches (fused update via the
+            # prepare list, the serial LS direction/init/accumulate chain
+            # via the newton list, the world-gated contact scatter), so the
+            # flag selects a different launch stream inside the captured
+            # solves.
+            bool(getattr(self._sap.contact_solve, "_narrow_v3", False)),
+            bool(getattr(self._sap.contact_jacobian, "_narrow_v3", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
@@ -2402,6 +2412,14 @@ class SolverSAPAdaptive:
             # hessian projection, so the flag selects a different launch
             # stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_update", False)),
+            # The narrow-v3 routing swaps the full-width trip-cadence
+            # kernels for their list-indexed launches (fused update via the
+            # prepare list, the serial LS direction/init/accumulate chain
+            # via the newton list, the world-gated contact scatter), so the
+            # flag selects a different launch stream inside the captured
+            # solves.
+            bool(getattr(self._sap.contact_solve, "_narrow_v3", False)),
+            bool(getattr(self._sap.contact_jacobian, "_narrow_v3", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
