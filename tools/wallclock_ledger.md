@@ -16,18 +16,22 @@ excluded: task/scene files (tri-pair cap fixed manager-side instead), tol
 1e-3 and the step-doubling estimator (comparison semantics), optimality
 1e-8, dt floor 1e-12 (rails). Physics-visible solver changes may now land
 DEFAULT ON after full invariant gates (OFF escape hatch retained).
-10 s/iter @1024 = 3.5x below the current 35.35 plateau (pass-14
-re-measure; was 4.0x vs the pass-9 40.78); the percent-scale backlog
-cannot reach it — structural levers must be found and measured.
+10 s/iter @1024 = 1.9x below the current 18.98 plateau (pass-16
+re-measure on the fused-LS stack; was 3.5x vs the pass-14 35.35, 4.0x
+vs the pass-9 40.78); the identified pass-17 levers (ladder alpha-max
+fold + pack rewrite + update-eval fusion, ceilings in the pass-16
+entry) project to ~13-15 s/iter — 10 s still needs one further
+factor-scale find beyond them.
 
 ## Objective
 
 Make a 4000-iteration training feasible. Primary metric: projected 4k-iter
 wall from measured plateau curves at 1024 and 4096 envs. Reference points:
 MuJoCo-adaptive plateau ~5.1 s/iter @1024 (4k ≈ 5.7 h); SAP-adaptive
-CURRENT plateau 35.35 s/iter @1024 det-unset (pass-14 re-measure on the
-ACR-default stack, 4k ≈ 39.3 h); prior points kept for scale: 40.78
-(pass 9, pre-ACR-default, 2026-08-15 late), ~78 (pre-campaign, det ON,
+CURRENT plateau 18.98 s/iter @1024 det-unset (pass-16 re-measure on the
+fused-LS stack, 4k ≈ 21.1 h); prior points kept for scale: 35.35
+(pass 14, ACR-default pre-fused-LS, 2026-08-16), 40.78 (pass 9,
+pre-ACR-default, 2026-08-15 late), ~78 (pre-campaign, det ON,
 2026-08-15 morning). dt healthy band: Marco
 accepts any demand profile with dt ≥ 1e-4 across worlds (measured
 equilibrium 1.2–1.5e-3 — criterion met with margin; demand axis is NOT
@@ -310,19 +314,23 @@ x1.95 at it9; ms/substep 47.7 -> 19.3-20.6 late. Peak 26,570 MiB.
 stack: ms/substep 8.9-9.0 (det=1) vs 8.21 (det-unset) ~ +8.5%.
 
 FEASIBILITY TABLE (4000 iterations; plateau x 4000; assumptions stated;
-"SAP NOW" refreshed by the pass-14 re-measure on the ACR-default stack):
+"SAP NOW" refreshed by the pass-16 re-measure on the fused-LS stack):
 - MuJoCo-adaptive @1024: 5.1 s/iter -> 5.7 h (ledger provenance).
 - SAP pre-campaign @1024 det-ON: 78 -> 86.7 h (historical).
-- SAP NOW @1024 det-unset: 35.35 measured plateau (pass 14) -> 39.3 h;
-  2000-iter ~ 19.6 h.
+- SAP NOW @1024 det-unset: 18.98 measured plateau (pass 16, fused-LS
+  stack) -> 21.1 h; 2000-iter ~ 10.5 h.
+- SAP pass-14 @1024 det-unset (2026-08-16, ACR-default pre-fused-LS,
+  kept dated for scale): 35.35 -> 39.3 h; 2000-iter ~ 19.6 h.
 - SAP pass-9 @1024 det-unset (2026-08-15 late, pre-ACR-default, kept
   dated for scale): 40.78 -> 45.3 h; 2000-iter ~ 22.6 h.
-- SAP NOW @1024 det=1: ~38.5 est (35.35 x 1.088 pass-9 det tax,
-  unremeasured this pass) -> ~42.7 h.
-- SAP @4096 det=1 (pass-9 basis, not re-measured): plateau PROJECTED
-  ~174 s/iter -> ~193 h; det-unset blocked by the tri-pair OOM, then
-  est ~159 -> ~177 h. 4096-at-4k remains infeasible on this card
-  regardless of the OOM fix; 1024 is the trainable scale point.
+- SAP NOW @1024 det=1: ~20.7 est (18.98 x 1.088 pass-9 det tax,
+  unremeasured since pass 9) -> ~22.9 h.
+- SAP @4096 det=1 (projection on projection, LOW confidence: the
+  pass-9 ~174 s/iter projected plateau scaled by the measured 1024
+  price ratio p16/p9 = 0.465): ~81 s/iter -> ~90 h; det-unset blocked
+  by the tri-pair OOM, then est ~74 -> ~82 h. 4096-at-4k remains
+  infeasible on this card regardless of the OOM fix; 1024 is the
+  trainable scale point.
 
 POST-GEMM KERNEL RE-PROFILE (2026-08-15, loop pass 10 — measurement only,
 repos untouched; re-ranks the remaining backlog and closes two items):
@@ -721,6 +729,147 @@ measured 0.086 ms/slab on the p15b trace = ~1% class. Full diffs
 preserved at p15_tiled_direction_{sapwarp,newton}.patch; restoration
 proof p15_g1c_restore.log (construct PASS on the reverted trees).
 
+## Plateau re-measure on the fused-LS stack (2026-08-16, loop pass 16
+## — MEASUREMENT ONLY, zero solver edits; supersedes the pass-14
+## headline)
+
+Rig: exact pass-14 replica (p16_run.sh = p14_run.sh byte-for-byte
+except the file prefix; diff-under-rename verified): 1024 envs x 25
+iters, seed 42, production flags (env clean of all NEWTON_SAP_*
+overrides, det unset), stack = certified HEADs newton-adaptive
+0a976d22 / sap_warp f49b20b / IsaacLab b98f247a13.
+- PLATEAU (iters 19-24) mean 18.98 s/iter vs pass-14 35.35 = -46.3%
+  (vs pass-9 40.78 = -53.5%). Walls it0 5.61 -> it24 19.74; window
+  17.98..19.74 with a mild residual slope (~+0.3/iter), same shape as
+  the p9/p14 windows.
+- Substeps/iter (window) 5050 vs pass-14 4878 = +3.5% — plateau
+  DEMAND is unchanged by the fused ladder within trajectory noise;
+  the pass-15 demand-neutrality certificates (det=1 954==954, phi0
+  identical) stand.
+- ms/substep (window) 3.76 vs pass-14 7.25 = -48.1% (ratio 0.519; vs
+  pass-9 8.20 = 0.458) — the pass-15 A/B's late-window -42.8%
+  CONFIRMED at the 25-iter plateau; the pass-15 projection (~19.6
+  s/iter) was conservative by 0.6 s.
+- Whole-run: 344.3 s wall, cumulative substeps 89,115 vs p14 91,689
+  (-2.8%; det-unset trajectories diverge — cite the window numbers).
+- Sanity: physics_diverged 0, containment/capacity/overflow warnings
+  0, dt equilibrium 1.0-1.6e-3 (healthy band), GPU peak 20,428 MiB
+  (p14 20,430 — footprint unchanged).
+- Campaign total at the plateau: 78 (pre-campaign) -> 18.98 = 4.1x;
+  price 8.20 (pass 9) -> 3.76 ms/substep in seven passes.
+Provenance: p16_run.sh, p16_1024x25.{log,telemetry,gpumem,stamps},
+p14_plateau_analyze.py (same arithmetic both runs — no method skew).
+
+## PASS-16 DISCOVERY — post-fusion next-lever map (2026-08-16,
+## measurement only; mined from the EXISTING p15b trace, no fresh
+## profile — 673 slabs, 512 eager, scoped cudaProfilerApi window)
+
+Method: p16_group_kernels.py = the p14 strict grouping extended with a
+fused_ladder group + the post-fusion names the p14 set left ungrouped
+(ACR a_inv scales, fp32 articulation pack/unpack, participating-dofs,
+march/controller singles); UNGROUPED now 0.1%. Same script re-run on
+the p14 CSV (730 slabs) so deltas carry no method skew. Slab GPU 7.81
+ms (p14 13.7); trips/slab 21.76 (p14 21.68 — trip structure
+untouched, as designed).
+
+Ranked groups (ms/slab, % of 7.81): gemm_pack 1.58 (20.2),
+fused_ladder 1.12 (14.4), ls_chain residual 1.10 (14.1),
+free_motion_assembly 0.66 (8.4), proj_gamma 0.56 (7.1), solve_prep
+0.39 (5.0), gemm_tile 0.37 (4.7), collision 0.33 (4.2, closed),
+impulse_assembly 0.31 (4.0), cholesky 0.28 (3.6), lists/masks 0.27
+(3.4), proj_hessian 0.23 (2.9), grad_update 0.17 (2.2), base_cost
+0.13 (1.6), pd_limit 0.11 (1.4). Deltas vs p14 confirm the fusion
+did what it claimed: proj_gamma 2.64->0.56, ls_chain 2.75->1.10,
+impulse 1.37->0.31, pd_limit 0.93->0.11, base_cost 0.62->0.13,
+lists 0.89->0.27, grad_update 0.61->0.17; gemm_pack 1.48->1.58
+(cross-run noise, launches/slab equal).
+
+MECHANISMS (launch-count attribution at 21.76 trips/slab):
+(1) ALPHA-MAX TRIAL MACHINERY = 1.10 ms/slab = 14.1% CROSS-GROUP: the
+alpha_max derivative-accept trial still runs the full launch chain
+once per Newton trip — axpy 0.030 + trial base_cost 0.064 + trial
+proj_gamma 0.261 + pd+limit 0.108 + trial impulse 0.146 +
+acc_pd/limit 0.055 + replace_trial_cost 0.146 + line_derivative
+0.097 + accept 0.038 + init_backtracking 0.039 + LS list rebuilds
+~0.113 (contact_solve.py:6494-6604 in _run_sap_backtracking). Its
+trial_* array round-trips exist ONLY to feed the chain's derivative
+kernel (:2713: dp.(v_trial-v_star) - dv.impulse).
+(2) ls_chain residual decomposes as search_direction 0.69 (the serial
+kernel — production-REFUTED as a lever, pass-15c measured ~1%; the
+512-eager window overweights it) + the (1) members in-group 0.41.
+(3) gemm_pack is a per-trip layout transform that REWRITES THE
+TRIP-INVARIANT OPERAND EVERY TRIP: j_flat is a pure repack of J
+(fixed within a solve; :1633-1689) yet is rebuilt all 21.76
+trips/slab, and each jac element is read ~10/3x redundantly across a
+contact's three rows (per (c,d): 1 j-read + 9 gj-reads of 3 distinct
+values). Pack runs 72.7 us/launch vs the GEMM's 16.8 — the pair's
+cost is the pack's scattered fp64 reads, not the multiply.
+(4) UPDATE-EVAL CHAIN = 0.85 ms/slab at ~1.14/trip cadence: update
+proj_gamma 0.297 + update impulse 0.166 + assemble_model_terms_and_
+grad 0.181 + norm_terms_and_update 0.119 + rebuild share ~0.09; PLUS
+proj_hessian 0.226 re-projects the SAME committed point at the next
+trip's start — a whole projection pass duplicated per trip.
+(5) Fixed per-solve work now visible: eval_rigid_id 0.219 at 2/slab
+(shared-assembly cadence holds: full+half2 only), solve_prep 0.39,
+cholesky 0.28, gemm_tile 0.37 — near-floor, no single target.
+
+MUJOCO GAP DECOMPOSITION REFRESH: production price is now 3.76
+ms/substep vs the MJC-adaptive 1.5 ms/slab reference = 2.5x residual
+(was 9.8x). Both solvers march the SAME 3-solve step-doubling
+estimator, so the 3-solve structure explains NONE of the residual —
+it is per-solve implementation price. Pass-13's Newton-budget
+measurement (5.24 iters/attempt vs 2.27 full-only = estimator
+marginal 2.3x) says a hypothetical single-solve SAP would price at
+~1.6 ms/substep ~ the MJC reference — i.e. the estimator rail is
+where the LAST 2.3x lives, and everything short of it is percent
+levers: the map above totals ~35% of slab in honest ceilings.
+
+PASS-17 RECOMMENDATION (two levers, one physics-visible + one
+bitwise):
+A. FOLD THE ALPHA-MAX RUNG INTO THE FUSED LADDER (primary, ~11-13%
+of flail slab): make the ladder's rung 0 evaluate alpha_max with the
+derivative accept rule in-kernel, deleting the (1) launch block
+(~11-12 launches/trip + trial_* round-trips). Existence proof: the
+ladder kernel ALREADY takes every constitutive input the trial eval
+uses (:3132-3186 — phi0/w_eff/mu/k/tau_d/pd/limit arrays) and
+evaluates full trial costs per rung; the derivative it needs is
+analytic along the ray: (dell_a0 + a*d2ell_a) - sum gamma(vc0 +
+a*dvc).dvc - pd/limit terms, from data already in-kernel. Accept
+rule to reproduce EXACTLY (:3380): accept iff dl/da < 0 or dl/da <
+(rel_slop/10)*max(1, 0.5(|ell|+|ell0|)); the ell_slop write moves
+in-kernel (fp64 compared quantities — pass-2 slop law satisfied by
+construction). Chain derivative (:2713) vs analytic derivative
+differ in trailing fp digits -> physics-visible class, same as
+pass-15: default-ON flag ("0" = current alpha-max chain), BOTH graph
+keys, full 8-gate chain + phi0 + decisive A/B. Ceiling: delete 1.10,
+add ~0.1-0.2 in-ladder -> net ~0.9-1.0 ms/slab.
+B. GEMM-PACK SHARED-TILE REWRITE + J-SIDE HOIST (bitwise, ~10-14%):
+(i) stage jac tiles once in shared memory so each element is read
+once not 10/3x, keeping the per-element gj arithmetic order verbatim
+-> identical operand bytes = bitwise arm + engagement counter;
+(ii) hoist the j_flat half to per-solve cadence (J fixed within a
+solve — assert-probe this invariant FIRST; count_live fixed per
+attempt). Ceiling: pack 1.58 -> ~0.6-0.8.
+C (measure-first, next in line, ~8%): fuse the update-eval chain into
+one tiled kernel that also emits G, absorbing proj_hessian's
+duplicate projection ((4) above; ~1.07 ms/slab of chain, in-kernel
+replacement ~0.3-0.4).
+Combined A+B honest ceiling ~20-25% of slab -> production ~2.9-3.0
+ms/substep -> plateau ~14.6-15.2 s/iter; with C ~13.5. The 10 s goal
+needs all three PLUS one further ~20% find (candidates: backlog 2c
+readback chain, 2d cross-boundary overlap, prep/free-motion
+consolidation) — or it is estimator-structure territory (rail).
+Caveats: 512-eager saturated-flail window; trip-cadence shares are
+regime-dependent (search_direction already proved the window can
+overweight a kernel 8x vs production); no speedup promised beyond
+the stated bounds; production translation history: pass-15 predicted
+30-50%, landed 36.5-42.8%.
+Provenance: p16_group_kernels.py, p16_p15b_grouped.txt,
+p16_p14_regrouped.txt (same-method p14 re-run), p15b_prof_flail.
+{nsys-rep,sqlite} + p15b_flail_cuda_gpu_kern_sum.csv (trace mined,
+not re-profiled), source anchors sap_warp sim/contact_solve.py at
+f49b20b.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -741,8 +890,10 @@ proof p15_g1c_restore.log (construct PASS on the reverted trees).
    consolidation) is CLOSED same pass — tiled search_direction measured
    ~1% at production and was reverted, GEMM-epilogue absorption
    foreclosed at ~1% class (closure paragraph in the pass-15 entry).
-   Pass-16 opener: fresh 25-iter plateau re-measure on the fused
-   stack; (c) per-boundary D2H readback chain
+   Pass-16 DONE: plateau 18.98 s/iter / 3.76 ms/substep measured;
+   next-lever map + pass-17 recommendation (ladder alpha-max fold,
+   bitwise pack rewrite, update-eval fusion) in the pass-16 entry;
+   (c) per-boundary D2H readback chain
    (~48/boundary, overlapped today but serializing the march's
    conditional structure?); (d) cross-boundary overlap of independent
    worlds' marches (capture mechanics proven feasible pass 4).
