@@ -5,6 +5,19 @@ here carries provenance (log path or run dir); entries without provenance are
 folklore — re-measure before building on them. The loop updates this file
 every pass; Marco redirects the loop by editing it.
 
+## Marco's grant (2026-08-15 late): ALL SOLVER CHANGES AUTHORIZED
+
+"go ahead with all permissions to make any and all changes to the solver.
+40s is unacceptable." Scope: solver + physics-layer plumbing (sap_warp,
+newton-adaptive solvers, mjwarp_manager). Still excluded: task/scene files
+(tri-pair cap fixed manager-side instead), tol 1e-3 and the step-doubling
+estimator (comparison semantics), optimality 1e-8, dt floor 1e-12 (rails).
+Physics-visible solver changes may now land DEFAULT ON after full invariant
+gates (OFF escape hatch retained). Re-ranked: 1) tf32-Hessian GEMM default
+ON (~10-14% plateau bound), 2) manager-side tri-pair sane cap (fixes 4096
+det-unset OOM), 3) ACR default ON (ramp -11%), 4) remaining full-width
+launches, 5) plateau re-measure + fresh table.
+
 ## Objective
 
 Make a 4000-iteration training feasible. Primary metric: projected 4k-iter
