@@ -16,17 +16,19 @@ excluded: task/scene files (tri-pair cap fixed manager-side instead), tol
 1e-3 and the step-doubling estimator (comparison semantics), optimality
 1e-8, dt floor 1e-12 (rails). Physics-visible solver changes may now land
 DEFAULT ON after full invariant gates (OFF escape hatch retained).
-10 s/iter @1024 = 4.0x below the current 40.78 plateau; the percent-scale
-backlog cannot reach it — structural levers must be found and measured.
+10 s/iter @1024 = 3.5x below the current 35.35 plateau (pass-14
+re-measure; was 4.0x vs the pass-9 40.78); the percent-scale backlog
+cannot reach it — structural levers must be found and measured.
 
 ## Objective
 
 Make a 4000-iteration training feasible. Primary metric: projected 4k-iter
-wall from measured plateau curves at 1024 and 4096 envs. Reference points
-(pass-9 re-measure, 2026-08-15 late): MuJoCo-adaptive plateau ~5.1 s/iter
-@1024 (4k ≈ 5.7 h); SAP-adaptive CURRENT plateau 40.8 s/iter @1024
-det-unset (4k ≈ 45.3 h); historical pre-campaign plateau was ~78 (dated
-2026-08-15 morning, det ON — kept for scale). dt healthy band: Marco
+wall from measured plateau curves at 1024 and 4096 envs. Reference points:
+MuJoCo-adaptive plateau ~5.1 s/iter @1024 (4k ≈ 5.7 h); SAP-adaptive
+CURRENT plateau 35.35 s/iter @1024 det-unset (pass-14 re-measure on the
+ACR-default stack, 4k ≈ 39.3 h); prior points kept for scale: 40.78
+(pass 9, pre-ACR-default, 2026-08-15 late), ~78 (pre-campaign, det ON,
+2026-08-15 morning). dt healthy band: Marco
 accepts any demand profile with dt ≥ 1e-4 across worlds (measured
 equilibrium 1.2–1.5e-3 — criterion met with margin; demand axis is NOT
 the fight).
@@ -307,18 +309,20 @@ x1.95 at it9; ms/substep 47.7 -> 19.3-20.6 late. Peak 26,570 MiB.
 (x1.74 late); walls 8.51..34.01 vs 16.12..59.01. Fresh det tax on the new
 stack: ms/substep 8.9-9.0 (det=1) vs 8.21 (det-unset) ~ +8.5%.
 
-FEASIBILITY TABLE (4000 iterations; plateau x 4000; assumptions stated):
+FEASIBILITY TABLE (4000 iterations; plateau x 4000; assumptions stated;
+"SAP NOW" refreshed by the pass-14 re-measure on the ACR-default stack):
 - MuJoCo-adaptive @1024: 5.1 s/iter -> 5.7 h (ledger provenance).
 - SAP pre-campaign @1024 det-ON: 78 -> 86.7 h (historical).
-- SAP NOW @1024 det-unset: 40.78 measured plateau -> 45.3 h.
-- SAP NOW @1024 det=1: ~44.4 est (40.78 x 1.088 tax) -> ~49 h.
-- SAP NOW @4096 det=1: plateau PROJECTED ~174 s/iter (substep saturation
-  multiplier 1.554 from the fresh 1024 curve applied to it9 subs 5596,
-  x ~20 ms/sub) -> ~193 h. Window ends still rising; projection.
-- SAP NOW @4096 det-unset: blocked by the OOM until the tri-pair cap is
-  right-sized; then est ~159 s/iter (174 x 0.915) -> ~177 h.
-2000-iter @1024 det-unset ~ 22.6 h. 4096-at-4k remains infeasible on this
-card regardless of the OOM fix; 1024 is the trainable scale point.
+- SAP NOW @1024 det-unset: 35.35 measured plateau (pass 14) -> 39.3 h;
+  2000-iter ~ 19.6 h.
+- SAP pass-9 @1024 det-unset (2026-08-15 late, pre-ACR-default, kept
+  dated for scale): 40.78 -> 45.3 h; 2000-iter ~ 22.6 h.
+- SAP NOW @1024 det=1: ~38.5 est (35.35 x 1.088 pass-9 det tax,
+  unremeasured this pass) -> ~42.7 h.
+- SAP @4096 det=1 (pass-9 basis, not re-measured): plateau PROJECTED
+  ~174 s/iter -> ~193 h; det-unset blocked by the tri-pair OOM, then
+  est ~159 -> ~177 h. 4096-at-4k remains infeasible on this card
+  regardless of the OOM fix; 1024 is the trainable scale point.
 
 POST-GEMM KERNEL RE-PROFILE (2026-08-15, loop pass 10 — measurement only,
 repos untouched; re-ranks the remaining backlog and closes two items):
@@ -493,6 +497,122 @@ semantics — EXCLUDED rail). Caveats: 512-env eager rig, demand
 counts not wall; the 1024 plateau regime mix is unmeasured.
 Provenance: p13_newton_budget.{json,log}, p13_newton_budget_probe.py.
 
+## Plateau re-measure on the ACR-default stack (2026-08-16, loop pass 14
+## — MEASUREMENT ONLY, zero solver edits; supersedes the pass-9 headline)
+
+Rig: exact pass-9 replica (p14_run.sh = p9_run.sh byte-for-byte except
+the file prefix): 1024 envs x 25 iters, seed 42, production flags (env
+clean of all NEWTON_SAP_* overrides, det unset), W&B/video off, stack =
+certified HEADs newton-adaptive 44d6c49f / sap_warp 27dcada / IsaacLab
+b98f247a13.
+- PLATEAU (iters 19-24) mean 35.35 s/iter vs pass-9 40.78 = -13.3%.
+  Walls it0 6.92 -> it24 36.20; window flat (34.12..36.20, no residual
+  slope).
+- Substeps/iter (window) 4878 vs 4972 = -1.9% — plateau DEMAND is
+  unchanged by the ACR default; the prior "advantage ~0 at violent
+  plateau" claim was demand-only and stands.
+- ms/substep (window) 7.25 vs 8.20 = -11.6% — the win at plateau is
+  per-substep PRICE (fewer rejected-attempt evals per accepted substep),
+  matching the pass-13 late-window A/B (-13.4%).
+- Whole-run: 654.6 s wall, cumulative substeps 91,689 vs p9 83,889
+  (+9.3%; det-unset trajectories diverge — cite the window numbers, not
+  whole-run walls).
+- Sanity: physics_diverged 0, containment/capacity warnings 0, dt
+  equilibrium 1.1-1.6e-3 (healthy band), GPU peak 20,430 MiB (p9
+  20,398 — footprint unchanged).
+Provenance: p14_run.sh, p14_1024x25.{log,telemetry,gpumem,stamps},
+p14_plateau_analyze.py (re-derives the p9 numbers 40.78/4972/8.20 from
+the p9 raw files with the same arithmetic — no method skew).
+
+## PASS-14 DISCOVERY — fusion-target map of the per-solve kernel chain
+## (2026-08-16, measurement only; the structural lever for the 10 s goal)
+
+METHOD FIX FIRST (invalidates part of pass-6/10): both historical eager
+nsys traces stopped collecting at ~64.8K kernel records (64,793 and
+64,794 — a record cap), i.e. they captured the first ~6-7 s of each run
+= startup/warmup, NOT the flail regime; their per-slab denominators and
+the pass-10 "flat, no group >21%" ranking are window artifacts. Pass 14
+scopes collection with --capture-range=cudaProfilerApi around a
+saturated window: scripted rig (p14_profile_rig.py, pass-6 pattern) at
+512 envs, GRAPH=0 eager, det unset, warmup+press+40 flail steps
+UNPROFILED, then 20 profiled flail steps = 730 slabs (9.1
+slabs/boundary), window read at the profiler-range edges.
+
+THE SLAB IS A LAUNCH POPULATION, NOT A KERNEL LIST: 3,777 launches and
+13.7 GPU-ms per slab; kernels under 50 us are 99.6% of launches and
+84.3% of GPU time (<100 us: 87.2%). Per pass-7 the training wall is
+GPU-busy, so these kernel DURATIONS (dominated by per-launch fixed
+cost at tiny grids) are the cost structure itself; graphs already
+erase the launch gaps.
+
+BATCH-MAX TRIP STRUCTURE (the multiplier pass-13's per-env means hid):
+the launch stream pays the batch-MAX iteration counts, not the mean —
+21.7 Newton trips/slab (vs ~5.5 per-env mean across the 3 solves) and
+194.4 LS trial evals/slab = ~9.0 ladder trials per trip (vs 2.3-3.0
+per-env mean); converged envs ride every launch masked.
+
+Ranked groups (ms/slab, % of 13.7): LS-chain bookkeeping 2.75 (20.0),
+proj_gamma evals 2.64 (19.2), gemm_pack 1.48 (10.8), contact-impulse
+J^T-gamma 1.37 (10.0), pd+limit evals 0.93 (6.8), lists/masks/counters
+0.89 (6.5 — 1,061 launches/slab at ~0.8 us each), free-motion 0.64,
+base_cost 0.62, grad/impulse-accum 0.61, prep/data-motion 0.40,
+gemm_tile 0.38, collision 0.31, Cholesky 0.28, proj_hessian 0.22,
+hessian_total+pack_dense+unpack 0.12, ACR scales 0.03.
+
+CHAIN STRUCTURE (in-trace sequence = source map, contact_solve.py): per
+Newton trip: proj_hessian -> gemm_pack -> gemm_tile -> hessian_total ->
+pack_dense -> chol_factorize -> chol_solve -> unpack ->
+search_direction (SERIAL per-env kernel, 27-31 us at grid 2!) ->
+base_cost -> init_backtracking -> list rebuild; then PER LS TRIAL
+(~14 launches, ~43 GPU-us): scale_alpha -> axpy -> base_cost ->
+proj_gamma (12-14 us) -> pd -> limit -> impulse (6-8 us) -> acc_pd ->
+acc_limit -> replace_trial_cost (serial, 4.8-5.7 us) -> update/accept
+-> 3-launch list rebuild; then accumulate_ls -> commit; then the
+update eval: proj_gamma -> impulse -> model_terms_grad -> norm_update
+-> rebuild. Adjacent stages communicate ONLY through (envs,...) global
+arrays (v_trial, trial gamma/vc/cost, grad/impulse, j_flat/gj_flat,
+hess_contact/hessian, chol_a); each LS trial re-reads the live contact
+Jacobian twice (~2 x 29.6 KB/env at ~51 live contacts, fp64).
+
+TOTAL LS TRIAL MACHINERY = 7.9-8.7 ms/slab = 58-63% of slab GPU time
+(ls_chain + trial shares of proj_gamma/impulse/pd/limit/base_cost/
+impulse-accums + LS-trip list rebuilds).
+
+PASS-15 CANDIDATE 1 (primary): FUSED ARMIJO BACKTRACKING LINE SEARCH on
+the in-repo monotone_decay pattern (_unit_line_search_base_coeffs +
+_unit_line_search_contact_delta_velocity + _unit_line_search_
+fused_parallel already run an ENTIRE ladder in 3 launches — existence
+proof in contact_solve.py): precompute J*dv once per Newton trip, walk
+the alpha ladder in-kernel with the armijo accept rule and Drake-tight
+tolerances unchanged. Deletes ~11 launches and the double J re-read per
+trial; consolidation ceiling: replacing 7.9-8.7 ms/slab with 21.7 x
+(dvc precompute ~14 us + coeffs ~3 us + fused ladder, bounded 50-200
+us) = 1.4-4.7 ms/slab -> net 4-7 ms/slab = 30-50% of slab GPU at this
+regime/scale (assumptions: 512-env flail window, batch-max trips carry
+over, fused ladder cost bounded by the monotone kernel's class). fp
+reduction order changes -> physics-visible class: default-ON flag,
+full invariant gates, penetration check, fresh A/B; the pass-2 slop
+law (accept slop scales with the COMPARED dtype) applies as-is.
+PASS-15 CANDIDATE 2 (secondary, ~5%): direction-chain consolidation —
+(a) search_direction serial->tiled (0.68 -> ~0.06 ms/slab); (b) GEMM
+epilogue absorbs hessian_total + pack_dense (deletes the hess_contact
+and hessian round-trips, 4 x 4.6 KB/env-trip; -0.08 ms/slab); (c)
+replace_trial_cost folds into candidate 1. (a) reorders a dot product
+-> flagged + gated; (b) can preserve accumulation order -> bitwise arm.
+NOT candidates now: pack->GEMM full fusion (pack 1.48 ms/slab is real
+bandwidth work; re-reading J per output tile at 9 tiles bounds
+unfavorably); lists/masks attack alone (~0.45 of its 0.89 ms/slab is
+LS-trip rebuilds that candidate 1 deletes as a byproduct).
+Caveats named: single regime/scale window (512 eager, saturated
+flail); 1024 plateau regime mix unmeasured at kernel granularity;
+batch-max trip counts are regime-dependent; no speedup is promised
+beyond the stated bounds.
+Provenance: p14_prof_flail.{nsys-rep,sqlite},
+p14_flail_cuda_gpu_kern_sum.csv, p14_nsys_run.log, p14_stats.log,
+p14_profile_rig.py, p14_group_kernels.py (strict grouping — the naive
+'ls_' keyword substring-matches Warp's '__locals__' mangling),
+p14_tiny_kernels.py.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -506,9 +626,10 @@ Provenance: p13_newton_budget.{json,log}, p13_newton_budget_probe.py.
    solve: MEASURED pass 13 (discovery subsection above) — halves run
    at 1.5-1.6 iters/solve vs full 2.4, no warm-start-waste pocket;
    remaining open sub-question is the 1024 plateau mix; (b) launch/
-   fusion consolidation of the ~25% "small assembly/misc spread thin"
-   + solve-misc groups (16726 tiny launches at 512 — persistent-kernel
-   or megakernel candidates); (c) per-boundary D2H readback chain
+   fusion consolidation: MEASURED pass 14 (discovery subsection above)
+   — tiny kernels are 84.3% of flail-slab GPU time, LS trial machinery
+   58-63%; pass-15 implements candidate 1 (fused armijo LS) and
+   candidate 2 (direction-chain consolidation); (c) per-boundary D2H readback chain
    (~48/boundary, overlapped today but serializing the march's
    conditional structure?); (d) cross-boundary overlap of independent
    worlds' marches (capture mechanics proven feasible pass 4).
