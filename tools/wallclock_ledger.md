@@ -4094,3 +4094,795 @@ fixed-vs-adaptive TRAINING comparison, which has still never been run on
 SAP. Everything the campaign can do to make that comparison honest has now
 been done; whether it is worth running in a regime that is not the paper's
 near-rigid one (D12) is the question that outranks it.
+
+## PASS 30 — THE NEAR-RIGID REGIME SWEEP, AND THE FIRST FIXED-vs-ADAPTIVE
+## TRAINING COMPARISON EVER RUN ON SAP (D7).
+## 2026-08-16. MEASUREMENT ONLY: ZERO code edits in all three repos; the
+## stiffness/tau sweep is driven entirely through runtime overrides of the
+## material arrays the contact jacobian already reads, so no task, scene or
+## contact-law byte moved. Stack verified clean at the certified HEADs before
+## and after: newton-adaptive 34c94740 (march-counter-log), sap_warp afd5dc6
+## (main), IsaacLab 62c165b5f0 (develop); GPU idle (438 MiB, 0 compute apps)
+## at start; one GPU process at a time throughout (p30_*_progress.txt carry
+## the interleaved nvidia-smi traces).
+## Every constant this entry quotes from earlier passes was RE-MEASURED here;
+## two of them turned out to be wrong and are corrected below.
+
+### WHAT WAS RE-DERIVED, NOT INHERITED (p30_parity_{fixed,adapt}.json,
+### read off the constructed solver objects under the production config)
+
+    authored per-shape ke      2500.0 (all 274 shapes)  -> contact_k 1250 N/m
+    authored per-shape tau_d   0.01   (all 274 shapes)  -> contact_tau 0.02 s
+    sap_warp fallback_stiffness 1e10, fallback_tau_d 0.01
+    beta 1.0   sigma 1e-3   preset approx32   contact solve fp64
+    optimality_rel_tol 1e-8   optimality_abs_tol 1e-14
+    cost_abs_tol 0.0   cost_rel_tol 0.0   max_iterations 30   line search 40
+    contact buffer 2048/world on BOTH arms; live peak 54-134/world
+    physics boundary 1/120 s; fixed arm 2 substeps of 4.1667 ms;
+    adaptive arm marches the same 8.3333 ms boundary.
+
+The live pair values k=1250 / tau=0.02 confirm pass 25's numbers
+independently. The P5 penetration this pass measures at the authored law,
+-2.7556e-5 m, agrees with the campaign's recorded gate value (-2.756e-5) to
+every digit the ledger records -- on a DIFFERENT rig (32 worlds with a flail
+phase, against the gate's 8 worlds without one), which is the cross-check
+that the sweep's instrument reads the same quantity the gates read.
+
+GPU EXCLUSIVITY, certified rather than asserted: every chain writes
+`nvidia-smi --query-compute-apps` at each run's start and exit, and every one
+of those samples in every p30_*_progress.txt is EMPTY -- zero compute apps on
+the device at every boundary, so no two runs in this pass overlapped.
+
+### TASK 1 — THE NEAR-RIGID REGIME SWEEP. VERDICT: **NO CROSSOVER EXISTS.**
+
+METHOD, and why it is a legitimate override rather than a law change. The SAP
+contact jacobian resolves per-shape stiffness and dissipation into
+`contact_shape_ke` / `contact_shape_tau` (plus scalar fallbacks) at
+construction and passes them to every contact kernel as launch arguments. The
+sweep rewrites those arrays in place between rungs. The kernel combines the
+two shapes' stiffness in series and SUMS their tau, so a target pair value
+(k, tau) is driven by writing (2k, tau/2) per shape -- and the result is
+VERIFIED LIVE at every rung by reading back `contact_env_k_wp` /
+`contact_env_tau_wp`, which report exactly the requested pair value. R's
+form, the projection ladder, beta, sigma, the estimator, tol, dt_inner_min
+and the iteration cap were not touched.
+
+GRID: k in {1250, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1e6, 1e8, 1e10} at the authored
+tau; tau in {0.02, 4e-3, 8e-4, 1.6e-4, 3.2e-5, 0} at the authored k and at
+k = 1e6 / 1e10. ARMS: the adaptive march, and the fixed arm at 1, 2, 4 and 8
+substeps per boundary. 32 worlds, 270 scripted steps (rest / press into the
+table / swing / flail), one action stream replayed identically at every rung
+and on every arm, seeds 42 and 7, NEWTON_SAP_DETERMINISTIC=1.
+
+#### (a) WHERE THE NEAR-RIGID BRANCH ACTUALLY STARTS — pass 25's "~6-7
+#### orders of magnitude" is WRONG BY FOUR TO FIVE DECADES.
+
+Measured fraction of live contacts landing in the clamp, production fixed arm
+(h = 4.1667 ms), tau = 0.02 (p30_reg_fixed_s2_seed42.json):
+
+      k [N/m]     1250    5e3    1e4   2.5e4    5e4    1e5   >=1e6
+      frac NR    0.000  0.436  0.458   0.497  0.899  1.000   1.000
+      rn_hard/rn_soft (median)
+                 0.050  0.199  0.399   0.997  1.994  3.989   >=39.9
+
+The branch flips at k ~ 2.5e4 -- **1.3 decades above the authored 1250**, not
+six. The crossover is not a constant: it is k_cross = 1/(h (h+tau) rn_hard),
+so it moves with the substep size, measured at 1.1e4 (h=8.33 ms), 2.5e4
+(4.17 ms), ~1e5 (2.08 ms) and ~4e5 (1.04 ms).
+
+The census checks itself twice. (i) The branch fraction passes 0.5 (0.497) at
+exactly the rung where the MEDIAN rn_hard/rn_soft passes 1 (0.997) -- two
+statistics from different reductions of the same live arrays agreeing on
+where the boundary is. (ii) On the ADAPTIVE arm at the AUTHORED law this
+pass measures a near-rigid fraction of 0.1221 (seed 42) / 0.1187 (seed 7)
+against pass 25's independently measured 0.1109 on the same arm with a
+different phase mix -- so the classifier reproduces the campaign's own
+production-regime number, which is what licenses using it 7 decades away.
+
+#### (b) THE CLAMP IS A CEILING, AND THAT IS WHY NOTHING BREAKS.
+
+Above the crossover the trajectory STOPS RESPONDING to stiffness. k = 5e3
+through 1e10 -- 6.3 decades, up to sap_warp's own 1e10 fallback -- return
+statistics identical to every digit recorded (7 significant figures) on the
+production fixed arm:
+
+      deepest phi0  -3.535455e-03 m   at every k from 5e3 to 1e10
+      P5 phi0       -1.176450e-05 m   at every k from 5e3 to 1e10
+
+(The contacts that DO change branch over that range are the ones carrying no
+impulse: a separated contact's normal force projects to zero whatever R_n is,
+so its regularization cannot reach the dynamics.)
+
+The reason is structural, and it is the finding that decides this task:
+R_n = max(rn_hard, rn_soft) with rn_hard = beta^2/(4 pi^2) W carries no k at
+all, so once the clamp wins, k_eff = 4 pi^2 / (beta^2 W h (h+tau)) is a
+function of the SUBSTEP and the Delassus diagonal alone. The clamp is a
+CEILING on effective stiffness, and it is a low one.
+
+HOW LOW, measured rather than modelled, from the P5 penetration of the
+production fixed arm. The arm is position-controlled and the phase script is
+identical across rungs, so to the extent the load at the penetration-setting
+contacts is unchanged the penetration ratio is the inverse k_eff ratio -- and
+the cross-check two paragraphs down is what says that assumption holds:
+
+    authored k=1250, tau=0.02, compliant      P5 -2.7556e-05 m
+    k -> 1e10 (fully clamped), tau=0.02       P5 -1.17645e-05 m   2.342x
+    k -> 1e10 (fully clamped), tau=0          P5 -2.0303e-06 m   13.573x
+
+So the full 6.9 decades from the authored 1250 to sap_warp's 1e10 fallback
+buy a factor 2.34 in effective stiffness at the penetration-setting contacts,
+and adding tau -> 0 takes the total to 13.57. That total is PREDICTED,
+without fitting anything, by
+k_eff ∝ 1/(h(h+tau)) on the clamped branch: the tau factor alone is
+(h+tau)/h = 0.0241667/0.0041667 = 5.800, and 2.342 x 5.800 = 13.585 against
+the measured 13.573 -- 0.09%. Two independently measured ratios and one
+structural relation agree, which is the check that the clamped-branch k_eff
+law is the one actually operating.
+
+**There is no authored contact stiffness, at any magnitude, that makes this
+scene's contact stiff enough to break a fixed step: the ceiling sits ~2.3x
+above the authored value at the production tau, and ~13.6x with tau driven to
+zero.** The only knob that would raise the ceiling is beta, a Drake constant
+on the validity red line.
+
+#### (c) THE PAPER'S EXPONENT IS REACHABLE, AND THE SWEEP REACHES IT.
+
+d ln k_eff / d ln dt, measured per contact from the live (k, tau, W, dt),
+production fixed arm at k >= 1e6 (100% of contacts in the clamp):
+
+      tau [s]     0.02    4e-3   8e-4   1.6e-4   3.2e-5     0
+      exponent  -1.172  -1.510 -1.839   -1.963   -1.992  -2.000
+
+(the 3.2e-5 column is measured at k=1e10; the rest at k=1e6. They are the
+same rung physically -- k=1e6 and k=1e10 at tau=1.6e-4 both return -1.963 to
+four digits, which is (b)'s saturation showing up again.)
+
+So the CENIC regime is not unreachable -- it is two knobs away, and it needs
+BOTH. The tau axis alone moves the WRONG WAY: at the authored k = 1250,
+lowering tau from 0.02 to 0 drops rn_hard/rn_soft from 0.050 to 0.0086 and
+leaves 0.0% of contacts in the clamp, because rn_soft = 1/(h k (h+tau)) grows
+as tau falls. High k is the necessary condition; low tau is what takes the
+exponent from -1 to -2 once the clamp is already winning.
+
+#### (d) THE EXPONENT FORMULA, VALIDATED AGAINST A STATE OBSERVABLE.
+
+(c) is read off R's own structure, so on its own it is arithmetic, not
+evidence. The independent test: run the SAME rung at different fixed substep
+sizes and measure how the penetration the solver actually leaves behind
+scales with h. Compliant branch predicts 0 (k_eff = k, dt-free); near-rigid
+predicts 1 + h/(h+tau). Measured slope of ln|P5 phi0| vs ln h, fixed arm,
+seed 42 (p30_sweep_analysis.py over p30_reg_fixed_s{2,4,8}_seed42.json):
+
+    rung                     h 4.167->2.083 ms     h 2.083->1.042 ms
+                            measured  analytic    measured  analytic
+    k=1e6  tau=4e-3            1.423     1.424       1.270     1.269
+    k=1e6  tau=0.02            1.131     1.128       1.076     1.069
+    k=1e8  tau=0.02            1.131     1.128       1.076     1.069
+    k=1e10 tau=0.02            1.131     1.128       1.076     1.069
+    k=1250 any tau (compliant) 0.000     0.000       0.000     0.000
+
+Agreement is better than 1% at every rung where the penetration signal sits
+above trajectory noise, in both branches, across three values of tau. The
+test never recomputes R; it constrains an output.
+
+THE tau -> 0 CORNER, MEASURED PROPERLY. The step-to-step slopes above go bad
+below tau ~ 8e-4 because the near-rigid penetration there falls to 1e-7 m and
+the 5th-percentile contact stops penetrating at all (one cell returns
++7.45e-8 m, i.e. separated). The fix is a longer lever and a quasi-static
+window: the settled tail of the PRESS phase, where the commanded pose is
+constant and the penetration is a load/k_eff equilibrium, read across the
+FULL 4x substep range rather than adjacent 2x steps. k = 1e10 (fully clamped
+at every h), p30_qs_*.json:
+
+   tau [s]  P5 at h=4.167ms  2.083ms   1.042ms   slope h4x  analytic  err
+   0.02        -1.1765e-05  -5.372e-06 -2.548e-06   1.103     1.094   +0.8%
+   4e-3        -3.9777e-06  -1.483e-06 -6.147e-07   1.347     1.342   +0.4%
+   8e-4        -2.4196e-06  +7.450e-08 -2.271e-07   1.707     1.723   -0.9%
+   1.6e-4      -2.1080e-06  -3.562e-06 -1.993e-07   1.701     1.929  -11.8%
+   0           -2.0303e-06  -3.496e-06 -1.730e-07   1.776     2.000  -11.2%
+
+So the measured penetration exponent DOES climb with falling tau, from 1.10
+to 1.78, and tracks 1 + h/(h+tau) to within 1% over the first three rungs --
+but it SATURATES near 1.7-1.8 and does not reach 2. **The paper's dt^-2
+coupling is confirmed as a trend and NOT confirmed at its limit.** The two
+short rungs are also where the h=2.083 ms cell is non-monotonic (deeper than
+the coarser step), so the shortfall may be that cell rather than the law; at
+0.17 um of penetration this is at the edge of what the rig resolves. Named,
+not explained away.
+
+#### (e) THE FAILURE CENSUS. NOTHING BREAKS THAT THE TASK WOULD ACTUALLY RUN.
+
+physics_diverged counts, 32 worlds x 270 steps = 8640 world-steps per rung.
+On the fixed SAP arm this term has EXACTLY ONE SOURCE, re-verified in source
+this session (every writer of `_diverged_pending` in mjwarp_manager is either
+gated on `cls._adaptive` or is `_latch_sap_solve_failure`): the manager latch
+off `contact_solve.converged_env`. So each fixed-arm count is a named
+mechanism -- "the inner Newton loop did not reach optimality_rel_tol 1e-8
+within max_iterations 30" -- not a symptom.
+
+THE TWO ARMS DO NOT LATCH AT THE SAME THRESHOLD, and the comparison is only
+readable with that in front of it. The fixed arm latches on its FIRST
+non-convergence because it has no other move. The adaptive arm rejects that
+attempt, shrinks dt and retries, and only latches if the ladder reaches
+dt_inner_min. That asymmetry is pass-29's D4c and it is deliberate -- the
+shrink-retry IS adaptivity, and handing it to the fixed arm would delete the
+result. It also means an adaptive zero is not by itself evidence that the
+adaptive arm met an easier problem; it is evidence that it never ran out of
+ladder.
+
+    arm / substep h    rungs   rungs with   worst rung                non-
+                       swept   any event    (k, tau) : events        finite
+    fixed 1  8.333 ms    40         0       --                          0
+    fixed 2  4.167 ms    40         1       (1e6, 4e-3) : 2             0
+    fixed 4  2.083 ms    23         4       (>=1e6, 1.6e-4) : 21        0
+    fixed 8  1.042 ms    29        10       (1250, 1.6e-4) : 620        0
+    adaptive marched     46         0       --                          0
+
+Every arm is finite at every rung; no contact buffer ever saturated (peak
+134/world against 2048); object_off_table and object_speeding fire once each
+in the whole sweep, both on the 8-substep arm at its worst rung.
+
+The production fixed arm is NOT literally at zero: 2 events in 8640
+world-steps at one rung (k=1e6, tau=4e-3) on seed 42, and 0 at that same rung
+on seed 7 -- a rare-event floor, not a regime. Set against the 8-substep
+arm's 620 at its worst rung, and against the adaptive arm's 0 in 46 rungs,
+the shape of the result is unambiguous.
+
+THE ONLY REAL FAILURES ARE ON A FIXED ARM MADE **FINER** THAN THE TASK
+AUTHORS IT. They concentrate at one rung -- k = 1250, tau = 1.6e-4, 8
+substeps -- and they reproduce across seeds (620 events seed 42, 588 seed 7),
+with object ejection to 0.15 m / 0.37 m penetration and joint speeds of
+13.3 rad/s against a normal 7.5. The same rung at 4, 2 and 1 substeps, and
+the adaptive arm, are all clean. And the adaptive arm's own accepted substep
+is COARSER than the failing one -- 6.4 ms mean in this sweep rig, 4.31 ms in
+the 1024-env characterization, against the 1.04 ms that fails -- so the one
+place a fixed arm fails and adaptive holds is a place adaptive holds by
+taking BIGGER steps. That is the opposite of the mechanism the claim needs.
+
+The failure count is also non-monotonic in tau at fixed h (620 at
+tau=1.6e-4 against 27 at tau=0 and 2 at tau=8e-4), so it is not a simple
+"less dissipation is worse" law and MUST NOT be reported as one.
+
+THE DIAGNOSIS, because "the fixed arm failed" is not a finding until the
+mechanism and the causal order are known (p30_diag_probe.py traces EVERY
+substep, not every env step, at the worst rung and at the same rung on the
+production arm):
+
+                                   s8 (h=1.042ms)   s2 (h=4.167ms), same rung
+    substeps traced                     8640            2160
+    substeps with an unconverged env      87               0
+    of those, at the 30-iteration cap     87               0
+    inner Newton iterations, mean/max  2.70 / 30       1.51 / 17
+    first failure                    trace 112, env step 3    never
+    deepest phi0 BEFORE first failure  -2.93e-04 m     -3.50e-04 m (whole run)
+    deepest phi0 overall               -2.27e-01 m     -3.50e-04 m
+    physics_diverged terminations          616               0
+
+Three things are settled by that table.
+  1. THE MECHANISM IS THE ITERATION CAP, exactly. Every one of the 87
+     unconverged substeps is also at max_iterations=30 -- none exited on cost
+     or anything else. The cap is a rail and is identical on both arms.
+  2. THE CAUSAL ORDER IS SOLVE-FIRST. At the moment of the first failure the
+     deepest penetration anywhere in the scene is 0.29 mm -- SHALLOWER than
+     the 0.35 mm the production arm reaches at the same rung without ever
+     failing. The 227 mm ejection is what happens AFTER the world latches,
+     not what caused it. This is not "penetration defeated the solver".
+  3. IT IS A GENUINE TIMESTEPPING EFFECT, IN THE UNEXPECTED DIRECTION. The
+     same contact law, the same scene and the same 30-iteration budget
+     converge in at most 17 iterations at h = 4.167 ms and blow through 30 at
+     h = 1.042 ms. Shrinking h with tau held fixed raises the stabilization
+     target vhat_n = -phi0/(h+tau) by 3.6x here and stiffens the per-substep
+     convex problem with it. SMALLER STEPS MADE THE SOLVE HARDER, which is
+     the reverse of the intuition the adaptive claim rests on.
+
+#### (f) THE ADAPTIVE ARM PAYS NOTHING TO HOLD THE NEAR-RIGID LINE.
+
+Accepted per-world substeps per boundary, adaptive arm, across the whole
+grid: 1.298 to 1.334 -- flat to +-1.4% across seven decades of stiffness and
+six values of tau, on both seeds. The per-world dt sampled at every boundary
+end never fell below 2.55 ms, nine orders above the 1e-12 floor (that sample
+is the controller's NEXT-step choice, not the march minimum, so it bounds the
+floor question and nothing finer). There is no substep bill for entering the
+paper's regime, because the clamp means the effective stiffness never
+actually diverges (see (b)).
+
+#### (g) A TASK-FILE CLAIM, RE-MEASURED AND FALSE FOR SAP.
+
+`_validate_solver_substeps` refuses num_substeps < 2 with: "dt 0.01 sinks the
+resting blade into the tabletop and goes non-finite on first grasp". The
+message names the MJWarp solver and mj dt; it has never been measured on SAP.
+Suspended at RUNTIME in the probe (no task file touched), the fixed SAP arm
+at ONE uniform 8.333 ms step -- the strictly matched baseline for an adaptive
+arm handed that same boundary -- ran all 17 rungs on both seeds with 0
+physics_diverged, 0 robot_abnormal, 0 non-finite, and a P5 penetration of
+-2.7563e-5 m against the 2-substep arm's -2.7556e-5, i.e. dt-independent
+exactly as the compliant branch predicts. Whether the guard is right for the
+MuJoCo solver it was written about was NOT re-measured here and is not
+challenged; for SAP it is demonstrably false.
+
+### TASK 1 VERDICT
+
+There is NO stiffness at which the production fixed arm breaks while the
+adaptive arm holds. The reachable range was exhausted: 6.9 decades of
+stiffness up to sap_warp's own 1e10 fallback, tau from the authored 0.02 down
+to exactly 0, crossed, on four fixed substep sizes and the adaptive march,
+two seeds. The measured d ln k_eff / d ln dt does reach the paper's -2.000,
+and the formula behind it is validated against penetration to <1% -- but
+arriving there costs neither arm anything, because the clamp caps the
+effective stiffness of the penetration-setting contacts at 2.34x the authored
+value at the production tau, and 13.6x with tau driven to zero, no matter
+what the asset authors. A NEGATIVE RESULT, and it is the real one: on this
+scene, at this mass scale, with beta = 1, the CENIC mechanism has no room to
+bite.
+
+### TASK 2 — THE MATCHED TRAINING COMPARISON (D7), RUN AT LAST.
+
+PRE-FLIGHT, ON THE EXACT TRAINING CONFIG (determinism unset, production
+contact law, containment default), both arms dumped live off the constructed
+objects before any GPU hour was spent -- p30_parity_{fixed,adapt}.json:
+
+  IDENTICAL, row for row: optimality_rel_tol 1e-8 | optimality_abs_tol 1e-14
+  | cost_abs_tol 0.0 | cost_rel_tol 0.0 | max_iterations 30 | line search
+  armijo_decay/40 | preset approx32 | contact solve fp64 | beta 1.0 | sigma
+  1e-3 | live contact_k 1250 | live contact_tau 0.02 | contact buffer
+  2048/world | jacobian deterministic False | containment non-strict |
+  divergence mask allocated | shape count 274 | authored ke 2500 | authored
+  tau 0.01 | physics boundary 1/120 s | peak live contacts 54 on both.
+
+  DIFFERENT, and every one of them intended:
+    * substep: 2 x 4.1667 ms vs one marched 8.3333 ms boundary -- THE
+      INDEPENDENT VARIABLE;
+    * `tol` 1e-3 exists only on the adaptive arm -- the fixed arm estimates
+      no error, which is what "fixed" means;
+    * `_sap_world_active` allocated only on the fixed arm -- the two arms
+      implement containment differently (manager mask vs the solver's own
+      floor latch), same guarantee;
+    * `attempt_consistent_r` True only on the adaptive arm -- structurally
+      inert on a solver with no half solves. Known, ON by campaign default
+      (D8), and named as residual risk P1.
+  No unintended asymmetry was found, so the runs went ahead.
+
+LAUNCH: the documented CLI on both arms, no env-var workaround.
+  ./isaaclab.sh train --rl_library rsl_rl --task
+  IsaacContrib-Lift-Spatula-Trossen-v0 --seed 42 --num_envs 1024
+  --max_iterations 300 --logger wandb --log_project_name rubato-trossen
+  --video --video_length 200 --video_interval 2400 --viz newton
+  --solver sap                                    (fixed)
+  --solver sap-adaptive physics=newton_mjwarp_adaptive   (adaptive)
+Both runs' params/env.yaml record the resolved identity correctly
+(`backend: sap` with `sap_adaptive` false/true and num_substeps 2/1), so
+these two runs have real provenance -- the first SAP training runs in the
+campaign that do.
+
+HORIZON AND WHY: 300 iterations x 1024 envs x 24 steps = 7.37M env steps per
+arm, ~49k episodes at 5 s each. Chosen because it is (i) long enough that the
+task's own learning signal is unambiguous -- the fixed arm's mean reward
+moves 5.7 -> 86.5 and its episode length 115 -> 144 inside it, so a real
+difference in learning would have room to show; (ii) short enough to run BOTH
+arms back to back in one pass and watch the videos, which a 4000-iteration
+pair (~18 h) is not. It is NOT long enough to claim anything about final
+policy quality, and nothing below does.
+
+RUN INCIDENT, RECORDED SO THE ARTIFACTS MAKE SENSE: the adaptive arm's first
+attempt was killed at iteration ~123 when the agent harness reaped the
+background task holding its process group. Nothing physical went wrong -- the
+log ends mid-block with the GPU released. It was restarted FROM SCRATCH
+(same seed, same command, run_name suffixed `-r2`) under `setsid` so the next
+reap could not reach it. The truncated log is kept as
+p30_train_adaptive_attempt1_killed.log -- and it turned into the most
+important control in this task.
+
+#### THE ACCIDENTAL CONTROL: A SAME-CONFIG REPLICATE, AND WHAT IT COSTS THE
+#### COMPARISON.
+
+The killed attempt and the restart are the SAME ARM, SAME SEED, SAME COMMAND,
+two processes. Determinism is OFF at production (the campaign default), so
+the contact reduction order is nondeterministic and PPO compounds it. Their
+common 11 iterations (p30_repro_check.py):
+
+    iter          0     1     2     3     4     5     6     7     8     9    10
+    adaptive #1  -0.0  -0.0  -0.0  -0.0  -0.0  0.01  0.05  0.22  0.85  1.49  2.19
+    adaptive #2  -0.0  -0.0  -0.0   0.0  0.05  0.14  0.15  0.46  0.99  3.51  2.98
+    FIXED arm    -0.0  -0.0  -0.0   0.0  0.10  0.03  0.16  0.78  1.57  2.61  3.45
+    (Mean reward; episode length agrees to 2 dp through iteration 7 and then
+     splits by up to 3.3 steps.)
+
+The two ADAPTIVE replicates differ by 2.4x at iteration 9 -- and the FIXED
+arm's value there (2.61) sits BETWEEN them (1.49 and 3.51). **The
+between-arm difference is inside the within-arm, same-seed replicate
+spread.** That is measured, not assumed, and it sets the resolution of
+everything in this section: on this stack a single-seed pair of learning
+curves cannot separate the two timesteppers, and no reward gap below the
+replicate spread may be reported as an effect. Any future claim of a
+learning difference needs seed replicates per arm, not one run each.
+
+#### THE OTHER THING THE RUNS FOUND: **PASS 29's TRIANGLE-PAIR BUDGET IS
+#### UNDER-SIZED FOR A TRAINED POLICY, AND BOTH ARMS OVERFLOW IT.**
+
+Pass 29 sized the collision pipeline's triangle-pair pool at
+max(1M, min(authored, 16384 * world_count)) and named 16,384/world as OUR
+constant, therefore unvalidated -- justified against a measured worst case of
+3,687 pairs/world (scripted flail, 64 envs) and warned that overflow drops
+mesh contacts. Under a LEARNING policy at 1024 envs it is not enough
+(p30_overflow_census.py):
+
+    run                      first overflow   warnings   peak pairs/world
+    FIXED    300 iterations     iter 110        17,564     29,464  (1.80x)
+    ADAPTIVE 300 iterations     iter  95        19,462     31,492  (1.92x)
+    ADAPTIVE attempt 1, killed  never (120 it)        0          -
+
+Three things follow, and all three matter.
+  1. THE CONSTANT IS WRONG FOR THIS WORKLOAD. Measured peak demand under a
+     trained policy is 29,464 pairs/world -- 8x the 3,687/world that the
+     budget was justified against, and 1.8x the budget itself.
+  2. NO CAMPAIGN PROBE COULD HAVE CAUGHT IT. Every probe in this pass ran at
+     32 or 64 envs, where the rule's max(1M, ...) FLOOR hands each world
+     31,250 pairs -- nearly twice the per-world budget the 1024-env training
+     run gets. The overflow is a large-world-count-only failure, and it
+     appears only once a policy has learned to drive the scene.
+  3. IT BOUNDS WHAT TASK 2 CAN CLAIM. Overflow drops mesh contacts, so from
+     iteration 95 (adaptive) / 110 (fixed) onward the two arms are running
+     DEGRADED contact sets. **The clean, like-for-like window is iterations
+     0-94.** Everything past it is reported below but is not a controlled
+     physics comparison, and no verdict here rests on it. Mitigating: over
+     the FULL run the two arms overflow to a comparable degree (17,564
+     against 19,462 warnings; 1.80x against 1.92x peak), so this is a shared
+     ceiling both arms hit rather than a one-sided handicap -- but "similar
+     amounts of silently dropped contacts" is not "the same contacts".
+And the killed replicate sharpens it further: same arm, same seed, one run
+overflows from iteration 95 and the other never does through 120. Overflow
+incidence is itself draw-dependent, because it depends on what the policy
+happens to learn to do to the mug.
+
+#### RESULTS. BOTH ARMS COMPLETED 300 ITERATIONS.
+
+Wall: FIXED 28.3 min (12:07:26-12:35:43), ADAPTIVE 103.8 min
+(13:14:52-14:58:39) -- 3.67x. Curves are 5-band means over the 300
+iterations, parsed from the rsl_rl blocks (p30_train_parse.py,
+p30_train_series.json). Band 2 ends at 94 because that is where the
+triangle-pair pool starts overflowing; bands 3-5 are reported but are not a
+controlled physics comparison.
+
+                          0-24     25-94   95-149  150-224  225-299
+                                  <-CLEAN->  <---- pool overflowing ---->
+  Mean reward     FIXED     5.67    19.76    60.37    79.51    86.54
+                  ADAPT     5.51    21.62    60.97    77.52    86.03
+  Episode length  FIXED   115.21   104.09   133.56   142.34   143.89
+                  ADAPT   115.92   105.08   130.04   139.22   142.72
+  time_out        FIXED   0.7024   0.4254   0.7240   0.8489   0.8927
+                  ADAPT   0.7028   0.4216   0.6430   0.7779   0.8533
+  object_off_tbl  FIXED   0.0874   0.3099   0.1876   0.1012   0.0754
+                  ADAPT   0.0762   0.2802   0.2225   0.1568   0.1101
+  robot_abnormal  FIXED   0.0863   0.2636   0.0871   0.0450   0.0275
+                  ADAPT   0.0990   0.3001   0.1353   0.0633   0.0344
+  object_speeding FIXED   0.0000   0.0015   0.0013   0.0041   0.0046
+                  ADAPT   0.0003   0.0007   0.0024   0.0046   0.0040
+  object_dropping BOTH ARMS EXACTLY 0.0000 IN EVERY BAND
+  physics_diverg  FIXED   0.00185  0.00244  0.00242  0.00199  0.00167
+                  ADAPT   0.00000  0.00000  0.00000  0.00000  0.00000
+  lifting reward  FIXED    0.819    2.854    7.767    9.844   10.422
+                  ADAPT    0.742    3.111    8.031    9.796   10.674
+  reaching reward FIXED   0.0166   0.0353   0.1172   0.1823   0.2221
+                  ADAPT   0.0163   0.0405   0.1154   0.1680   0.1993
+  ori error       FIXED    1.747    1.784    1.777    1.738    1.679
+                  ADAPT    1.733    1.731    1.627    1.518    1.449
+  s / iteration   FIXED     3.48     4.29     6.18     6.45     6.20
+                  ADAPT    10.48    16.81    22.14    23.63    23.71
+
+LEARNING: NO SEPARATION. In the clean window the two arms are on top of each
+other -- reward 5.67/19.76 against 5.51/21.62, episode length within 1%,
+time_out within 1%. At the end of the run they are 86.54 against 86.03, a
+0.6% difference, against a measured same-config replicate spread of 2.4x at
+iteration 9. Both arms learn the same thing at the same rate. **The correct
+report is "no separation observed at this horizon", and the replicate control
+says a single-seed pair could not have shown one smaller than very large.**
+
+COST: the adaptive arm is 3.67x the wall for that identical learning, and the
+gap WIDENS with contact activity (3.01x in band 1 to 3.82x in band 5) because
+both arms slow as the policy starts driving the mug and the adaptive arm
+slows harder (2.26x over the run against the fixed arm's 1.78x).
+
+THE ONE QUALITATIVE DIFFERENCE: the fixed arm terminates 0.17-0.24% of
+episodes on physics_diverged in every band; the adaptive arm terminates
+exactly zero, in all 300 iterations. On the fixed arm that number is a
+mechanism -- the inner Newton solve did not reach optimality_rel_tol 1e-8
+within 30 iterations, and the arm has no move but to latch.
+
+Two readings compete for it, and they make OPPOSITE predictions:
+  (a) adaptivity rescues solves the fixed step cannot converge -- the thesis.
+      Predicts the fixed arm's rate FALLS if you give it a smaller step.
+  (b) the arms latch at different thresholds (fixed on its FIRST
+      non-convergence, adaptive only at the dt floor), so zero-vs-nonzero is
+      an artefact of the threshold. Predicts the rate does not care about
+      step size.
+**IT WAS TESTED.** Same task, same seed, same launch path, 1024 envs, 40
+iterations, only num_substeps moved (p30_substep_chain.sh):
+
+    fixed substeps   h [ms]   physics_diverged   max     iters w/ any
+       2             4.167       0.00245        0.0068      33/40
+       4             2.083       0.01290        0.0241      37/40
+       8             1.042       0.03819        0.0673      36/40
+
+The rate RISES 15.6x as the step shrinks 4x, monotonically. Reading (a) is
+REFUTED: the fixed arm's divergences are not a step-too-large problem, and
+"take a smaller step" makes them an order of magnitude worse. That matches
+the sweep's own diagnosis -- shrinking h with tau fixed raises the
+stabilization target -phi0/(h+tau) and stiffens the per-substep convex
+problem -- and it means the adaptive arm's zero cannot be attributed to it
+choosing smaller steps, because its mean accepted substep (4.31 ms) is
+LARGER than the fixed arm's 4.167 ms. What is left is reading (b), the
+latch threshold, plus the fact that coarser steps are easier here. So the
+zero should NOT be reported as adaptivity rescuing the physics.
+
+And in any case: at 0.2% of terminations it did not move the learning curve,
+which is the quantity the claim is about. (The 40-iteration s2 control also
+reproduces the main run's rate -- 0.00245 against 0.00185-0.00244 across the
+300-iteration run's bands -- so the probe and the run agree.)
+
+TERMINATION MIX: both arms run the same trajectory through the same phases --
+a violent exploration hump around iterations 25-94 (object_off_table 0.31/
+0.28, robot_abnormal 0.26/0.30) that decays as the policy learns
+(0.075/0.110 and 0.028/0.034 by the end), with time_out rising to 0.85-0.89
+as episodes survive. object_dropping is EXACTLY zero on both arms in all 300
+iterations. The adaptive arm knocks the mug off the table somewhat more in
+the second half (0.110 vs 0.075) and leaves it better oriented (orientation
+error 1.449 vs 1.679); both differences sit in the same unresolved band as
+the reward gap.
+
+WHAT THE VIDEOS ACTUALLY SHOW (filmstrips cropped onto the nearest world;
+the 1024-env render puts the robot at ~40 px, so the raw clips are not
+judgeable and the crops are the evidence):
+  * iteration 0, BOTH ARMS: indistinguishable. The arm waves above and behind
+    the table through the whole clip; the mug sits untouched. Same initial
+    policy, same scene.
+  * iteration 100, BOTH ARMS (and the killed adaptive replicate, three runs):
+    the same learned strategy, and it is NOT a clean pick-up. The gripper
+    comes down onto the mug, TIPS IT OVER, and hoists it -- the mug is
+    horizontal or on its rim in most frames where it is off the table. All
+    three runs discovered the same tipping strategy.
+  * iteration 200, BOTH ARMS: more of the same, and still indistinguishable
+    between arms -- the mug spends most of the clip lying on its side, gets
+    picked up horizontally and hoisted. Neither arm has learned to right it
+    or to grasp it upright.
+  * NOTHING PATHOLOGICAL IS VISIBLE ON EITHER ARM: no jitter, no explosion,
+    no object sinking through the table, no frozen worlds. The rising reward
+    is real behaviour, and the behaviour is a tip-and-hoist, not a grasp.
+    That is a TASK/REWARD observation, identical on both arms, not a
+    timestepping one -- but it is what a reward of 86 actually looks like,
+    and it should not be read as a solved lift.
+
+FINAL-POLICY PLAYBACK AND THE CROSS EVALUATION. The in-training recorder's
+last clip lands at iteration 200, so each arm's model_299 was replayed under
+one identical protocol (32 envs, seed 42, 300-step clip) -- and each policy
+was ALSO replayed on the OTHER arm's physics. If the two timesteppers
+produced materially different dynamics, a policy trained under one should
+degrade under the other. All four cells:
+
+    policy \ physics        FIXED                    ADAPTIVE
+    FIXED       acquires the mug, holds it   acquires, holds it aloft
+                aloft for the rest of clip   for the rest of the clip
+    ADAPTIVE    acquires, holds it aloft     acquires fastest of the four,
+                for the rest of the clip     holds it for the whole clip
+
+NO CELL DEGRADES. Both policies transfer to the other arm's physics with no
+visible loss of competence, which is direct behavioural evidence that the two
+timesteppers produce dynamics this task's policies cannot tell apart. (This
+is qualitative: `play` emits no reward summary, so there is no number behind
+the four cells, only the rendered behaviour.)
+
+### TASK 2 VERDICT
+
+**NO SEPARATION OBSERVED AT THIS HORIZON.** Over 300 iterations at 1024
+envs, the two arms' reward, episode length and termination mix are on top of
+each other -- 86.54 against 86.03 in the final band, 0.6% apart, against a
+measured same-config replicate spread of 2.4x. Both learn the same
+tip-and-hoist strategy at the same rate, the videos of all four
+policy x physics cells are behaviourally indistinguishable, and each arm's
+policy transfers to the other arm's physics without degrading. The adaptive
+arm costs 3.67x the wall for that identical outcome.
+
+The one difference that survives is the fixed arm's 0.17-0.24%
+physics_diverged rate against the adaptive arm's exact zero -- and the
+substep probe REFUTES the reading that adaptivity is rescuing those solves,
+because giving the fixed arm smaller steps multiplies the rate by 15.6x
+rather than removing it.
+
+THIS IS A CHARACTERIZATION OF A BOUNDED RUN, NOT A PAPER CLAIM. It is one
+seed per arm at a horizon neither arm has converged at, on a stack whose
+same-seed replicate spread is larger than every difference reported, with
+both arms' contact sets silently degraded past iteration ~100 by a
+triangle-pair pool neither of them fits in. What it does establish, and what
+the campaign did not have before today, is that the comparison RUNS, that it
+runs matched, and that at this horizon it shows nothing.
+
+### RESIDUAL RISK — WHAT THIS PASS COULD NOT ESTABLISH
+
+P1 **ACR IS AT FULL STRENGTH IN THE REGIME THIS PASS SWEPT, AND WAS NOT
+   SEPARATED.** `attempt_consistent_r` is ON for the adaptive arm and
+   structurally inert on the fixed arm (s == 1 with no half solves) -- read
+   live off both arms this pass. It scales W, hence rn_hard AND the
+   tangential rt, by s ~ 2.1 in the adaptive arm's COMMITTED half solves.
+   Pass 25 priced that at the production law and found it small (+3.5%
+   deepest phi0) precisely BECAUSE only ~11% of contacts were in the clamped
+   branch. In this pass's near-rigid rungs 100% are, so the same mechanism
+   softens 100% of the adaptive arm's committed normal law there. Every
+   adaptive-vs-fixed penetration number inside the near-rigid regime is
+   therefore ACR-confounded, and this pass did not run the ACR-off arm to
+   separate it. This does NOT touch the task-1 verdict, which rests on
+   failure counts and on within-arm h-scaling.
+
+P2 THE TWO ARMS STILL DRAW CONTACTS FROM DIFFERENT SOURCES (pass-25 R3).
+   The fixed arm consumes the manager CollisionPipeline, the adaptive arm
+   owns its own. Both were verified this pass to carry the same capacity
+   (2048/world), the same triangle-pair budget and the same determinism
+   resolution, and they report the same live contact count at rest (54 vs
+   54) -- but the SETS were not proven identical. Between-arm penetration
+   comparisons inherit that.
+
+P3 TRAJECTORY DIVERGENCE BOUNDS WHAT A BETWEEN-ARM NUMBER MEANS. After 270
+   scripted steps two arms with different dt are in different scene states.
+   The trustworthy axis is WITHIN an arm across rungs (identical seed and
+   action stream); between-arm differences are only load-bearing where they
+   are qualitative (0 vs 620 divergences), not where they are a factor of
+   two in a percentile.
+
+P4 THE tau -> 0 EXPONENT ENDPOINT. See (d): -2.000 is validated by the
+   formula's <1% agreement at tau >= 4 ms, not by a direct penetration
+   measurement at tau = 0, where the signal falls below trajectory noise.
+
+P5 **THE SCRIPTED RIG UNDERSTATES TRAINING, TWICE OVER, AND THIS IS THE
+   PASS'S BIGGEST METHODOLOGICAL LESSON.** The sweep's rest/press/swing/flail
+   stream produced ZERO physics_diverged on the production fixed arm at the
+   authored law -- the training run fires that same term at ~0.24% of
+   terminations on the same arm and the same law. The same rig showed a peak
+   triangle-pair demand comfortably inside its budget -- the training run
+   exceeds the budget by 1.8x. A learning policy reaches states no scripted
+   stream in this campaign has reached, and BOTH of the failure modes this
+   pass cares about are invisible below it. Every "no failure observed"
+   result obtained on a scripted rig, in this pass and in passes 25-29, is a
+   statement about the rig.
+
+P5b PENETRATION UNDER THE LEARNED POLICIES WAS NOT INSTRUMENTED. The training
+   runs report terminations, not phi0. The penetration comparison between the
+   arms in this entry is the matched-scripted-stream one at the authored law
+   (fixed deepest -4.316e-3 / P5 -2.7556e-5; adaptive -4.218e-3 /
+   -2.7563e-5). Closing this needs a checkpoint-loading probe that dumps
+   phi0 under each arm's own trained policy; not done.
+
+P6 ONE MACHINE, TWO SEEDS. Penetration statistics repeat to 0.00-0.93%
+   between seeds; RARE divergence events do not (2 vs 0 at one rung, 27 vs 7
+   at another). No rare-event rate in this entry should be read to better
+   than an order of magnitude.
+
+P7 sap_warp is still joined by SAP_WARP_PATH rather than pinned (D11), so
+   every number here is valid only against sap_warp afd5dc6.
+
+### CORRECTION TO THE PASS-29 RECORD — THE DEMAND NORMALIZATION
+
+Pass 29 reported the adaptive arm doing "7.7417 accepted world-substeps per
+world-boundary against the fixed arm's 2.0000", concluded "3.87x the
+substeps" and "0.405x the cost per accepted substep (2.47x cheaper per unit
+of integration work)". THAT COMPARISON MIXES UNITS. `num_substeps` is
+substeps per PHYSICS BOUNDARY; `cumulative_accepted_steps()` accumulates over
+a whole ENV STEP, and one env step contains `decimation` = 4 boundaries.
+
+MEASURED rather than reasoned (p30_demand_norm_probe.py wraps the manager's
+own solver entry point and COUNTS the calls; p30_norm_*.json, 64 envs):
+
+    fixed     240 solver calls / 30 env steps = 8.0 per env step
+              = 4.0 boundaries x 2 substeps;  mean substep dt 4.1667 ms
+    adaptive  120 solver calls / 30 env steps = 4.0 boundaries per env step
+              accepted 1.95 per world-boundary; mean substep dt 4.2735 ms
+    INVARIANT THAT PROVES THE UNITS MATCH: both arms advance exactly
+    0.03333333 s of simulated time per env step.
+
+Re-run at the pass-29 scale and conditions (1024 envs, 120 timed steps after
+20 warmup, seed 42, same uniform-random stream, 2 repeats each,
+p30_char_*.json):
+
+                       ms/env step   accepted substeps    us per accepted
+                                     per world-BOUNDARY   world-substep
+      FIXED (2 sub)    50.41 / 50.55       2.0000           6.153 / 6.170
+      ADAPTIVE (march) 79.06 / 79.17       1.9354           9.972 / 9.987
+
+So the corrected statement is the opposite of the recorded one: the two arms
+do essentially the SAME integration work per boundary (adaptive 3.2% FEWER
+accepted substeps, at a 3.3% LARGER mean substep), and demand-normalized the
+adaptive arm costs **1.62x MORE** per accepted world-substep, not 2.47x less.
+The 1.57x wall ratio is almost entirely per-substep price, not extra work.
+Repeats agree to 0.3%. Pass 29's raw wall and ms/step numbers are reproduced
+here to within 0.2% and stand; only the normalization and the two ratios
+derived from it are withdrawn.
+
+### CORRECTION TO THE PASS-25 RECORD — HOW FAR THE REGIME ACTUALLY IS
+
+Pass 25 (F4/D12) stated that entering the near-rigid regime needs "authored
+contact stiffness up ~6-7 orders". Measured this pass: the clamp takes over
+at k ~ 2.5e4 at the production substep, i.e. **1.3 decades**, and by k = 1e6
+it is 100% of contacts. The conclusion pass 25 drew -- that the production
+config runs compliant -- is confirmed and is not affected; only the distance
+to the boundary was overstated, which matters because it made the regime look
+out of reach when it is one line of asset authoring away.
+
+### WHAT MARCO MUST DECIDE NEXT
+
+M-A **DOES THE PAPER STILL WANT THE NEAR-RIGID CLAIM?** The regime is
+    reachable (one NewtonShapeCfg `ke` and one `sap_contact_tau_d`), the
+    exponent does hit -2.000, and BOTH arms are stable there with SHALLOWER
+    penetration than production. So the honest framing is not "adaptive
+    rescues near-rigid contact" -- there is nothing to rescue at beta = 1 --
+    but "error-controlled dt at matched cost", which is a smaller claim.
+    Decide which claim the paper makes before any more GPU time is spent.
+
+M-B **beta IS THE ONLY KNOB THAT MOVES THE CEILING, AND IT IS ON THE RED
+    LINE.** rn_hard = beta^2/(4 pi^2) W. Lowering beta raises the maximum
+    effective stiffness quadratically and is the only way this scene can be
+    made genuinely near-rigid. It is a Drake constant and the validity red
+    line forbids a loop from touching it. If the paper needs the stiff
+    regime, this is the decision, and it is his alone.
+
+M-C **THE TASK'S num_substeps >= 2 GUARD IS WRONG FOR SAP** (section (g)).
+    It blocks the strictly matched fixed baseline on the strength of a claim
+    measured on the MuJoCo solver. Either scope the guard to the MuJoCo
+    backend or delete it for SAP; task file = his.
+
+M-D **ACR IN THE NEAR-RIGID REGIME** (residual P1). If any near-rigid
+    experiment goes ahead, the ACR ON/OFF A/B has to run with it: at the
+    production law ACR touched ~11% of contacts, in the swept regime it
+    touches 100%. D8's "leave it on" was decided against the 11% number.
+
+M-E The pass-29 demand-normalized numbers in the ledger were withdrawn and
+    replaced above. If any of them reached a draft or a slide, they need
+    correcting there too.
+
+M-F **SINGLE-SEED TRAINING COMPARISONS ARE BELOW THE NOISE FLOOR ON THIS
+    STACK** (the accidental control). Two same-seed adaptive runs differ by
+    2.4x in mean reward at iteration 9. Any learning claim needs replicates
+    per arm -- budget for at least 3 seeds x 2 arms, or run with
+    NEWTON_SAP_DETERMINISTIC=1 and accept its cost, before anything about
+    learning outcomes goes in a paper.
+
+M-G **RAISE THE TRIANGLE-PAIR BUDGET BEFORE THE NEXT TRAINING RUN.** Measured
+    peak demand under a trained policy at 1024 envs is 29,464 pairs/world
+    against the 16,384/world budget pass 29 landed. This is a one-line change
+    to `_sap_triangle_pair_budget` and it costs memory: at 1024 envs the pool
+    is 12 B/pair, so 32,768/world would take the pool from 7.35 GB-era sizing
+    to roughly double it -- against 32 GB of device memory and a measured
+    7.35/7.73 GB footprint, that fits at 1024 and would need re-checking at
+    4096, where pass 29 measured 25.32 GB already. NOT CHANGED THIS PASS: it
+    is a landed pass-29 rule, changing it mid-experiment would have
+    invalidated the runs in flight, and the right number should come off a
+    demand measurement at the scale that will actually be used.
+
+### PROVENANCE (all p30_ prefix, no p13-p29 artifact overwritten)
+
+  probes    p30_regime_probe.py (the sweep; the runtime material override and
+            its live read-back verification), p30_demand_norm_probe.py (wraps
+            the manager's solver entry point to COUNT boundaries),
+            p30_char_probe.py (speed + demand at 1024 with the measured
+            normalization), p30_diag_probe.py (per-substep causal order at
+            the failing rung), p30_sweep_analysis.py, p30_train_parse.py,
+            p30_repro_check.py, p30_filmstrip.sh
+  chains    p30_regime_chain.sh, p30_corner_chain.sh, p30_s1_chain.sh,
+            p30_norm_chain.sh, p30_char_chain.sh, p30_qs_chain.sh,
+            p30_train_chain.sh + p30_train_adapt2.sh, p30_play_chain.sh,
+            p30_substep_chain.sh, p30_post_driver.sh
+  sweep     p30_reg_{fixed_s2,fixed_s4,fixed_s8,adapt}_seed{42,7}.{json,log}
+            p30_cor_* (the CENIC corner), p30_s1_* (matched boundary),
+            p30_qs_* (quasi-static), p30_sweep_tables.txt
+  fairness  p30_parity_{fixed,adapt}.{json,log}
+  demand    p30_norm_{fixed,adapt}.json, p30_char_{fixed,adaptive}{1,2}.json
+  training  p30_train_{fixed,adaptive}.log,
+            p30_train_adaptive_attempt1_killed.log, p30_train_series.json,
+            p30_play_*.log, p30_substep_s{2,4,8}.log
+  substep   p30_substep_chain.sh + p30_substep_s{2,4,8}.log (the step-size
+            test of the fixed arm's divergence rate)
+  overflow  p30_overflow_census.py
+  video     p30_vid_*.png filmstrips (iterations 0/100/200 on both arms and
+            on the killed replicate; all four final-policy playback cells),
+            p30_play_{fixed_on_fixed,adaptive_on_adaptive}.mp4 and
+            p30_play_cross_{fp_on_a,ap_on_f}.mp4
+  progress  p30_*_progress.txt (each carries the interleaved
+            nvidia-smi compute-app samples that certify GPU exclusivity)
+  W&B       project rubato-trossen, runs p30-sap-fixed-1024x300 and
+            p30-sap-adaptive-1024x300-r2
