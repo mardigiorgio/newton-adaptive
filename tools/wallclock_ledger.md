@@ -1530,6 +1530,153 @@ p20_prof_plateau.{nsys-rep,sqlite}, p20_split_kernels.py ->
 p20_split.txt (the maps, FWBD, c(a) fits), p20_overlap_value.py ->
 p20_overlap.txt (joins, validation, point estimate).
 
+## PASS-21 — FWBD narrowing LANDED default-ON (2026-08-16; sap_warp
+## aac9694 + newton-adaptive 52005367; kernel-time win real and large,
+## wall realization limited by a dispatch-bound deep tail — the finding
+## that reorders the roadmap)
+
+IMPLEMENTATION (NEWTON_SAP_NARROW_V3, default ON, "0" restores the
+full-width launches byte-for-byte; bitwise class — no arithmetic
+changed, only which envs launch; both graph cache keys carry the two
+carrier flags):
+1. fused_update: list-indexed through the PREPARE (world-active) list
+   at the env-grid budget. The prep list covers every env whose mask or
+   state the kernel can change (newton-live, just-converged, cap-hit
+   all belong to still-marching worlds; in-kernel category branches are
+   unchanged for them); worlds outside the list entered the solve
+   pre-converged from the full-width entry init, so only their
+   dead-state rewrites (zero cost/norms, newton_active re-zero) are
+   skipped — convergence masks stay correct for every env (proven:
+   G8 phi0 ON==OFF byte-identical; G2 family bitwise).
+2. Serial LS-direction chain: search_direction + init_backtracking +
+   accumulate_ls_iterations newton-list-indexed, base_cost call routed
+   through the same list. Init and accumulate narrow TOGETHER (a
+   de-listed env's stale ls_accepted/ls_iterations must never be
+   re-read into the total); the init narrow is gated on ladder budget
+   > 1, where every ladder exit leaves ls_active 0 (the budget-1
+   kept-active corner needs the full-width clear). Exact-root LS
+   variant left unrouted (identity lists).
+3. Per-attempt contact scatter (4 variants) + per-attempt det rank
+   walk: world-gated early-outs after the env is computed; per-row
+   arithmetic and per-world slot order unchanged for active worlds;
+   the count reset honors the gate (inactive worlds keep their counts
+   — the frozen buffer would reproduce them). Boundary-cadence
+   external-slot walk stays ungated (every world marches a fresh
+   boundary).
+4. Copy fleet NOT narrowed, by measurement: p20/p21 t-ratios 0.97-1.15
+   (deep vs full per-instance) = width-independent = launch-bound;
+   pass-19 law says no pay, and the p21 split confirms (remaining
+   deep-slab FWBD 0.277 ms = copies 0.107 + list machinery 0.090 +
+   eval_rigid_tau 0.036 — the list machinery IS the compaction
+   infrastructure and the entry init is full-width by contract).
+Tripwires: emission-time narrow-site tags on both carriers
+(fused_update / ls_search_direction / ls_init_backtracking /
+ls_accumulate_iters; jacobian scatter_world_gate), env-grid capacity
+guard bounds every new list-indexed launch, OFF-leak asserts in every
+pinned-off probe cell.
+
+GATES (all green on final bytes, p21_ artifacts): G1 construct; G2
+flag-equivalence 40 PASS cells incl. the NEW narrowv3 family
+(eager/graph/conditional judged BITWISE against a same-stack pinned-off
+reference — production fused stack + march compaction + acr=0) with
+engagement + leak guards; probe fix folded in: the ls-compact
+engagement assert now expects a ZERO counter under the folded alpha-max
+rung (the fold deletes the whole trial launch chain, LS-list rebuilds
+included — the march+fused-stack combination had never been probed);
+G3 march-equivalence PASS, iterations [6,25,20,24,19] UNCHANGED; G4
+determinism PASS (954==954); G5 containment PASS; G6 err_tol 0 viol /
+2880, max ratio 0.745, floor 0, dt_run_min 1.68e-3; G7 rest ok; G8
+phi0 ON-vs-OFF byte-identical.
+
+DECISIVE A/B (1024x8 seed 42, det unset, production): per-substep
+(coll) whole-run ON 2.774 vs OFF 2.922 = -5.1%; late-3 2.614 vs 2.719
+= -3.9%. Substeps ON/OFF 1.173 (det-unset trajectory divergence;
+per-substep is the metric). Ops: first ON launch segfaulted in USD
+parse during scene build (pre-solver, no SAP frames on stack); rerun
+clean — startup flake, not the flag.
+
+REGIME SPLIT (p21_prof_run.sh = exact p20 rig replica, same [1928,
+1967] window, production flags eager; OFF baseline = the committed p20
+profile): deep slab 4.4293 -> 3.7557 ms (-15.2%); narrow floor c0
+3.907 -> 3.148 (-19.4%); wide c0 12.576 -> 11.435 (-9.1%); window GPU
+at p20's FIXED slab mix 7.550 -> 6.859 ms/slab = -9.2%. Deep-slab FWBD
+aggregate 2.074 (46.8%) -> 0.277 ms (7.4%); the classifier confirms
+every targeted kernel now narrowed/live (fused_update grid 0.06,
+ls _c/_i/_a 0.25, scatter t-ratio 1.07 -> 0.17 at 0.368 -> 0.052
+ms/slab, base_cost 0.06). Per-site deep-slab deltas: scatter -0.32,
+fused_update -0.09, ls_chain -0.04, base_cost -0.003. REALIZATION:
+of p20's 2.07 ms/deep-slab "deletable" FWBD, ~0.67 was deletable
+width-work; the rest is live-env SERIAL latency (one-thread-per-env
+dof^2 fp64 chains) plus per-launch floors — pass-19's law, now
+measured at kernel level.
+
+PLATEAU RE-MEASURE (p21_run.sh replica, det unset): iters 19-24 mean
+12.93 s/iter (p19 14.21) — but window demand 4641 substeps/iter vs
+p19's 5170 (-10.2%, det-unset trajectory divergence), so the wall is
+NOT clean lever evidence; ms/substep 2.79 vs 2.75 (+1.5%,
+mix-confounded the other way: fewer, wider slabs). Whole-run 243.9 s,
+cum substeps 89,271 (p19 89,694). CONTROLLED VERDICT — det=1
+matched-trajectory 25-iter pair (p21_det_run.sh): demand IDENTICAL
+(cum 88,935 == 88,935; window 4995 == 4995 — the bitwise class
+certificate holding at production scale), plateau wall ON 14.71 vs
+OFF 14.83 s/iter = -0.8%; ms/substep 2.94 vs 2.97 = -0.9%.
+
+THE FINDING: the deep-straggler tail is DISPATCH-BOUND under graph
+replay, not kernel-throughput-bound. Deleting 15-19% of the tail's
+kernel time moved its wall < 1% at matched trajectory; kernel share of
+plateau wall dropped from p20's 0.97 to ~0.89-0.90 on the v3 bytes
+(134.7 ms/bnd wall vs ~120 ms/bnd eager kernel sum, cross-trajectory
+approximate). The p20 window-GPU ceiling (25.2% FWBD) was a
+KERNEL-TIME ceiling; its wall-realizable share at the plateau is the
+~1-5% class (A/B -5.1%/-3.9% in the wide-heavier early window, det
+pair -0.8% at the straggler-heavy plateau). DECISION: kept default ON
+per the stated criterion (regime split material: deep -15.2%, c0
+-19.4%, fixed-mix window -9.2%, gates green; A/B supporting) — the
+kernel-time deletion is real, costs nothing, and every future lever is
+priced against a cleaner stack; but the plateau headline stays
+demand-honest: the lever's wall value at the plateau is ~1%, and
+12.93 s/iter is a trajectory artifact, not the lever.
+
+GRANT ARITHMETIC REFRESH + OVERLAP RE-PRICE: 10 s/iter at p19 demand
+needs 1.93 ms/substep; production price after this pass ~2.75-2.79
+(mix-dependent), det=1 2.94. REVISION of p20: "FWBD narrowing 15-20%
+realizable" was kernel-time arithmetic — its WALL share at the
+plateau measured ~1%; the 10 s goal is NOT reachable by work-price
+levers inside the tail. What the tail is priced in is SLABS
+(dispatch floors ~3.1-3.7 ms each). Cross-boundary overlap deletes
+whole slabs — floor included — so its wall value is AT LEAST its
+p20 kernel value (19.7% of late-window GPU; slab count 10,061 ->
+5,661 at ceiling) and, in the dispatch-bound tail, likely above it:
+overlap is now decisively the TOP lever, and slab-count/dispatch
+reduction (not kernel-time) is the only currency that pays there.
+Post-v3 repricing note: c0 fell only 19% (not the ~36% p20 assumed at
+70% realization), so the p20 INTERPLAY estimate "overlap reprices to
+12-15% post-narrowing" was pessimistic — the straggler share of
+window cost barely moved (32.7% -> 30.5% fixed-mix): overlap stays
+~18-20% of the (9% cheaper in kernel terms) window. Route to 10 s:
+overlap (~11.4-12.6 s/iter projected, p20 design + consent pending)
+THEN the estimator escalation (single-solve ~1.20 ms/substep) or an
+equivalent slab-count lever; work-price levers inside the tail are
+closed by this pass's measurement.
+
+PASS-22 RECOMMENDATION: (1) implement the run-ahead single-march
+overlap per the p20 design against these bytes — it is the only
+priced lever whose currency (slab deletion) matches the measured
+bottleneck (dispatch floors); put the mid-window-visibility consent
+question to Marco first (escalation stands); the ADOPT/ANCHOR scatter
+split it wanted is already half-realized by the world gate (scatter
+0.052 ms/deep-slab). (2) Micro only if piggybacking: eval_rigid_tau
+narrow (0.036, t 0.76) + fused_ladder list-bound (dead-tile share
+~0.1 ms/deep-slab) — ~2% kernel class, wall value doubtful per this
+pass. (3) If overlap is deferred: measure the dispatch floor directly
+(slab wall vs kernel span inside one replay) to size a
+launch-count-reduction lever honestly before building one.
+Provenance: p21_full_chain.sh, p21_g1..g8 logs/JSONs,
+p21_ab_run.sh -> p21_ab_{on,off}.*, p21_ab_compare.py, p21_prof_run.sh
+-> p21_prof_plateau.{nsys-rep,sqlite} + p21_prof_1024x25.*,
+p20_split_kernels.py -> p21_split.txt, p21_run.sh -> p21_plateau.*,
+p21_det_run.sh -> p21_det_{on,off}.*, p14_plateau_analyze.py.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -1566,21 +1713,24 @@ p20_overlap.txt (joins, validation, point estimate).
    ceiling priced (entry above). Pass-20 DONE: the straggler regime
    profiled at production scale (entry above) — the two live levers,
    in order:
-   (e) FWBD NARROWING (NEW TOP LEVER, pass-20 (c)): 25.2% of
-   plateau-window GPU is full-width-by-design work inside narrow
-   slabs — fused_update (whole kernel), the serial LS-direction
-   chain (regime-dependent revival of the pass-15c refutee), the
-   per-attempt contact scatter (t-ratio 1.07), base_cost + prep
-   copies. Deletable GPU WORK (launch-count law respected);
-   semantics-free; pass-21 implementation target;
+   (e) FWBD NARROWING: DONE pass 21 (entry above) — LANDED default-ON
+   (NEWTON_SAP_NARROW_V3, bitwise class, full gate chain green).
+   Kernel-time win large (deep slab -15.2%, narrow floor c0 -19.4%,
+   fixed-mix window GPU -9.2%) but the deep tail measured
+   DISPATCH-BOUND under graph replay: wall value ~1% at the plateau
+   (det=1 matched pair), -3.9..-5.1% per-substep at the wide-heavier
+   8-iter window. Work-price levers inside the tail are CLOSED by
+   that measurement;
    (c) per-boundary D2H readback chain: DEPRIORITIZED (pass-7
    overlap evidence, pass-18 note); (d) cross-boundary overlap of
-   independent worlds' marches: POINT-PRICED pass 20 — 19.7% of
-   late-window GPU at ceiling (~11.4-11.5 s/iter projected),
-   reprices to ~12-15% after (e) lands; run-ahead single-march
-   design written (pass-20 entry), blockers (b)(c)(d) resolved,
-   mid-window-visibility consent pending with Marco — implement
-   AFTER (e), pricing against the post-(e) stack.
+   independent worlds' marches: NOW THE TOP LEVER — it deletes whole
+   slabs (dispatch floor included), the only currency that pays in
+   the dispatch-bound tail. Pass-20 point price 19.7% of late-window
+   GPU at ceiling (~11.4-12.6 s/iter projected) holds ~18-20% after
+   pass-21 (straggler cost share barely moved); run-ahead
+   single-march design written (pass-20 entry), blockers (b)(c)(d)
+   resolved, mid-window-visibility consent pending with Marco —
+   pass-22 implementation target on the post-v3 bytes.
 3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
