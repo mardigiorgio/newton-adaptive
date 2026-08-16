@@ -1856,6 +1856,159 @@ p22_ab_compare.py, p22_run.sh -> p22_plateau_{off,on}.*,
 p14_plateau_analyze.py, p22_alloc_trace*.py / p22_condif_bisect*.py
 (the capture-safety forensics), p22_g5_repro.py.
 
+## PASS-23 — demand instrument + crossing-batch throttle LANDED; the
+## pass-22 plateau claim DECONFOUNDED and revised to ~0 (2026-08-16;
+## sap_warp 2a119d2 untouched; default STAYS OFF — see the consent-relay
+## note in the escalations section)
+
+INSTRUMENT (demand counter; host-read-only, no kernel change): the
+per-world ACCEPTED substep counter _cum_accepted (maintained by _adapt_dt
+since the solver landed, never exposed) now reads out as
+cumulative_accepted_steps() beside cumulative_substeps() (= slabs x 3 --
+the batch-iteration axis, schedule-DEPENDENT); the manager telemetry line
+appends cumulative_accepted= ra_cross= ra_fires= (getattr-guarded; the
+MuJoCo twin is untouched), and the march CSV gains cum_acc, ra_cross,
+ra_fires columns. Accepted demand is the schedule-invariant work axis;
+ms/accepted-substep is the demand-normalized price. WHAT THE COUNTER
+IMMEDIATELY EXPOSED: same-config det-unset draws differ 2-10% in demand
+between arms (measured pairs: 1.024-1.104), and det=1 does NOT equalize
+demand across the ON/OFF pair (the 4e-9 clock-sliver class seeds chaos;
+p22 predicted the p21 det-pair trick would not transfer -- confirmed and
+measured: det=1 pair demand ratio 1.0697). Demand EQUALITY is therefore
+unprovable for ON-vs-OFF; demand OBSERVABILITY replaces it, and every
+wall claim below is demand-normalized.
+
+DECONFOUNDED PLATEAU (Task-1 deliverable; REPLACES the pass-22
+"-16.9% (confounded)"): the run-ahead plateau value at matched demand is
+-4% TO 0 PER ACCEPTED SUBSTEP:
+  det=1 pair (shipped ON defaults, 1024x25 seed 42): plateau(19-24)
+    ms/acc 0.959, whole-run 0.973, late-3 0.941, at demand ON/OFF
+    1.088/1.070/1.082;
+  det-unset pairs: unthrottled ON plateau 0.980 (demand 1.100), throttled
+    default 1.009 (demand 1.104);
+  25-iter det-unset WHOLE-RUN ms/acc scatters 0.947-1.056 across arms --
+    single det-unset pairs cannot resolve effects below ~+-6% at this
+    scale (that scatter IS the pass-22 headline's error bar).
+The p22 slab axis 0.833 was predominantly demand draw. VALIDITY
+CERTIFICATE: the det=1 OFF arm reproduced p21's det-pair trajectory
+exactly (cum evals 88,935 == 88,935) -- the OFF stream is bit-preserved
+at production scale on these bytes. det=1 x adopt-ranking interaction,
+certified and priced: the canonical two-pass key-ranked adopt runs per
+FIRE under det=1, amplifying fire cost (det=1 ON per-slab 1.126 vs its
+OFF; det-unset ON 1.01-1.13); G4b certifies repeat-bitwise in-mode.
+
+THROTTLE (crossing-batch; inside ON mode only, no new default-ON
+surface): NEWTON_SAP_RUNAHEAD_BATCH (count bound; >=1 absolute, (0,1)
+fraction of worlds) + NEWTON_SAP_RUNAHEAD_BATCH_AGE (max-hold march
+iterations), defaults 0.5 / 2 (measured below). A world reaching its
+boundary HOLDS parked there (no attempts -- the per-boundary march's
+parked-world state) until COUNT (pending >= bound), AGE (a non-empty
+pending set held `age` iterations -- the counter tracks consecutive
+iterations with pending work, so the FIRST lander bounds every holder's
+delay), or LIVENESS (nothing else can march) opens the gate. Crossing is
+only ever DELAYED, never skipped or reordered; the masked collide still
+fires at exactly each world's boundary-entry state (held worlds are
+parked AT the boundary it reads -- the anchoring invariant is
+structural). The diverged latch-park is ungated (containment visibility
+unchanged). _debt_guard_target gains the held-world conjunct (sim_time <
+next_time): a parked world completed its boundary and carries no debt;
+no-op on unthrottled streams. Cost: two tiny device kernels per march
+iteration; both knobs ride both graph cache keys.
+
+FIRE DISTRIBUTION (p23_fire_b1.marchcsv, 1024x8 det unset, unthrottled):
+3.19 fires/call wide / 4.55 late (max 14) vs OFF's one collide per call;
+crossings arrive as one large window-sync batch plus small straggler
+fires (worlds/fire mean 158 wide, 86 late) -- the small fires are the
+tax.
+
+TUNING (1024x8 det unset seed 42 vs shared OFF arm; W0-6 = matched wide
+window; fires at final telemetry frame):
+  arm            W0-6 wall  W0-6 ms/slab  W0-6 ms/acc  late-3 ms/acc  fires
+  unthrottled    1.011      1.291         0.977        1.028          2532
+  count 32       1.029      1.189         0.995        0.948          1968
+  count 128      0.951      1.156         0.927        0.833          1776
+  count 512      0.940      1.061         0.923        0.784           950
+  count 1024     0.938      1.041         0.939        1.000           562
+  0.5 + age 6    1.040      1.142         1.014        0.977          1001
+  0.5 + age 2    0.903      1.160         0.886        0.756          1317
+COUNT-ONLY FAILS AT THE PLATEAU (25-iter, count 512, pre-age bytes):
+plateau slabs 1.264 / ms/acc 1.060 vs OFF -- the liveness rule alone
+turns the sub-bound trailing set into a GLOBAL BARRIER (half the fleet
+serializes behind the deepest straggler). The right edge (count 1024 =
+lockstep generations) confirms the mechanism: late slabs return to OFF's
+count (1.010), ms/acc to 1.000, demand tracking OFF to 1e-4. The AGE
+rule deletes the barrier (max hold 2 thin iterations) while halving
+fires: (0.5, 2) dominates the wide regime (-10% wall vs OFF where
+unthrottled was +1%; tax +29% -> +16%/slab; merge preserved, slabs
+0.778) and holds the plateau (det-unset 1.009; det=1 0.959). HOLD
+LATENCY, NOT FIRE COUNT, IS THE DOMINANT THROTTLE COST. DEFAULTS KEPT:
+0.5 / 2.
+
+GATES (all green on final bytes, p23_ artifacts): G1 construct OFF+ON;
+G2 flag-equivalence PASS (legacy cells pin runahead 0, bitwise; the
+runahead family repeat/graph/conditional arms bitwise at the shipped
+throttle defaults; both throttle env vars added to the probe's cleared
+set); G3 march-equivalence PASS, iterations [6,25,20,24,19] UNCHANGED;
+G4 determinism OFF+ON PASS; G5 containment OFF+ON PASS; G6 err_tol ON
+0 violations / 2880, max ratio 0.995, floor 0, dt_run_min 1.64e-3;
+G7 rest ON ok; G8 phi0 ON-vs-OFF identical TO THE DIGIT. MIXED-TIME
+ORACLE (extended, committed): NEW tier 5 throttle invariance --
+window-edge records BITWISE across gate rules {(1,inf),(3,inf),(8,inf),
+(8,2)} ("dt" excluded as the already-documented attempt-transient dead
+state; ideal_dt compared), crossings at the structural count in every
+arm, adopts 16 -> 11/6/8 with an engagement guard (all-equal = vacuous);
+tiers 1-4 byte-identical to the pass-22 run (crossings=48, adopts=16,
+lead 2.000 ms, |dqd| 3.7e-9).
+
+OPS INCIDENT (recorded because the one-GPU-process rail depends on it):
+one 25-iter launch died in the known pre-solver USD-parse startup abort
+(p21 class; no SAP frames on stack); the measurement wrapper's exit code
+was swallowed by its trailing echo, so the && chain continued and
+overlapped a second training process on the GPU -- three runs were
+VOIDED (2x wall pollution), deleted, and re-run clean after the wrapper
+gained an explicit exit. Every kept run's gpumem trace peaks at the
+single-process 20.5 GB (det pairs 9.5 GB); cleanliness is certified per
+run, not assumed.
+
+VERDICT: the demand instrument did its job -- it cost nothing, and it
+deconfounded the campaign's biggest outstanding number: run-ahead is NOT
+a plateau lever (~0 at matched demand); its real, reproducible value is
+the wide/flail regime (-10% matched-window wall with the throttle;
+det=1 whole-run -2.7%), i.e. early training phases. Landed default OFF
+as directed; the flip decision now rests on materially different
+(weaker) value than pass 22 advertised.
+
+GRANT ARITHMETIC REFRESH: OFF plateau this draw 12.88 s/iter (0.0609
+ms/acc at 211k accepted/iter; p22's 15.09 and p19's 14.21 bracket the
+demand-draw spread -- plateau walls move +-8% between same-config runs,
+demand-driven). ON at the plateau buys -4% to 0: the 10 s goal is NOT
+advanced by the flip (10 s needs ~-22% from the current OFF plateau).
+The estimator escalation (single-solve ~1.20 vs current ~2.75
+ms/substep arithmetic) remains the only priced lever with >20% headroom;
+work-price levers in the tail stay closed (pass 21); overlap is now
+measured ~plateau-neutral (this pass). 4k/2k projection: ON is
+demand-neutral at the plateau, so 4096 feasibility is unchanged by the
+flip (the un-OOM lever remains the triangle-pair cap task-cfg line --
+Marco's); ON's early-regime -10% shortens the flail phase at any scale.
+
+PASS-24 RECOMMENDATION: (1) put the RE-SHARPENED consent question
+(escalations below) to Marco -- the honest pitch is now "faster early
+training, plateau-neutral, semantics certified", not a plateau win;
+(2) the ESTIMATOR escalation stands as the only route to 10 s -- nothing
+else in-rails is both unmeasured and factor-scale; (3) in-rails live:
+backlog item 1 (un-narrowed env-axis launches, mechanical bitwise,
+few-percent class); (4) MEASURE (nsys, before building anything) whether
+the masked collide's cost scales with the crossing subset or carries a
+full-width broadphase floor -- the residual +16%/slab wide-regime tax is
+the only overlap cost left, and its scaling law decides whether a
+narrower collide is worth building; (5) if Marco flips: ride the
+launch-checklist alignment probe + a task-level no-sub-action-cadence-
+reader assert.
+Provenance: p23_run.sh, p23_sweep.sh, p23_suite25.sh, p23_compare.py,
+p23_fire_b1.*, p23_ab_{off,b1,b32,b128,b512,b1024,k5a6,k5a2}.*,
+p23_plateau_{off,on,b1,k5a2}.*, p23_det_{off,on}.*, p23_final_chain.sh,
+p23_g1..g8 logs/JSONs, p23_oracle.log, p23_oracle_smoke*.log.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -1912,7 +2065,13 @@ p14_plateau_analyze.py, p22_alloc_trace*.py / p22_condif_bisect*.py
    catch-up collide fires cost +31%/slab in the matched early window
    (whole-run net -3.4%). Default flip = Marco's consent (escalation
    below); pass-23: demand counter, fire accounting, bounded
-   crossing-batch throttle.
+   crossing-batch throttle. Pass-23 DONE: all three landed (entry
+   above) -- the deconfounded plateau value is -4%..0 at matched demand
+   (the -16.9% was demand draw), the throttle (0.5/2) shaves the
+   wide-regime tax +29% -> +16%/slab at -10% matched-window wall, and
+   overlap is measured ~PLATEAU-NEUTRAL: the slab-deletion route to
+   10 s at the plateau is CLOSED by measurement -- the estimator
+   escalation is the remaining factor-scale lever.
 3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
@@ -1937,23 +2096,33 @@ without Marco).
   the current 2.75. Pass-20 arithmetic makes ~10 s reachable WITHOUT
   it (FWBD narrowing + overlap); whether estimator-semantics changes
   are on the table is still his call; nothing has been touched.
-- OVERLAP MID-WINDOW VISIBILITY (pass 20; SHARPENED pass 22 — the
-  mode is BUILT, certified and landed DEFAULT OFF; the flip is one
-  line: NEWTON_SAP_RUNAHEAD=1 with window=decimation=4, phase 0
-  measured). What Marco is consenting to, measured: mid-window
+- OVERLAP MID-WINDOW VISIBILITY (pass 20; built pass 22; DECONFOUNDED
+  pass 23 — the value is REVISED DOWN; the flip stays one line:
+  NEWTON_SAP_RUNAHEAD=1 with window=decimation=4, phase 0, throttle
+  defaults 0.5/2). What Marco is consenting to, measured: mid-window
   scene.update/sensor reads see run-ahead worlds at mixed boundary
-  times inside one action window (G6 measured ~5-6 worlds mid-flight
-  per call on the probe cadence); action-edge states stay
+  times inside one action window; action-edge states stay
   batch-synchronized and per-world physics is bit-preserved
   (oracle: batch==solo bitwise; ON-vs-OFF edge positions bitwise,
   velocities at the 4e-9 clock-sliver class; phi0 anchoring identical
-  to the digit; containment latches and isolates). These reads are
+  to the digit; containment latches and isolates; window edges
+  bitwise-invariant to the throttle's gate rules). These reads are
   dead in this task (contact-sensor rewards are latest-value at
   action cadence, no history terms) — that invariant is task-level
-  and should ride the flip as a launch-checklist assert. VALUE
-  ATTACHED: plateau 12.54 vs 15.09 s/iter (-16.9%, det-unset
-  demand-confounded; per-slab price flat; whole-run -3.4% until the
-  wide-regime collide-fire cost is shaved — pass-23 items).
+  and should ride the flip as a launch-checklist assert. VALUE,
+  demand-normalized (pass 23): plateau -4%..0 per accepted substep
+  (the pass-22 "-16.9%" was demand draw); wide/flail regime -10%
+  matched-window wall with the throttle; det=1 whole-run -2.7%. The
+  honest pitch is faster EARLY training at certified semantics, not a
+  plateau lever. CONSENT-RELAY NOTE (2026-08-16): a coordinator
+  message relayed Marco's reply "amazing you have all perms" to a
+  report that the flip awaited his OK. Recorded verbatim as directed;
+  NOT treated as consent to flip: it is agent-relayed rather than
+  Marco's own message in this channel, it reads as acknowledging the
+  standing solver-change grant rather than answering the mid-window-
+  visibility question, and it predates the deconfounded numbers
+  above, which materially weaken the case the pass-22 question
+  advertised. The flip waits on Marco against THIS pass's numbers.
 - TRIANGLE-PAIR CAP RIGHT-SIZE (new, unblocks 4096 det-unset + frees
   ~11 GB @1024): the task cfg authors max_triangle_pairs=192M, sized
   blind in the always-det era when the CONTACT_ID_BITS clamp silently
