@@ -291,6 +291,159 @@ def compute_shape_aabbs(
     geom_xform[shape_id] = X_ws
 
 
+# Sentinel half-extent for world-masked collision: masked shapes emit an
+# INVERTED AABB (lower = +S, upper = -S), which fails the interval overlap
+# test (lower_a <= upper_b) against every partner -- normal, masked, or
+# itself -- so the broad phase yields no candidate pairs for them and every
+# pair-parallel downstream kernel scales with the unmasked subset. The SAP
+# sweep is safe with inverted intervals: the projected interval is inverted
+# too, so the swept range binary search returns an empty range, and the
+# final per-pair AABB re-check rejects any residual candidate.
+_MASKED_AABB_SENTINEL = 1.0e9
+
+
+@wp.kernel(enable_backward=False)
+def compute_shape_aabbs_masked(
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    shape_type: wp.array[int],
+    shape_scale: wp.array[wp.vec3],
+    shape_collision_radius: wp.array[float],
+    shape_source_ptr: wp.array[wp.uint64],
+    shape_margin: wp.array[float],
+    shape_gap: wp.array[float],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
+    shape_world: wp.array[int],
+    world_mask: wp.array[wp.int32],
+    # Fused counter arrays — zeroed by thread 0 to avoid separate kernel launches.
+    contact_counters: wp.array[wp.int32],
+    contact_generation: wp.array[wp.int32],
+    broad_phase_pair_count: wp.array[wp.int32],
+    num_contact_counters: int,
+    # outputs
+    aabb_lower: wp.array[wp.vec3],
+    aabb_upper: wp.array[wp.vec3],
+    geom_data: wp.array[wp.vec4],
+    geom_xform: wp.array[wp.transform],
+):
+    """:func:`compute_shape_aabbs` with a per-world participation mask.
+
+    Shapes whose world is masked out (``world_mask[shape_world] == 0``) emit
+    the inverted sentinel AABB and skip all geometry work; their ``geom_data``
+    / ``geom_xform`` rows go stale, which is dead state because no candidate
+    pair can reference them. Shapes in the global world (-1, e.g. a shared
+    ground plane) always participate: they must pair with every unmasked
+    world's shapes. The thread-0 counter zeroing runs regardless of masking
+    so the pass still stages a fresh contact buffer.
+    """
+    shape_id = wp.tid()
+
+    # Thread 0: zero contact counters, bump contact generation, and zero the
+    # broad phase candidate-pair count in a single fused step.
+    if shape_id == 0:
+        for c in range(num_contact_counters):
+            contact_counters[c] = 0
+        g = contact_generation[0]
+        if g == 2147483647:
+            g = 0
+        else:
+            g = g + 1
+        contact_generation[0] = g
+        broad_phase_pair_count[0] = 0
+
+    w = shape_world[shape_id]
+    if w >= 0 and world_mask[w] == 0:
+        s = wp.float32(_MASKED_AABB_SENTINEL)
+        aabb_lower[shape_id] = wp.vec3(s, s, s)
+        aabb_upper[shape_id] = wp.vec3(-s, -s, -s)
+        return
+
+    rigid_id = shape_body[shape_id]
+    geo_type = shape_type[shape_id]
+
+    # Compute world transform
+    if rigid_id == -1:
+        X_ws = shape_transform[shape_id]
+    else:
+        X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
+
+    pos = wp.transform_get_translation(X_ws)
+    orientation = wp.transform_get_rotation(X_ws)
+
+    margin = shape_margin[shape_id]
+
+    # Enlarge AABB by per-shape effective gap for contact detection
+    effective_gap = margin + shape_gap[shape_id]
+    margin_vec = wp.vec3(effective_gap, effective_gap, effective_gap)
+
+    # Check if this is an infinite plane or a shape with a pre-computed local AABB
+    scale = shape_scale[shape_id]
+    is_infinite_plane = (geo_type == GeoType.PLANE) and (scale[0] == 0.0 and scale[1] == 0.0)
+    has_local_aabb = geo_type == GeoType.MESH or geo_type == GeoType.HFIELD or geo_type == GeoType.CONVEX_MESH
+
+    geom_scale = scale
+
+    if is_infinite_plane:
+        # Bounding sphere fallback for infinite planes
+        radius = shape_collision_radius[shape_id]
+        half_extents = wp.vec3(radius, radius, radius)
+        aabb_lower[shape_id] = pos - half_extents - margin_vec
+        aabb_upper[shape_id] = pos + half_extents + margin_vec
+    elif has_local_aabb:
+        # Pre-computed local AABB transformed to world space.
+        # Scale is already baked into shape_collision_aabb by the builder,
+        # so we only need to handle the rotation here.
+        local_lo = shape_collision_aabb_lower[shape_id]
+        local_hi = shape_collision_aabb_upper[shape_id]
+
+        center = (local_lo + local_hi) * 0.5
+        half = (local_hi - local_lo) * 0.5
+
+        # Rotate center to world frame
+        world_center = wp.quat_rotate(orientation, center) + pos
+
+        # Rotated AABB half-extents via abs of rotation matrix columns
+        r0 = wp.quat_rotate(orientation, wp.vec3(1.0, 0.0, 0.0))
+        r1 = wp.quat_rotate(orientation, wp.vec3(0.0, 1.0, 0.0))
+        r2 = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))
+
+        world_half = wp.vec3(
+            wp.abs(r0[0]) * half[0] + wp.abs(r1[0]) * half[1] + wp.abs(r2[0]) * half[2],
+            wp.abs(r0[1]) * half[0] + wp.abs(r1[1]) * half[1] + wp.abs(r2[1]) * half[2],
+            wp.abs(r0[2]) * half[0] + wp.abs(r1[2]) * half[1] + wp.abs(r2[2]) * half[2],
+        )
+
+        aabb_lower[shape_id] = world_center - world_half - margin_vec
+        aabb_upper[shape_id] = world_center + world_half + margin_vec
+    else:
+        # Use support function to compute tight AABB
+        # Create generic shape data
+        shape_data = GenericShapeData()
+        shape_data.shape_type = geo_type
+        if geo_type == GeoType.PLANE:
+            geom_scale = wp.vec3(scale[0] * 0.5, scale[1] * 0.5, 0.0)
+        shape_data.scale = geom_scale
+        shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+        # For CONVEX_MESH, pack the mesh pointer
+        if geo_type == GeoType.CONVEX_MESH:
+            shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_id])
+
+        data_provider = SupportMapDataProvider()
+
+        # Compute tight AABB using helper function
+        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(shape_data, orientation, pos, data_provider)
+
+        aabb_lower[shape_id] = aabb_min_world - margin_vec
+        aabb_upper[shape_id] = aabb_max_world + margin_vec
+
+    # Narrow-phase geometry data (reuses X_ws and scale already computed above)
+    geom_data[shape_id] = wp.vec4(geom_scale[0], geom_scale[1], geom_scale[2], margin)
+    geom_xform[shape_id] = X_ws
+
+
 # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
 # Mesh-involved pairs (SDF + contact reduction) typically retain about 40.
 _RIGID_CONTACTS_PER_PRIMITIVE_PAIR = 5
@@ -1299,6 +1452,8 @@ class CollisionPipeline:
         contacts: Contacts,
         *,
         soft_contact_margin: float | None = None,
+        world_mask: wp.array | None = None,
+        sort_contacts: bool = True,
     ):
         """Run the collision pipeline using NarrowPhase.
 
@@ -1327,6 +1482,25 @@ class CollisionPipeline:
                 If ``None``, uses the value from construction. The effective
                 contact threshold also incorporates per-shape margins from
                 ``model.shape_margin``.
+            world_mask: Optional per-world int32 participation mask
+                (``[world_count]``, 1 = collide). Shapes of masked-out worlds
+                emit sentinel AABBs so the broad phase yields no candidate
+                pairs for them and the pass's cost scales with the unmasked
+                subset; the resulting contact buffer holds ONLY the unmasked
+                worlds' contacts (callers owning per-world contact
+                persistence must merge, e.g. the SAP run-ahead adopt store).
+                Global-world shapes (world -1) always participate. ``None``
+                (default) is the unmasked pass, byte-for-byte the prior
+                behavior.
+            sort_contacts: When False, skip the deterministic post-narrow-phase
+                contact sort (a no-op for non-deterministic pipelines). The
+                per-contact sort KEYS are still written, so a caller that
+                derives per-env canonical order from the keys directly (the
+                SAP run-ahead adopt walk) keeps full determinism while the
+                pass itself stays free of the native sort's internal
+                temp-memory allocation -- which a conditional CUDA-graph body
+                cannot contain. Incompatible with contact matching (which
+                consumes the sorted layout).
         """
         # Keep the buffer's full-surface capability marker in sync with this pipeline on every call.
         # collide() may be handed a Contacts created elsewhere (or by a flag-off pipeline); the edge/
@@ -1354,35 +1528,71 @@ class CollisionPipeline:
 
         # Compute AABBs for all shapes, zero counters, bump generation.
         # Fuses contacts.clear() + broad_phase_pair_count.zero_() + AABB update.
-        wp.launch(
-            kernel=compute_shape_aabbs,
-            dim=model.shape_count,
-            inputs=[
-                state.body_q,
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_source_ptr,
-                model.shape_margin,
-                model.shape_gap,
-                model.shape_collision_aabb_lower,
-                model.shape_collision_aabb_upper,
-                contacts.contact_counters,
-                contacts.contact_generation,
-                self.broad_phase_pair_count,
-                contacts.contact_counters.shape[0],
-            ],
-            outputs=[
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                self.geom_data,
-                self.geom_transform,
-            ],
-            device=self.device,
-            record_tape=False,
-        )
+        # With a world_mask, masked worlds' shapes emit sentinel AABBs instead
+        # (the broad phase then yields no pairs for them); the unmasked kernel
+        # stays the byte-for-byte default path.
+        if world_mask is None:
+            wp.launch(
+                kernel=compute_shape_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    contacts.contact_counters,
+                    contacts.contact_generation,
+                    self.broad_phase_pair_count,
+                    contacts.contact_counters.shape[0],
+                ],
+                outputs=[
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    self.geom_data,
+                    self.geom_transform,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+        else:
+            wp.launch(
+                kernel=compute_shape_aabbs_masked,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    model.shape_world,
+                    world_mask,
+                    contacts.contact_counters,
+                    contacts.contact_generation,
+                    self.broad_phase_pair_count,
+                    contacts.contact_counters.shape[0],
+                ],
+                outputs=[
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    self.geom_data,
+                    self.geom_transform,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
 
         # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
         if isinstance(self.broad_phase, BroadPhaseAllPairs):
@@ -1515,7 +1725,11 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-        if self.deterministic and self._contact_sorter is not None:
+        if not sort_contacts and self._contact_matcher is not None:
+            raise ValueError(
+                "sort_contacts=False is incompatible with contact matching (it consumes the sorted layout)."
+            )
+        if sort_contacts and self.deterministic and self._contact_sorter is not None:
             self._contact_sorter.sort_full(
                 self._sort_key_array,
                 contacts.rigid_contact_count,
