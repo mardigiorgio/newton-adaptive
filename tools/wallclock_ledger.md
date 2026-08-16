@@ -3495,6 +3495,321 @@ p28_collide_floor.{json,log}; p28_march_kernels.py +
 p28_march_kernels.{json,log}; p28_chain{1,2,3}.sh +
 p28_chain{1,2,3}.log (gpumem samples between every run).
 
+
+## PASS 29 — THE FAIRNESS FIXES LAND. Tolerance, certificate, containment,
+## determinism and the two stragglers, all measured on the arms that run.
+## 2026-08-16. FIRST CODE-LANDING PASS SINCE 26. Marco's in-channel "You have
+## all perms keep going", against a message naming M1/F8, M2, M3 and F10,
+## lifted the hold on those items and their class. Governing rule applied to
+## every judgement call: ONLY MAKE THE ADAPTIVE ADVANTAGE HARDER TO CLAIM,
+## NEVER EASIER. Every change below strengthens the FIXED arm or deletes a
+## confound. The adaptive arm's physics is byte-unchanged and gated.
+## Commits (LOCAL ONLY, nothing pushed): IsaacLab 27cf9c1ec2, 4e8f763acb,
+## 6fdd695cda, 62c165b5f0; sap_warp afd5dc6; newton-adaptive: this entry.
+
+### TASK 1 — M1/F8, THE TOLERANCE ASYMMETRY: CLOSED BY LIFTING THE FIXED
+### ARM TO THE RAIL. Cost measured, not asserted.
+
+SITE, re-derived rather than taken from pass 27's line numbers: the fixed
+arm's SolverSAP is constructed in mjwarp_manager `_create_solver`, which
+passed no tolerances at all, so the arm took SolverSAP's ctor defaults.
+CONFIRMED LIVE BEFORE THE EDIT (p29_tol_fixed_pre.json, read off the
+constructed object): optimality_rel_tol 1e-06, optimality_abs_tol 1e-14,
+cost_abs_tol 1e-30, cost_rel_tol 1e-15, max_iterations 30.
+
+THE EDIT: `optimality_rel_tol=1e-8, cost_abs_tol=0.0, cost_rel_tol=0.0`,
+plus the fp32 analogue resolved by the SAME rule the adaptive arm uses
+(max(1e-8, _FP32_OPTIMALITY_K * eps_fp32)) so the match survives a
+precision change. The adaptive arm's 1e-8 was NOT touched; the rail is
+satisfied by lifting the fixed arm to it.
+
+BOTH ARMS DUMPED LIVE ON FINAL BYTES (p29_arm_{fixed,adaptive}.json), and
+they are identical row for row:
+    optimality_rel_tol 1e-08   optimality_abs_tol 1e-14
+    cost_abs_tol 0.0           cost_rel_tol 0.0
+    max_iterations 30          line_search armijo_decay / 40
+    tau_d 0.02  beta 1.0  sigma 1e-3  preset approx32  solve fp64
+
+WHAT IT COSTS THE FIXED ARM. Priced as an A/B INSIDE one process on one
+build (the tolerances are re-read off the solver at every step and
+forwarded as kernel launch arguments, and the manager captures no CUDA
+graph for SAP, so mutating them between blocks genuinely changes what the
+solve is asked for -- confirmed by the iteration counts moving). Blocks
+alternate loose/tight/loose/tight so clock drift cannot be mistaken for
+the effect. 64 envs, scripted rest/press/swing/flail, 360 steps/block:
+
+                     ms/step (mean of 2)   inner Newton iterations/env-solve
+  BEFORE the edit    1e-6: 34.74           1.1201
+                     1e-8: 37.07  (+6.7%)  1.6202  (+44.6%)
+  AFTER  the edit    1e-6: 34.05           1.1213
+                     1e-8: 36.49  (+7.2%)  1.6793  (+49.8%)
+  repeat spread      loose 4.5% / 7.1%, tight 2.1% / 0.6%
+
+So the honest baseline is: the fixed arm now does ~50% more inner Newton
+iterations per env-solve and pays ~7% wall for it. The wall number sits at
+the edge of the repeat band; the iteration number does not and is the
+mechanistic one. UNCHANGED by the tightening: 0 unconverged env-solves and
+0 cost-plateau exits in 23,040 env-solves per block at BOTH tolerances --
+the fixed arm was never using the slack it had.
+
+### TASK 2 + 3 — F10 AND M2: THE FIXED ARM NOW CERTIFIES ITS OWN SOLVE AND
+### IS CONTAINED. Implemented together because they are one mechanism.
+
+WHY A READER WAS NOT ENOUGH, re-derived: `SolverSAP.last_converged` is
+assigned from `solve_result.converged`, and the contact solve builds that
+result with the literal `True` -- a constant, not a dropped signal. The
+real per-env verdict is `contact_solve.converged_env`, which the adaptive
+arm folds into `_solve_ok` (`_accumulate_solve_convergence`, the test
+`converged_env[i] == 0`) and turns into a rejection. THE FIXED ARM NOW
+READS THE SAME ARRAY WITH THE SAME TEST, so the two arms certify the same
+quantity by the same arithmetic.
+
+THE RESPONSE, and the split. Containment is the default, mirroring the
+adaptive solver's own `NEWTON_SAP_CONTAINMENT` gate:
+  GIVEN to the fixed arm (the separable half):
+    * per-world failure detection off converged_env;
+    * a per-world failure latch;
+    * bitwise state freeze -- the latched world is excised from every
+      later substep via SolverSAP's own `world_active` mask;
+    * world isolation;
+    * the pending mask `physics_diverged` consumes, so the episode ENDS
+      instead of training on a solve that never converged;
+    * per-world release on env reset;
+    * strict converge-or-throw under NEWTON_SAP_CONTAINMENT=0, quoting the
+      tolerance, exactly as the adaptive arm does.
+  WITHHELD deliberately (and this is the thesis, not an oversight):
+    * THE dt SHRINK-RETRY. Choosing a smaller step on rejection IS
+      adaptivity. Handing it to the fixed arm would delete the result the
+      comparison exists to measure. The fixed arm therefore latches on its
+      FIRST failure where the adaptive arm latches only after the shrink
+      ladder reaches the dt floor -- which is the correct mirror for an arm
+      whose dt set has exactly one element, and is stated here because it
+      is a real asymmetry in the fixed arm's disfavour.
+
+PROOFS, all on final bytes, 8 envs, det=1, 40 steps (p29_cont_*.json/npz):
+ (a) VACUITY GUARD. Control (shipping cap): 0 latches, 0 terminations, 0
+     unconverged samples. A certificate that always fires proves nothing.
+ (b) GENUINE FAILURE, NOTHING FORGED. Inner Newton cap set to 0 after
+     construction, so no contacting env can reach its optimality test at
+     any dt: all 8 worlds latched from step 0 and the mask carried them on
+     every one of 40 steps.
+ (c) THE TERMINATION FIRES, AND IT IS THE RIGHT ONE. Same forced failure
+     with terminations live: 320 done flags over 40 steps x 8 envs, and
+     per-term attribution is physics_diverged 320, time_out 0,
+     object_dropping 0, object_off_table 0, object_speeding 0,
+     robot_abnormal 0. The run completed with no raise (containment).
+ (d) STRICT MODE RAISES. NEWTON_SAP_CONTAINMENT=0 on the same scene:
+     RuntimeError "SolverSAP inner SAP solve failed to converge to
+     optimality_rel_tol=1.000e-08." at the first step.
+ (e) FREEZE + ISOLATION, BITWISE. The per-env verdict for ONE world is
+     forced to 0 at ONE step immediately before the certificate reads it
+     (the CAUSE is forged, the response is the real kernel). Exactly that
+     world latched, from that step, for 30 steps. Then, against a control
+     run of the identical scene in a separate process:
+       ORACLE  control vs its repeat bitwise identical over 40 steps on
+               joint_q, joint_qd and the manipulated object's root state;
+       FREEZE  the latched world byte-frozen at its step-10 state through
+               step 39 on all three fields;
+       ISOLATE all 7 healthy worlds bitwise identical to the control run.
+ (f) AT SCALE, IT IS SILENT: 0 worlds flagged in the 1024-env
+     characterization runs and 0 in the 3-iteration training runs.
+
+RESIDUAL, NAMED AND MEASURED: the fixed arm steps IN PLACE, so the failing
+substep's own result is committed once before the verdict exists; the
+freeze starts at the step containing the failure, not before it. Measured
+size of that single committed substep, latched world vs control at the
+failing step: joint_q 6.26e-2, joint_qd 2.16e-1, object root 1.48e-6 --
+against a NORMAL step of that world of 7.20e-2, 2.71e-1, 1.19e-6. So it is
+one substep's worth of motion, not an excursion. Closing it needs a
+per-substep state snapshot on the fixed arm, which costs the fixed arm
+wall time and would therefore flatter adaptive; NOT DONE, and left as
+Marco's (D4b below).
+
+CAVEAT THAT MUST NOT BE LOST: the fixed arm now always receives a
+`world_active` mask where it previously received None, and it now solves to
+a different tolerance, so ITS trajectories are not bitwise comparable to any
+pre-pass-29 fixed-arm run. That is fine -- the fixed arm has no campaign
+record to preserve, which is exactly why the grant allowed changing it --
+but no fixed-arm number from passes 26-28 may be diffed against a number
+from here on. The ADAPTIVE arm's record is the one that is protected, and it
+is intact.
+
+COST OF THE WHOLE CONTAINMENT PATH: nothing measurable. At MATCHED
+tolerance (1e-6 both sides) the fixed arm is 34.05 ms/step after the edits
+against 34.74 before -- 2% FASTER, inside a 4.5-7.1% repeat band, and the
+sign is plausible because the same commit removed a per-step device sync
+(F12 below). The certificate is one kernel launch per substep with no host
+read; strict mode's host read is opt-in.
+
+### TASK 4 — M3, DETERMINISM PROPAGATION: CLOSED WITHOUT TOUCHING THE
+### SHARED CFG'S MEANING FOR MUJOCO.
+
+NEWTON_SAP_DETERMINISTIC reached SolverSAPAdaptive's own pipeline and not
+the manager pipeline the fixed arm consumes. It is now propagated in
+`_apply_fixed_sap_pipeline_overrides`, applied to a COPY of the cfg and
+gated on `cls._sap and not cls._adaptive`, so the MuJoCo backend's
+trajectories are untouched (pass 27's blocker).
+
+READ OFF THE NARROW PHASE EACH ARM RUNS (p29_scale_det*.json), not off the
+patch:
+    fixed, det=1     pipeline deterministic True,  reducer deterministic True
+    fixed, det unset pipeline deterministic False, reducer False
+    adaptive, det=1  pipeline deterministic True,  reducer True
+And the consequence is the thing that matters: the fixed arm is now
+BITWISE REPRODUCIBLE ACROSS PROCESSES (the oracle in (e) above, 40 steps x
+8 worlds x 3 fields). That reproducibility is what made the freeze and
+isolation verdicts judgeable at all.
+
+### TASK 5(a) — THE DOCUMENTED LAUNCH PATH: FIXED AND EXERCISED.
+
+`_validate_solver_substeps` tested `solver_cfg.adaptive` (the MuJoCo
+latch) and therefore rejected the SAP step-doubling solver on the 1-substep
+boundary it is entitled to own. Now tests `adaptive or sap_adaptive`. One
+task-file edit, nothing else in that file touched.
+
+PROVEN BY RUNNING THE DOCUMENTED INVOCATION, no env-var workaround
+anywhere (p29_train_sap_adaptive.log):
+  ./isaaclab.sh train --rl_library rsl_rl --task IsaacContrib-Lift-Spatula-
+  Trossen-v0 --seed 42 --num_envs 64 --max_iterations 3
+  --solver sap-adaptive physics=newton_mjwarp_adaptive
+resolves `{'backend': 'sap', 'adaptive': False, 'sap_adaptive': True}` and
+completes 3 learning iterations. The fixed arm's documented path
+(`--solver sap`, task default 2 substeps) likewise completes 3 iterations.
+physics_diverged 0.0000 on both.
+SIDE EFFECT WORTH RECORDING (F6): because these runs need no env override,
+their params/env.yaml records `backend: sap` and the right `sap_adaptive`
+-- the provenance hole closes for anything launched the documented way. It
+does NOT close for env-var launches, and the dump still records AUTHORED
+rather than RESOLVED pipeline values (192,000,000 pairs, deterministic
+false, whatever the manager then resolves).
+
+### TASK 5(b) — THE TRIANGLE-PAIR CAP: SCENE-SIZED MANAGER-SIDE.
+### 12.5 GB FREED AT 1024, AND 4096 NOW CONSTRUCTS.
+
+RULE (mjwarp_manager, one helper used by both arms):
+    max(1M, min(authored, 16384 * world_count)), clamped to 1 << 25 when
+    deterministic (the reducer REJECTS a larger capacity outright).
+16384/world is the per-world budget; the authored value remains a ceiling,
+so a task can still ask for less.
+
+MEASURED DEMAND (live `triangle_pairs_count`, not modelled): peak 3,687
+pairs/world at 64 envs during scripted flail; 1,598-1,638/world at 1024 and
+4096 under press. The budget is 4.4x the flail peak and ~10.2x the press
+peak. Truncated contacts 0 on both arms in every probe this pass.
+
+MEASURED FOOTPRINT (device memory in use after build, same scene, the ONLY
+difference being the sizing rule -- the uncapped arm monkeypatches the
+helper back to the authored value in the probe, so this is a difference
+between two builds, not an allocation formula):
+    1024 adaptive, capped   16,777,216 pairs    7.350 GB
+    1024 adaptive, uncapped 192,000,000 pairs  19.818 GB   -> 12.47 GB FREED
+    1024 fixed,   capped    16,777,216 pairs    7.725 GB
+    4096 adaptive, capped   67,108,864 pairs   25.32 GB, constructs and steps
+    4096 adaptive, uncapped RuntimeError: Failed to allocate 2304000000
+                            bytes on device 'cuda:0' -- and 2.304e9 = 192e6
+                            x 12 B, i.e. the OOM IS the authored pair cap.
+
+THE ADAPTIVE ARM'S OWN PIPELINE TAKES THIS RULE TOO, so it is a change to
+the campaign arm and had to be proven byte-neutral rather than argued: the
+phi0 rig runs det=1 at 8 worlds, where the capacity moves from 33,554,432
+(the old deterministic clamp) to 1,000,000, and phi0 is IDENTICAL TO THE
+DIGIT (-5.584e-5 deepest, -2.756e-5 P5, every phase). Gate results below.
+
+### TASK 5(c) — F12: THE FIXED ARM'S PER-STEP HOST SYNC IS GONE.
+
+The reset hook read the per-world mask on the host every reset boundary
+(`local_mask.numpy().any()`) to decide whether to clear a warm start that
+is ONE global flag. Replaced by `SolverSAP.reset_runtime_state_masked`, a
+one-kernel device-side test with identical semantics (sap_warp afd5dc6).
+The host-side diagnostic counters are deliberately not cleared: the step
+path never reads them, and a staggered per-env reset has no business
+zeroing a global clock. Effect is inside the repeat band; it is hygiene,
+and it makes the fixed arm no slower, which is the only direction allowed.
+
+### GATES (full 8-gate chain, adaptive arm, on the final bytes, strictly
+### sequential with abort-on-failure). ALL PASS.
+
+ G1 construct  PASS (SAP-NEWTON15-CONSTRUCT), ACR defaults ON with the
+    constitutive dt wired into the contact solve.
+ G2 flag-equivalence  PASS. Every bitwise arm -- acr, fusedls, fusedam,
+    fusedup, narrowv3, runahead, graph and conditional forms -- bitwise
+    identical to its reference over 6 boundaries. Equivalence iterations
+    per boundary reference [11,4,4,3,3,2] == boundary [11,4,4,3,3,2].
+ G3 march-equivalence  PASS, fingerprint [6, 25, 20, 24, 19] -- UNCHANGED
+    since pass 13. compact / conditional / compact+conditional all bitwise.
+ G4 determinism  PASS, bitwise over 20 steps at 256 envs, seed 7, det=1,
+    on cum / fail_step / joint_q / joint_qd / body_q / body_qd.
+ G5 containment  PASS[b] world 2 latched at boundary 0, state frozen and
+    clock pinned through boundary 29; PASS[c] all 5 healthy worlds bitwise
+    identical to control over 30 boundaries x 10 fields; PASS[d] strict
+    raised quoting optimality_rel_tol=1.000e-08.
+ G6 err_tol  0 violations / 2880 samples; max accepted err/tol 0.7135;
+    per-phase rest 0.0179 / press 0.6137 / swing 0.7135 -- identical to
+    every recorded pass since cert_g5. floor samples 0, capped boundaries
+    0, unfinished worlds 0, dt samples below 1e-4 = 0, dt_run_min
+    2.5276e-3 (25x Marco's criterion). Rails live: tol 1e-3, dt_min 1e-12,
+    inner_rel_tol 1e-8, solve fp64, contact_solve fp64.
+ G7 rest smoke  PASS, z in [0.0198, 0.0210], 0 early terminations.
+ G8 phi0  deepest -5.584e-5 and median boundary P5 -2.756e-5 in EVERY
+    phase, narrow-v3 ON and OFF identical. These are the pass-25 and
+    pre-campaign ACR-ON values to the digit.
+ADAPTIVE ARM: BYTE-UNCHANGED. Its solver construction is
+argument-for-argument what it was except for the triangle-pair capacity,
+and the penetration, march-fingerprint, determinism and err/tol gates all
+land exactly where the campaign record left them.
+
+### CHARACTERIZATION AT MATCHED SCALE — NOT THE KILLER EXPERIMENT
+
+1024 envs, 120 timed steps after 20 warmup, seed 42, the SAME uniform
+random action stream driving both arms, sequential, one GPU process at a
+time, two repeats each (p29_char_*.json). Both arms now solve to
+optimality_rel_tol 1e-8; both report 0 worlds flagged diverged and finite
+state at the end.
+
+                         ms per env step   accepted world-substeps
+                                           per world-boundary
+  FIXED  (2 substeps)    50.47 / 50.49     2.0000
+  ADAPTIVE (march)       79.12 / 79.31     7.7417
+
+                         us per ACCEPTED world-substep
+  FIXED                  24.65 / 24.65
+  ADAPTIVE                9.98 / 10.01
+
+Demand-normalized, the adaptive arm buys an accepted world-substep for
+0.405x what the fixed arm pays (2.47x cheaper per unit of integration
+work), and spends that advantage plus more on 3.87x the substeps, netting
+1.57x the wall per env step in this regime. Repeats agree to 0.05%.
+WHAT THIS IS NOT: a uniform-random action stream is a violent regime that
+inflates adaptive demand; the fixed arm's 2 substeps are cheap precisely
+because nothing bounds their error, which is the question the killer
+experiment exists to answer and this probe does not. It is a speed and
+demand characterization of two arms that now solve the same problem to the
+same tolerance -- nothing more.
+
+### WHAT THIS PASS DID NOT DO, ON PURPOSE
+
+  * No dt shrink-retry for the fixed arm (see Task 3).
+  * No change to contact stiffness or tau_d. Entering the near-rigid CENIC
+    regime is a research-design choice off a measured sweep, not a defect
+    fix; D12 stands untouched.
+  * No estimator, tol, dt_inner_min, cap, contact-law or ACR change.
+  * Run-ahead default still OFF; twins still twins; nothing pushed.
+  * D7, the matched fixed-vs-adaptive TRAINING comparison, was NOT run.
+    It is now unblocked on every axis this pass could reach, and it is
+    Marco's experiment to launch.
+
+Provenance (all p29_ prefix, no p13-p28 artifact overwritten):
+p29_tol_probe.py + p29_tol_fixed_{pre,post}.{json,log};
+p29_arm_probe.py + p29_arm_{fixed,adaptive}.{json,log};
+p29_containment_probe.py + p29_containment_chain{,2}.sh +
+p29_cont_{control,control2,inject,forcemask,force,strict}.{json,log,npz} +
+p29_cont_compare.py; p29_scale_probe.py + p29_scale_chain.sh +
+p29_scale_{det1_fixed,det0_fixed,det1_adapt,a1024_capped,a1024_uncapped,
+a4096_capped,a4096_uncapped,f1024_capped}.{json,log};
+p29_char_probe.py + p29_char_chain.sh + p29_char_{fixed,adaptive}{1,2}.{json,log};
+p29_train_chain.sh + p29_train_sap_{adaptive,fixed}.log;
+p29_gates.sh + p29_g{1..8}_*.{json,log} + p29_gate_progress.txt.
+
 ## Rails (non-negotiable)
 
 optimality_rel_tol 1.0e-8 fp64 (pinned; fp32 path uses its derived
@@ -3552,18 +3867,24 @@ goal.
   visibility question, and it predates the deconfounded numbers
   above, which materially weaken the case the pass-22 question
   advertised. The flip waits on Marco against THIS pass's numbers.
-- TRIANGLE-PAIR CAP RIGHT-SIZE (new, unblocks 4096 det-unset + frees
+- TRIANGLE-PAIR CAP RIGHT-SIZE -- CLOSED PASS 29, manager-side (the
+  task line is now cosmetic; see D10). Original statement:
+  (unblocks 4096 det-unset + frees
   ~11 GB @1024): the task cfg authors max_triangle_pairs=192M, sized
   blind in the always-det era when the CONTACT_ID_BITS clamp silently
   capped it at 33.5M; live demand ~2.8M. Authoring ~8-16M (3-6x margin)
   restores the historical footprint under det-off and un-OOMs 4096.
   One task-config line; task changes are Marco's.
-- FIXED-ARM INNER TOLERANCES (F8, raised pass 26, re-confirmed as the
+- FIXED-ARM INNER TOLERANCES -- CLOSED PASS 29 by lifting the fixed arm
+  to the 1e-8 rail; cost measured (see D1). Original statement:
+  (F8, raised pass 26, re-confirmed as the
   loudest row of the pass-27 matrix): the fixed arm solves to
   optimality_rel_tol 1e-6 with cost tols 1e-30/1e-15 where the adaptive
   arm pins 1e-8 with the cost early-exit disabled. One kwarg triple at
   mjwarp_manager.py:382-390. Red-line item, so no loop may land it.
-- physics_diverged IS A NO-OP ON THE FIXED ARM AND ON MUJOCO (pass-27
+- physics_diverged -- CLOSED PASS 29 FOR THE FIXED SAP ARM (certificate +
+  containment); STILL OPEN ON BOTH MUJOCO ARMS' FIXED SIDE, see D2b.
+  Original statement: A NO-OP ON THE FIXED ARM AND ON MUJOCO (pass-27
   live confirmation of F5): an active termination term that can excise a
   broken world on one arm only. Give the fixed arm an equivalent or state
   it in the paper text.
@@ -3579,222 +3900,160 @@ goal.
 - Any push to GitHub (auth broken; needs gh auth login first)
 
 ## DECISION SUMMARY — EVERYTHING STILL WAITING ON MARCO
-## Written 2026-08-16 at the end of pass 28, the last queued in-grant
-## pass. Ordered by how much it can change the paper's claim. Each item:
-## what it is, the exact change, where it lives, what it costs or buys —
-## measured where measured, and explicitly marked UNMEASURED where not.
+## Rewritten 2026-08-16 at the end of pass 29, which landed the fairness
+## fixes his "you have all perms keep going" released. Ordered by how much
+## each can still change the paper's claim. Items closed by pass 29 are kept
+## with their outcome so the record does not lose them. Each item: what it
+## is, the exact change, where it lives, what it costs or buys — measured
+## where measured, and explicitly marked UNMEASURED where not.
 
-D1  FIXED-ARM INNER TOLERANCES (F8 / M1). THE LOUDEST ITEM.
-    WHAT: the fixed arm solves the contact problem to
-    optimality_rel_tol 1e-6 with cost early-exit tolerances
-    1e-30/1e-15, where the adaptive arm pins 1e-8 and disables the cost
-    exit. The fixed arm accepts a residual 100x looser on the very axis
-    the experiment compares.
-    CHANGE: one kwarg triple at the SolverSAP construction site,
-    `optimality_rel_tol=1e-8, cost_abs_tol=0.0, cost_rel_tol=0.0`.
-    WHERE: IsaacLab mjwarp_manager.py:382-390.
-    COSTS/BUYS: buys the only version of the comparison in which "fixed
-    fails" can be attributed to timestepping. Costs fixed-arm wall —
-    UNMEASURED, but pass 28 measured the fixed arm converging at 1.4
-    Newton iterations/world with 0 cap hits in 1.18M env-solves, so
-    there is headroom to tighten. RED-LINE ITEM (optimality_rel_tol is
-    named in the pass-25 validity red line), so no loop may land it.
+D7  THE MATCHED FIXED-vs-ADAPTIVE COMPARISON. **NOW THE TOP ITEM: every
+    blocker this campaign could reach is gone, and it has still never been
+    run.** Both SAP arms now construct, step and train from the documented
+    CLI; both solve to optimality_rel_tol 1e-8 with the cost exit disabled;
+    both carry the same contact law, contact capacity, collision-pipeline
+    sizing, determinism resolution and convergence guarantee; and 4096 envs
+    now constructs.
+    CHANGE: run both arms back to back, same seed, same iteration count,
+    W&B + video per the standing rule.
+    WHERE: the existing entrypoint --
+      ./isaaclab.sh train --rl_library rsl_rl --task
+      IsaacContrib-Lift-Spatula-Trossen-v0 --solver sap  ... and
+      --solver sap-adaptive physics=newton_mjwarp_adaptive
+    COST: pass-29 characterization at 1024 envs measured 50.5 ms/env-step
+    fixed and 79.2 adaptive on a scripted stream, so a 40-iteration arm is
+    minutes, not hours.
+    WHAT IT IS NOT YET: nothing in this campaign has compared LEARNING
+    outcomes on SAP. This is the experiment the paper rests on.
 
-D2  physics_diverged IS A NO-OP ON THE FIXED ARM AND ON MUJOCO
-    (F5 / M2, matrix row 32).
-    WHAT: an ACTIVE termination term that lets the adaptive arm excise a
-    broken world from the training distribution, and that returns
-    all-False on both other arms (`get_diverged_env_mask()` returns None
-    when not adaptive; mdp.py:174 then yields all-False). Confirmed live
-    in pass 27.
-    CHANGE: either (a) give the fixed arm an equivalent — see D4, whose
-    counter feeds exactly this mask — or (b) state it in the paper text.
-    WHERE: IsaacLab mjwarp_manager.py:431-437 and :664-666; task
-    terminations in trossen_spatula_lift_env_cfg.py.
-    COSTS/BUYS: MEASURED firing rate at production is ZERO on the
-    adaptive arm (p14, p23 and the pass-28 40-iteration fixed run all
-    log physics_diverged 0.0000), so no distributional effect has ever
-    been observed. It is a guarantee gap, not an observed bias. Leaving
-    it implicit is the only unacceptable option.
+D2b physics_diverged IS STILL A NO-OP ON THE MUJOCO ARMS' FIXED SIDE.
+    Pass 29 gave the fixed SAP arm the whole containment half it could have
+    (detection, latch, freeze, isolation, termination) and the MuJoCo fixed
+    arm none of it, because it has no verified per-world convergence verdict
+    to read. The historical killer experiment as actually executed was
+    MuJoCo fixed vs MuJoCo adaptive, so on THAT pairing the asymmetry pass
+    25 flagged as F5 is still fully present.
+    CHANGE: find MuJoCo-Warp's per-world solver status equivalent and wire
+    it the same way, or state the asymmetry in the paper text.
+    WHERE: mjwarp_manager `_build_solver` / `_step_solver`, MuJoCo branch.
+    COSTS/BUYS: UNMEASURED. Firing rate on the SAP arms is zero in every
+    regime tested, so this is a guarantee gap, not an observed bias.
 
-D3  DETERMINISM DOES NOT REACH THE FIXED ARM'S PIPELINE (M3, row 35).
-    WHAT: NEWTON_SAP_DETERMINISTIC canonicalizes the adaptive arm's
-    contact sort but not the fixed arm's, because the manager pipeline
-    reads a cfg field instead. With det=1 one arm is order-canonical and
-    the other is not, so a determinism comparison across arms is
-    apples-to-oranges.
-    CHANGE: `NewtonCollisionPipelineCfg(..., deterministic=True)` in the
-    task cfg, or an env-var propagation in mjwarp_manager gated on the
-    fixed SAP arm.
-    WHERE: task cfg (shared with the MuJoCo backend) or
-    mjwarp_manager's fixed-SAP branch.
-    COSTS/BUYS: the cfg field is shared with MuJoCo, whose established
-    trajectories it would move — that is why no loop touched it. Wall
-    cost of the canonical sort on the fixed arm: UNMEASURED.
+D4b THE FIXED ARM COMMITS ONE SUBSTEP BEFORE IT CAN KNOW THE VERDICT.
+    The convergence certificate is consumed after the substep that failed
+    and the fixed arm steps in place, so the failing substep's result lands
+    once and the freeze starts from there. MEASURED size of that single
+    committed substep (latched world vs control at the failing step):
+    joint_q 6.26e-2, joint_qd 2.16e-1, object root 1.48e-6 — against a
+    normal step of that world of 7.20e-2, 2.71e-1, 1.19e-6.
+    CHANGE: snapshot per-world state before each fixed-arm substep and
+    restore the failing worlds.
+    COSTS/BUYS: buys exact parity with the adaptive arm's never-commit
+    contract. COSTS the fixed arm wall time on every step to protect
+    against an event measured at rate zero — i.e. it makes the baseline
+    slower, which flatters adaptive. Deliberately not done for that reason.
 
-D4  NO CONVERGENCE CERTIFICATE ON THE FIXED ARM (F10).
-    WHAT: an unconverged fixed-arm solve commits silently. Worse,
-    `SolverSAP.last_converged` is a constant True (the solve returns the
-    literal `True`), so it is not even a dropped signal. The adaptive arm
-    reads the same per-env array and raises.
-    CHANGE, OPTION A (guard): after `cls._solver.step(...)` on the fixed
-    SAP arm, launch a 1-line kernel folding
-    `cls._solver.contact_solve.converged_env` into a persistent per-world
-    int array, and return it from `get_diverged_env_mask()` so the
-    EXISTING physics_diverged term consumes it — this closes D2 for the
-    fixed arm at the same time. One kernel, one array, no host sync, no
-    contact-law change. WHERE: IsaacLab mjwarp_manager.py (step path +
-    :664-666).
-    CHANGE, OPTION B (characterize): state in the paper that the fixed
-    arm commits whatever its iteration cap produced while the adaptive
-    arm raises, and quote the measured incidence.
-    COSTS/BUYS: MEASURED incidence 0 unconverged and 0 cost-plateau
-    exits in 1,182,720 env-solves (64-env rest/press/swing/flail and
-    1024-env Gaussian), worst residual 0.998 of the arm's own tolerance.
-    So Option B costs nothing today; Option A costs one kernel launch per
-    substep and buys the guarantee. NOT recommended: making
-    `last_converged` truthful, which is a sap_warp change on code the
-    adaptive arm's inner solver also runs.
+D4c THE FIXED ARM LATCHES ON ITS FIRST FAILURE; THE ADAPTIVE ARM LATCHES
+    ONLY AT THE dt FLOOR. This is the withheld shrink-retry, and it is the
+    thesis: an arm with one dt has no ladder to climb down. Recorded so the
+    paper states it rather than implying the containment is symmetric.
 
 D5  REAL CONTACT-FORCE WRITEBACK, AND THE CONTACT-DERIVED-TERM TRAP
-    (pass-26 M2 + F9).
+    (pass-26 M2 + F9). UNCHANGED by pass 29.
     WHAT: both SAP arms' `update_contacts` are documented no-ops, so
     `contacts.force` is identically zero on SAP and live on MuJoCo
-    (measured flail peak 8.96). Nothing reads it today, so the backends
-    are equivalent by coincidence — and eight contact-reading functions
-    already sit unreferenced in the task's mdp.py. The instant any of
-    them is wired up, SAP and MuJoCo become different tasks.
-    CHANGE: `Contacts.force[g] = R_WC[env,slot] @ gamma[env,slot] / dt`
-    for each global row with `contact_input_env[g] >= 0`.
-    WHERE: sap_warp solver_sap.py + newton-adaptive
-    solver_sap_adaptive.py; the two arms need DIFFERENT kernels because
-    the fixed arm's Contacts comes from the manager pipeline with valid
-    geometry and the adaptive arm's manager Contacts has no geometry
-    writer at all.
-    COSTS/BUYS: buys cross-backend equivalence for any future
-    contact-derived term. Costs: on the adaptive arm the committed
-    impulse is not identifiable from `last_contact_solve_result` (that is
-    whichever solve ran last, possibly a discarded trial), so making it
-    identifiable is new plumbing in the estimator's committed-attempt
-    bookkeeping = RED LINE. Wall cost UNMEASURED.
+    (measured flail peak 8.96). Nothing reads it today, so the backends are
+    equivalent by coincidence — and eight contact-reading functions already
+    sit unreferenced in the task's mdp.py.
+    CHANGE: `Contacts.force[g] = R_WC[env,slot] @ gamma[env,slot] / dt`.
+    WHERE: sap_warp solver_sap.py + newton-adaptive solver_sap_adaptive.py;
+    the arms need DIFFERENT kernels (different Contacts providers).
+    COSTS/BUYS: on the adaptive arm the committed impulse is not
+    identifiable from `last_contact_solve_result`, so making it so is new
+    plumbing in the estimator's committed-attempt bookkeeping = RED LINE.
 
-D6  THE DOCUMENTED sap-adaptive LAUNCH PATH IS BROKEN (F1 residue).
-    WHAT: `--solver sap-adaptive physics=newton_mjwarp_adaptive` raises
-    ValueError, because the substep validation latch tests the MuJoCo
-    adaptivity field rather than sap_adaptive. Every SAP run in this
-    campaign exists only because of an env-var workaround, and
-    params/env.yaml records `backend: mujoco` for all of them (F6).
-    CHANGE: `_validate_solver_substeps` must test
-    `not (solver_cfg.adaptive or solver_cfg.sap_adaptive)`; and dump the
-    RESOLVED solver identity into the run artifacts after
-    `_resolve_solver_mode` applies env overrides.
-    WHERE: trossen_spatula_lift_env_cfg.py:474; the params dump site.
-    COSTS/BUYS: buys reproducible provenance for every SAP result — at
-    present the only record that a run was SAP is the launch script.
-    Costs: nothing measurable.
+D8  ACR DEFAULT (F3). LEAVE IT ON — recorded, not open. UNCHANGED by 29.
+    Holding capacity unchanged; spurious creep 6.8x larger (36 vs 5.3 um/s
+    at 0.34 g, ~180 vs ~26 um over a 5 s episode, against a 5-8 cm decision
+    scale); normal penetration +3.5% deepest, +0.04% P5.
+    REVISIT ONLY IF the claim depends on sub-millimetre positional fidelity.
 
-D7  THE MATCHED FIXED-vs-ADAPTIVE COMPARISON — NOW CHEAP, NEVER RUN.
-    WHAT: pass 28 ran the fixed SAP arm at 1024 envs for 40 iterations
-    for the first time: 3.518 s/iter over iterations 19-24, against the
-    adaptive arm's recorded 12.88 s/iter for the same window and env
-    count. That is 3.66x and it is NOT a result — one draw against a
-    differently-seeded historical draw, with the fixed arm running 2
-    solves per boundary against ~3.8, and solving to a 100x looser
-    tolerance (D1).
-    CHANGE: run both arms back to back, same seed, same iteration count,
-    with D1 applied first.
-    WHERE: the existing entrypoint; ~4 minutes per 40-iteration arm at
-    1024 envs, measured.
-    COSTS/BUYS: this is the experiment the paper rests on and it has
-    never been executed on SAP. Everything else in this list is
-    preparation for it.
+D9  RUN-AHEAD DEFAULT FLIP. UNCHANGED by 29, still OFF, still Marco's.
+    Demand-normalized value (pass 23): plateau -4%..0 per accepted substep;
+    wide/flail -10% matched-window wall; det=1 whole-run -2.7%. Pass 28 adds
+    why the plateau value is small: at few crossing worlds ~83% of a masked
+    collide is un-narrowable floor. The honest pitch is faster EARLY
+    training at certified semantics, not a plateau lever. The relayed
+    "amazing you have all perms" was recorded but NOT treated as consent to
+    this specific flip.
 
-D8  ACR DEFAULT (F3 / pass-26 M3). LEAVE IT ON — recorded, not open.
-    WHAT: attempt-consistent R scales the committed tangential
-    regularization by s = 2.34 at 100% of contacts.
-    MEASURED: holding capacity UNCHANGED (above the friction angle the
-    arms slide identically, 0.94-1.01, 3/8 and 4/8 envs); spurious creep
-    6.8x larger (36 vs 5.3 um/s at 0.34 g tangential load, ~180 vs ~26
-    um over a 5 s episode, against a task decision scale of 5-8 cm);
-    normal penetration +3.5% deepest, +0.04% P5.
-    CHANGE IF EVER NEEDED: NEWTON_SAP_ATTEMPT_CONSISTENT_R=0, or the
-    one-line default at commit 45095218. It alters what the estimator
-    measures = comparison semantics = Marco's.
-    REVISIT ONLY IF the claim ever depends on sub-millimetre positional
-    fidelity of a held object.
+D10 TRIANGLE-PAIR CAP. **CLOSED BY PASS 29, MANAGER-SIDE.** Rule:
+    max(1M, min(authored, 16384 * world_count)), clamped to 1<<25 when
+    deterministic. MEASURED: 12.47 GB freed at 1024 envs (19.818 -> 7.350
+    GB); 4096 envs now constructs and steps at 25.32 GB where the authored
+    192M cap died with "Failed to allocate 2304000000 bytes"; live demand
+    peaks at 3,687 pairs/world (flail, 64 envs) against the 16,384/world
+    budget; truncated contacts 0 on both arms.
+    RESIDUAL, MARCO'S: 16,384/world is OUR constant, so it is unvalidated
+    by definition. It is 4.4x the worst demand this campaign has measured,
+    but no trained policy has been run at 4096, and pair-cap overflow drops
+    mesh contacts SILENTLY. If 4096 ever runs long, watch it.
+    The task cfg still AUTHORS 192,000,000; the manager caps it. Editing the
+    task line is still Marco's and is now cosmetic.
 
-D9  RUN-AHEAD DEFAULT FLIP.
-    WHAT: `NEWTON_SAP_RUNAHEAD=1` with window=decimation=4, phase 0,
-    throttle 0.5/2. Mid-window scene/sensor reads would see worlds at
-    mixed boundary times inside one action window; action-edge states
-    stay batch-synchronized and per-world physics is bit-preserved
-    (oracle: batch==solo bitwise; edge positions bitwise; phi0 identical
-    to the digit; containment still latches).
-    CHANGE: one env var, or its default in solver_sap_adaptive.py.
-    COSTS/BUYS, demand-normalized (pass 23): plateau -4%..0 per accepted
-    substep; wide/flail regime -10% matched-window wall; det=1 whole-run
-    -2.7%. Pass 28 adds why the plateau value is small: at few crossing
-    worlds ~83% of a masked-collide fire is an un-narrowable floor
-    (0.98 of 1.00 ms), and the floor is the contact-stream scan, not the
-    broadphase. The honest pitch is faster EARLY training at certified
-    semantics, not a plateau lever. The 2026-08-16 relayed "amazing you
-    have all perms" was recorded but NOT treated as consent: it is
-    agent-relayed, it reads as acknowledging the standing solver-change
-    grant rather than answering the mid-window-visibility question, and
-    it predates the deconfounded numbers.
+D11 PIN sap_warp TO newton-adaptive (F7). UNCHANGED, and MORE pressing:
+    pass 29 changed sap_warp again (afd5dc6). sap_warp is joined by
+    SAP_WARP_PATH on sys.path, so any sap_warp commit silently changes the
+    physics under an unchanged newton-adaptive HEAD.
+    CHANGE: submodule, or record the resolved commit hash in run artifacts.
 
-D10 TRIANGLE-PAIR CAP RIGHT-SIZE.
-    WHAT: the task cfg authors max_triangle_pairs = 192M, sized blind in
-    the always-deterministic era when a CONTACT_ID_BITS clamp silently
-    capped it at 33.5M. Live demand is ~2.8M.
-    CHANGE: author ~8-16M (3-6x margin). One task-config line.
-    WHERE: the task's NewtonCollisionPipelineCfg.
-    COSTS/BUYS: frees ~11 GB at 1024 envs and un-OOMs 4096 under
-    det-off. Risk: UNMEASURED at 4096; the margin is the only guard.
-
-D11 PIN sap_warp TO newton-adaptive (F7).
-    WHAT: sap_warp is joined by SAP_WARP_PATH on sys.path, not a
-    submodule or pin, so any sap_warp commit silently changes the
-    physics under an unchanged newton-adaptive HEAD. For an experiment
-    whose validity IS the contact law, that coupling is a provenance
-    hole.
-    CHANGE: submodule or recorded commit hash in the run artifacts.
-    COSTS/BUYS: buys reproducibility of every number in this ledger;
-    costs nothing at runtime.
-
-D12 THE CENIC REGIME IS NOT THE ONE BEING RUN (F4). CHARACTERIZATION.
-    WHAT: the paper's mechanism — shrinking dt stiffens contact as
-    dt^-2 and thereby kills penetration — is NOT operating here. The
-    scene runs COMPLIANT: 11.09% of contacts in the near-rigid branch
-    overall, 0.25% in flail, d ln k_eff / d ln dt = -0.0031 in flail.
-    Any adaptive advantage this stack demonstrates is truncation-error
-    control alone.
-    CHANGE to enter the paper's regime: raise authored contact stiffness
-    by ~6-7 orders of magnitude AND drive tau_d << dt.
-    WHERE: NewtonShapeCfg ke (currently 2500 N/m/shape -> contact_k 1250
-    N/m combined) and contact_tau_d (0.02 s vs dt ~1.3e-3 s).
-    COSTS/BUYS: buys the paper's actual mechanism; costs a scene that
-    has never been stability-tested at that stiffness — UNMEASURED and
-    likely to change every number in this ledger. Pre-campaign and
-    unchanged by the campaign; this is a claim-scoping decision, not a
-    bug.
+D12 THE CENIC REGIME IS NOT THE ONE BEING RUN (F4). CHARACTERIZATION,
+    UNCHANGED, and explicitly NOT touched by pass 29 on instruction.
+    The scene runs COMPLIANT: 11.09% of contacts in the near-rigid branch
+    overall, 0.25% in flail, d ln k_eff / d ln dt = -0.0031 in flail. Any
+    adaptive advantage this stack demonstrates is truncation-error control
+    alone. Entering the paper's regime needs authored contact stiffness up
+    ~6-7 orders AND tau_d << dt — a claim-scoping decision off a measured
+    sweep, not a defect fix.
 
 D13 PHANTOM BODY. One line in stationary_ai_task.usda:
-    `follower_left_ee_gripper_link active=false`, mirroring the right
-    twin. Buys 7 of 22 coords per world in kernel width and closes a
-    latent-risk surface. Costs nothing. Asset change = Marco's.
+    `follower_left_ee_gripper_link active=false`, mirroring the right twin.
+    Buys 7 of 22 coords per world in kernel width. Asset change = Marco's.
 
-D14 GITHUB PUSH. Every commit in all three repos is LOCAL. GitHub auth
-    on this machine is broken (invalid gh token, no SSH keys, verified
-    2026-08-08 and unchanged). Nothing can be pushed until
-    `gh auth login`.
+D14 GITHUB PUSH. Every commit in all three repos is LOCAL. GitHub auth on
+    this machine is broken (invalid gh token, no SSH keys, verified
+    2026-08-08 and re-confirmed unchanged). Nothing can be pushed until
+    `gh auth login`. Pass 29 adds IsaacLab 27cf9c1ec2, 4e8f763acb,
+    6fdd695cda, 62c165b5f0 and sap_warp afd5dc6 to the unpushed set.
 
-CLOSED THIS PASS, NO ACTION NEEDED: F11 (warm-start asymmetry — fires
-on 100% of training steps, costs 0.005% of Newton iterations and
-nothing in wall); matrix row 28 (the fixed arm's host-synced reset gate
-— 1% of ms/step, inside noise, and only because that arm runs eager);
-the env-axis launch class outside contact_solve.py (0.22% of march
-kernel time, no >=2% candidate exists).
+D15 RUN-ARTIFACT PROVENANCE (F6 residue). Launching by the documented CLI
+    now dumps the right `backend` and `sap_adaptive` (pass 29 verified),
+    but env-var launches still dump `backend: mujoco`, and the dump always
+    records AUTHORED rather than RESOLVED values — params/env.yaml says
+    192,000,000 triangle pairs and deterministic false whatever the manager
+    then builds. CHANGE: dump the resolved solver + pipeline identity after
+    `_resolve_solver_mode` and the pipeline overrides run.
+
+CLOSED BY PASS 29, NO ACTION NEEDED (kept for the record):
+  D1  fixed-arm inner tolerances — both arms now resolve
+      optimality_rel_tol 1e-8 / cost 0.0 / 0.0 / cap 30, dumped live off
+      both solver objects. Cost to the fixed arm: +49.8% inner Newton
+      iterations, +7.2% wall at 64 envs; 0 unconverged solves and 0
+      cost-plateau exits at either tolerance in 23,040 env-solves.
+  D3  determinism propagation — NEWTON_SAP_DETERMINISTIC now resolves
+      identically on both SAP arms' pipelines (read off the narrow phase),
+      gated on the fixed SAP arm so the MuJoCo backend's meaning is
+      untouched. The fixed arm is now bitwise reproducible across
+      processes.
+  D4a convergence certificate — the fixed arm reads the same per-env array
+      the adaptive arm folds into its solve-ok state, latches, freezes,
+      isolates and terminates; strict mode raises quoting
+      optimality_rel_tol=1.000e-08. Proven under forced failure.
+  D6  the documented sap-adaptive launch path — runs, 3 training
+      iterations, no env-var workaround.
+CLOSED EARLIER, NO ACTION NEEDED: F11 (warm-start asymmetry); matrix row 28
+  (the fixed arm's host-synced reset gate — now deleted outright, pass 29);
+  the env-axis launch class outside contact_solve.py.
 
 ## WHERE THE CAMPAIGN ENDED — an honest statement
 
@@ -3824,3 +4083,14 @@ there is no pre-campaign SAP training baseline at all, so the campaign's
 effect on LEARNING outcomes — as opposed to on physical invariants,
 which is measured and null — is unquantified. The wall-clock work is
 finished. What remains is not optimization: it is D1, then D7.
+
+ADDENDUM, pass 29 (2026-08-16). D1 is done: both SAP arms now solve the
+contact problem to optimality_rel_tol 1e-8 with the cost early exit
+disabled, and the fixed arm pays ~50% more inner Newton iterations for it.
+With that, and with the fixed arm's convergence certificate, containment,
+determinism resolution, collision-pipeline sizing and documented launch
+path all landed and gated this pass, WHAT REMAINS IS D7 ALONE — the
+fixed-vs-adaptive TRAINING comparison, which has still never been run on
+SAP. Everything the campaign can do to make that comparison honest has now
+been done; whether it is worth running in a regime that is not the paper's
+near-rigid one (D12) is the question that outranks it.
