@@ -346,26 +346,45 @@ pass10_eager_cuda_gpu_kern_sum.csv (grouped totals in this entry),
 pass10_prof_train.{nsys-rep,sqlite} + pass10_train_cuda_gpu_kern_sum.csv,
 pass10_run_{eager,train}.log, pass10_{eager,train}.telemetry.
 
+## Housekeeping pass (2026-08-15/16, loop pass 11 — COMPLETE)
+
+All three items closed, full 7-gate sweep green on the final bytes
+(construct; flag-equivalence all arms; march-equivalence; determinism;
+containment; err_tol 0/2880 viol, 0 floor visits, dt_run_min 2.87e-3,
+0 samples below 1e-4; rest smoke 0 early terms). (1) Deferred
+pre-commit applied: newton-adaptive hooks green (ruff/format/typos/
+warp-syntax; 24 lint findings fixed minimally — renames, explicit
+subprocess check, dict literal, noqa for deliberate path-setup/lazy
+imports; unused BLE001 noqa stripped by ruff); IsaacLab hooks green on
+campaign code files (formatting only; scene assets deliberately
+excluded from hook runs). (2) TAIL_COMPACT footgun fixed in BOTH twins
+(!= "0" convention; exact-match silently disabled the feature for
+values like "true"). (3) OFF-cell leak guards audited: march-compact,
+shared-assembly, GEMM-reshape, and LS-compaction guards ALL already
+read unconditionally allocated device counters (the pass-3/4-era
+vacuity was fixed during narrow-grid-finish; siblings copied the
+correct pattern) — no change needed. Provenance: p11_gates.log +
+p11_gates_retry.log + p11_{err_tol,rest}.json (note: scratchpad
+probes require CHECK_OUT env — the first G6/G7 attempt failed on the
+missing variable, not physics). Commits: newton-adaptive 718ebf7a,
+IsaacLab b98f247a13.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Housekeeping (promoted — hygiene before any long training): run
-   pre-commit across the accumulated commits and re-gate (hooks were
-   deferred to keep certified bytes exact); fix the TAIL_COMPACT =="1"
-   exact-match footgun; make the march-compact OFF-cell leak guard
-   non-vacuous (review finding).
-2. fp32/tf32 Hessian GEMM — ESCALATION-ONLY (bound measured pass 10:
+1. fp32/tf32 Hessian GEMM — ESCALATION-ONLY (bound measured pass 10:
    ~10-14% plateau wall realistic, ceiling ~15-18% of slab): inexact-
    Newton direction; gradient + certificate stay fp64; opt-in flag, full
    invariant gates + iteration-count watch. Do not implement without
    Marco's word.
-3. Remaining un-narrowed env-axis launches outside contact_solve.py
+2. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes) — few-percent
    class, mechanical, bitwise.
-4. Collision-refresh attack: CLOSED (pass 10: 0.99% of plateau
+3. Collision-refresh attack: CLOSED (pass 10: 0.99% of plateau
    iteration at 1024 — elimination ceiling <1%).
-5. Coordinator note: with the profile flat and the two dead-end
-   closures, the loop's autonomous percent backlog is near exhaustion
-   after item 1; recommend idling or stopping pending Marco's
+4. Coordinator note: with housekeeping complete, the profile flat, and
+   the dead-end closures recorded, the loop's autonomous percent
+   backlog is exhausted except item 2 (few-percent, mechanical);
+   recommend idling or stopping pending Marco's
    escalation decisions (tf32, ACR enable, tri-pair right-size, phantom
    body, det-tax choice for long runs).
 
