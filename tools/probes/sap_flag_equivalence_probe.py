@@ -260,6 +260,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_FUSED_LS",
     "NEWTON_SAP_FUSED_ALPHAMAX",
     "NEWTON_SAP_PACK_PERCONTACT",
+    "NEWTON_SAP_FUSED_UPDATE",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -320,6 +321,7 @@ def _cfg(
     fused: str | None = "0",
     alphamax: str | None = "0",
     pack: str = "0",
+    fusedupdate: str | None = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -383,6 +385,16 @@ def _cfg(
     # reference + repeat oracle and graph/conditional arms.
     if alphamax is not None:
         env["NEWTON_SAP_FUSED_ALPHAMAX"] = alphamax
+    # The fused post-commit update evaluation (default ON in the solver) is
+    # a DIFFERENT fp reduction route for the committed-point cost, gradient
+    # totals and norms, so no bitwise contract exists across its states:
+    # every other cell pins "0" (the launch-chain stream, byte-for-byte the
+    # pre-flag behavior), and the fused-update family cells pass None to
+    # leave the variable unset so the default resolution is itself under
+    # test, with their own reference + repeat oracle and graph/conditional
+    # arms.
+    if fusedupdate is not None:
+        env["NEWTON_SAP_FUSED_UPDATE"] = fusedupdate
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -622,6 +634,75 @@ CONFIGS = [
         fused=None,
         alphamax=None,
     ),
+    # ---- fused-update family (the solver default: flag UNSET) ----
+    # The production stack shape with the ladder flags, pack and the fused
+    # update evaluation at their unset defaults: the committed-point
+    # eval + norm/convergence update runs as one kernel whose per-env
+    # reductions are a different fp order from the launch chain's, and the
+    # trip-opening hessian projection is deleted (its G comes from the
+    # fused eval), so the family carries its own reference + repeat
+    # oracle; varied factors within it are graph capture and the
+    # whole-march conditional tier, which must record and replay the
+    # fused single-kernel stream bitwise. Engagement is the device
+    # fused-update-env counter (asserted > 0 here and == 0 in every
+    # pinned-off cell).
+    _cfg(
+        "fusedup",
+        "0",
+        None,
+        False,
+        refresh="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+    ),
+    _cfg(
+        "fusedup-repeat",
+        "0",
+        None,
+        False,
+        refresh="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+    ),
+    _cfg(
+        "fusedup-graph",
+        "1",
+        None,
+        False,
+        refresh="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+    ),
+    _cfg(
+        "fusedup-conditional",
+        "1",
+        None,
+        False,
+        refresh="1",
+        conditional="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -667,6 +748,14 @@ FUSEDAM_FAMILY = (
     "fusedam-repeat",
     "fusedam-graph",
     "fusedam-conditional",
+)
+
+# Arms judged bitwise against "fusedup" (scheduling-only changes under the
+# fused update evaluation's reduction route).
+FUSEDUP_FAMILY = (
+    "fusedup-repeat",
+    "fusedup-graph",
+    "fusedup-conditional",
 )
 
 
@@ -810,6 +899,15 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     assert solver._sap.contact_solve._fused_alphamax == alphamax_expected, (
         f"[{name}] fused-alphamax switch did not resolve "
         f"(env {env.get('NEWTON_SAP_FUSED_ALPHAMAX')!r} -> expected {alphamax_expected})"
+    )
+    # Fused update evaluation: absent or "1" resolves ON (default-ON
+    # convention); "0" disables. Construction proof is the resolved switch;
+    # engagement is the device fused-update-env counter, asserted after the
+    # march below.
+    fusedupdate_expected = env.get("NEWTON_SAP_FUSED_UPDATE") != "0"
+    assert solver._sap.contact_solve._fused_update == fusedupdate_expected, (
+        f"[{name}] fused-update switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_FUSED_UPDATE')!r} -> expected {fusedupdate_expected})"
     )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
@@ -1067,6 +1165,23 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             "-- the per-contact path leaked into an OFF cell."
         )
 
+    # Fused-update engagement: the counter accumulates once per live listed
+    # env per update evaluation, so a nonzero total proves the fused kernel
+    # actually ran the committed-point eval (a zero total in an ON cell
+    # means no Newton solve ever ran -- vacuous); any count in a pinned-off
+    # cell means the fused kernel leaked into the certified launch-chain
+    # stream. Host read is post-march only.
+    fused_update_envs = solver._sap.contact_solve.fused_update_envs()
+    if fusedupdate_expected:
+        assert fused_update_envs > 0, (
+            f"[{name}] fused update evaluation never ran an env "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert fused_update_envs == 0, (
+            f"[{name}] fused-update counter advanced with the switch off -- the fused path leaked into an OFF cell."
+        )
+
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
     # every mode (the collide runs outside the captured body); exact for the
     # per-attempt cadence only on eager (graph=0) arms -- graph replays do
@@ -1083,6 +1198,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "fused_ladder_envs": fused_ladder_envs,
         "fused_alphamax_envs": fused_alphamax_envs,
         "pack_execs": pack_execs,
+        "fused_update_envs": fused_update_envs,
     }
 
 
@@ -1306,6 +1422,21 @@ def main() -> int:
             > 0,
         }
     )
+    # Fused-update family: same shape as the ladder families -- its own
+    # contact/divergence vacuity certificate plus engagement via the device
+    # counter (divergence from the fusedam family is NOT required: the
+    # fusion changes only the committed-point totals' fp reduction route,
+    # so a bitwise-identical march is a legal outcome; the counter is the
+    # engagement proof).
+    upref = runs["fusedup"]
+    guards.update(
+        {
+            "fusedup arm produced pipeline contacts": extras["fusedup"]["ncon_seen"] > 0,
+            "fusedup arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in upref),
+            "fused update eval engaged (device fused-update-env counter > 0)": extras["fusedup"]["fused_update_envs"]
+            > 0,
+        }
+    )
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -1321,6 +1452,7 @@ def main() -> int:
         ("acr", "acr-repeat"),
         ("fusedls", "fusedls-repeat"),
         ("fusedam", "fusedam-repeat"),
+        ("fusedup", "fusedup-repeat"),
     ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
@@ -1343,6 +1475,8 @@ def main() -> int:
             "fusedls-repeat",
             "fusedam",
             "fusedam-repeat",
+            "fusedup",
+            "fusedup-repeat",
         ):
             continue
         if name in BOUNDARY_FAMILY:
@@ -1353,6 +1487,8 @@ def main() -> int:
             family = "fusedls"
         elif name in FUSEDAM_FAMILY:
             family = "fusedam"
+        elif name in FUSEDUP_FAMILY:
+            family = "fusedup"
         else:
             family = "reference"
         where = first_divergence(runs[family], runs[name])

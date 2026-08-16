@@ -2288,6 +2288,11 @@ class SolverSAPAdaptive:
             # per-solve j_flat build launch, so the flag selects a different
             # launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_pack_percontact", False)),
+            # The fused update evaluation collapses the per-trip committed-
+            # point launch chain into one kernel and deletes the trip-opening
+            # hessian projection, so the flag selects a different launch
+            # stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_update", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
@@ -2392,6 +2397,11 @@ class SolverSAPAdaptive:
             # per-solve j_flat build launch, so the flag selects a different
             # launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_pack_percontact", False)),
+            # The fused update evaluation collapses the per-trip committed-
+            # point launch chain into one kernel and deletes the trip-opening
+            # hessian projection, so the flag selects a different launch
+            # stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_update", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
