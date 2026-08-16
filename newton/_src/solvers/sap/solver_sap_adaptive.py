@@ -1242,8 +1242,8 @@ class SolverSAPAdaptive:
         self._dt = wp.full(wc, dt_inner_init, dtype=wp.float32, device=device)
         self._dt_half = wp.full(wc, dt_inner_init * 0.5, dtype=wp.float32, device=device)
 
-        # Attempt-consistent constitutive law (default OFF;
-        # NEWTON_SAP_ATTEMPT_CONSISTENT_R=1 opts in): pin every trial solve's
+        # Attempt-consistent constitutive law (default ON;
+        # NEWTON_SAP_ATTEMPT_CONSISTENT_R=0 disables): pin every trial solve's
         # near-rigid clamps (contact rn_hard, joint-limit r_nr, PD gain clamp)
         # to THIS attempt's dt instead of each solve's own dt, so the
         # step-doubling comparison measures truncation error of one fixed
@@ -1252,8 +1252,8 @@ class SolverSAPAdaptive:
         # 1 (committed-step laws unchanged; attempts still tighten as the
         # attempted dt falls), and the twin precedent is the MuJoCo solver's
         # NEWTON_ADAPTIVE_CONTACT_COUPLING (coupled solref with
-        # timeconst = 2*dt_attempt for both trials, also default OFF).
-        self._attempt_consistent_r = os.environ.get("NEWTON_SAP_ATTEMPT_CONSISTENT_R", "0") == "1"
+        # timeconst = 2*dt_attempt for both trials).
+        self._attempt_consistent_r = os.environ.get("NEWTON_SAP_ATTEMPT_CONSISTENT_R") != "0"
         if self._attempt_consistent_r:
             self._sap.contact_solve.set_constitutive_dt(self._dt)
         self._ideal_dt = wp.full(wc, dt_inner_init, dtype=wp.float32, device=device)
@@ -2281,6 +2281,10 @@ class SolverSAPAdaptive:
             self._march_compact,
             self._mc_width,
             self._shared_assembly,
+            # The attempt-consistent constitutive scale kernels record inside
+            # the captured solves, so the flag selects a different launch
+            # stream.
+            self._attempt_consistent_r,
             # Construction-constant today (precision is baked into the buffer
             # dtypes and kernel table at __init__), keyed defensively so a
             # future mutable-precision refactor cannot replay the other
@@ -2369,6 +2373,10 @@ class SolverSAPAdaptive:
             self._march_compact,
             self._mc_width,
             self._shared_assembly,
+            # The attempt-consistent constitutive scale kernels record inside
+            # the captured solves, so the flag selects a different launch
+            # stream.
+            self._attempt_consistent_r,
         )
 
     def _launch_conditional_march(self, eff_dt_max: float, dt_outer: float) -> bool:

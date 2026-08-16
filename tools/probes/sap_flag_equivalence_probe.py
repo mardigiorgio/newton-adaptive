@@ -73,6 +73,24 @@ Oracle argument (why this is not a tautology or a snapshot):
     "boundary" reference (with a boundary-repeat oracle guard). Cadence
     engagement is proven by counting CollisionPipeline invocations
     host-side: 2 per attempt (eager) vs exactly 1 per boundary.
+
+    NEWTON_SAP_ATTEMPT_CONSISTENT_R (default ON, "0" disables) is likewise
+    NOT a scheduling switch: it pins the trial solves' near-rigid clamps to
+    the attempt's dt, which is a different constitutive law for the
+    step-doubling pair, so no bitwise relation across its states exists.
+    Every scheduling-switch cell pins it "0" explicitly -- under the
+    attempt-consistent law this scene accepts every attempt at the cap
+    (no rejections, no per-world dt spread), which would leave the
+    rejection/spread/compaction vacuity guards unmeetable. The ACR family
+    cells leave the variable UNSET so the solver's default resolution is
+    itself under test (a construction tripwire asserts it lands ON and
+    that the constitutive dt buffer reaches the contact solve), with their
+    own reference + repeat oracle and graph/conditional arms certifying
+    that the attempt-consistent launch stream captures and replays
+    bitwise. Law engagement is proven by divergence: the ACR family's
+    committed march must differ from the ACR-off boundary family's, and
+    every other flag separating those cells is individually certified
+    bitwise-invisible, so any byte difference is the law's.
     The correct output of a switch-on run is therefore exactly computable by an
     independent route: the switch-off run of the identical scenario, same
     process, same build, same device, same seed. The probe asserts bitwise
@@ -214,6 +232,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_MARCH_COMPACT",
     "NEWTON_SAP_MARCH_COMPACT_WIDTH",
     "NEWTON_SAP_SHARED_ASSEMBLY",
+    "NEWTON_SAP_ATTEMPT_CONSISTENT_R",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -227,8 +246,10 @@ _SCRATCH = tempfile.mkdtemp(prefix="sap_flag_probe_")
 # stragglers rest on the ground, so one always does). The armijo default
 # line search drives the no-hessian trial family. The attempt-consistent
 # scale sites (prep_scale_a_inv_pd/limit, scale_w_eff) are NOT listed:
-# they emit only under the opt-in NEWTON_SAP_ATTEMPT_CONSISTENT_R=1, which
-# every cell here leaves at its default (off).
+# they emit only with the attempt-consistent law ON, and every
+# march-compact cell here pins NEWTON_SAP_ATTEMPT_CONSISTENT_R=0 (under
+# that law this scene accepts every attempt at the cap, leaving the
+# compaction machinery nothing to engage).
 EXPECTED_NARROW_SITES = frozenset(
     {
         "prep_copy_guess",
@@ -268,6 +289,7 @@ def _cfg(
     march: str = "0",
     shared: str = "0",
     gemm: str = "0",
+    acr: str | None = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -297,6 +319,13 @@ def _cfg(
         # invocation, so this is an honest re-baseline, not a golden file.
         "NEWTON_SAP_DETERMINISTIC": "1",
     }
+    # Attempt-consistent trial law (default ON in the solver) is DIFFERENT
+    # PHYSICS for the step-doubling pair: scheduling-switch cells pin "0"
+    # explicitly (the law whose rejections/spread this scene's guards
+    # need); ACR-family cells pass None to leave the variable unset, so
+    # the default resolution itself is the thing under test.
+    if acr is not None:
+        env["NEWTON_SAP_ATTEMPT_CONSISTENT_R"] = acr
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -425,6 +454,19 @@ CONFIGS = [
         shared="1",
         gemm="1",
     ),
+    # ---- attempt-consistent-law family (the solver default: flag UNSET) ----
+    # Boundary cadence (the shipping cadence) with shared assembly and the
+    # bounded GEMM pair on uniformly (both certified bitwise-invisible by
+    # their own arms above). Tail/march compaction stays off: under this
+    # law every world accepts at the cap, so the partial-active and
+    # narrow/wide-branch engagement guards have nothing to engage on this
+    # scene. Varied factors within the family: graph capture and the
+    # whole-march conditional tier, which must record and replay the
+    # attempt-consistent scale kernels' launch stream bitwise.
+    _cfg("acr", "0", None, False, refresh="1", shared="1", gemm="1", acr=None),
+    _cfg("acr-repeat", "0", None, False, refresh="1", shared="1", gemm="1", acr=None),
+    _cfg("acr-graph", "1", None, False, refresh="1", shared="1", gemm="1", acr=None),
+    _cfg("acr-conditional", "1", None, False, refresh="1", conditional="1", shared="1", gemm="1", acr=None),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -444,6 +486,14 @@ BOUNDARY_FAMILY = (
     "boundary-gemm-reshape",
     "gemm-full-stack",
     "boundary-containment",
+)
+
+# Arms judged bitwise against "acr" (scheduling-only changes under the
+# attempt-consistent trial law).
+ACR_FAMILY = (
+    "acr-repeat",
+    "acr-graph",
+    "acr-conditional",
 )
 
 
@@ -552,6 +602,24 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     assert solver._sap.contact_solve._gemm_reshape == gemm_requested, (
         f"[{name}] gemm-reshape switch did not reach construction"
     )
+    # Attempt-consistent law: absent or "1" resolves ON (the solver's
+    # default-ON convention); "0" disables. The constitutive-dt buffer is
+    # the mechanism, so its presence/absence is the construction proof --
+    # an OFF cell with the buffer set is a leak, an ON cell without it
+    # never wired the law.
+    acr_expected = env.get("NEWTON_SAP_ATTEMPT_CONSISTENT_R") != "0"
+    assert solver._attempt_consistent_r == acr_expected, (
+        f"[{name}] attempt-consistent-law switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_ATTEMPT_CONSISTENT_R')!r} -> expected {acr_expected})"
+    )
+    if acr_expected:
+        assert solver._sap.contact_solve._constitutive_dt is not None, (
+            f"[{name}] attempt-consistent law ON but no constitutive dt reached the contact solve"
+        )
+    else:
+        assert solver._sap.contact_solve._constitutive_dt is None, (
+            f"[{name}] constitutive dt reached the contact solve in an ACR-off cell (leak)"
+        )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
         march_requested
@@ -810,6 +878,10 @@ def run_smoke(name: str, env: dict[str, str], z0, vz) -> dict:
     wall time measured after SMOKE_WARMUP boundaries with device sync fences."""
     _apply_env(env)
     model, s0, s1, control, solver = fresh(z0, vz, dt_hist=False)
+    # The ON smoke leaves the attempt-consistent law at its unset default
+    # (must resolve ON); the OFF smoke pins "0" (must resolve OFF).
+    acr_expected = env.get("NEWTON_SAP_ATTEMPT_CONSISTENT_R") != "0"
+    assert solver._attempt_consistent_r == acr_expected, f"[{name}] attempt-consistent-law switch did not resolve"
     is_cuda = bool(wp.get_device(model.device).is_cuda)
     for _ in range(SMOKE_WARMUP):
         s0, s1 = solver.step_dt(DT_OUTER, s0, s1, control)
@@ -929,6 +1001,23 @@ def main() -> int:
     if "march-compact" in extras:
         _mc = extras["march-compact"]["mc_execs"]
         guards["march compaction engaged (narrow and wide branches both executed)"] = _mc[0] > 0 and _mc[1] > 0
+    # Attempt-consistent-law family: its own contact/divergence vacuity
+    # certificate, plus law engagement BY DIVERGENCE -- every flag
+    # separating the "acr" cell from the "boundary" cell (tail compaction,
+    # shared assembly, bounded GEMM) is individually certified
+    # bitwise-invisible above, so a bitwise-identical march would mean the
+    # law itself never changed a trial and the family is vacuous.
+    aref = runs["acr"]
+    guards.update(
+        {
+            "acr arm produced pipeline contacts": extras["acr"]["ncon_seen"] > 0,
+            "acr arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in aref),
+            "attempt-consistent law engaged (acr family march differs from boundary family)": first_divergence(
+                runs["boundary"], aref
+            )
+            is not None,
+        }
+    )
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -937,8 +1026,12 @@ def main() -> int:
         print("VACUOUS: the scene failed to exercise the march; fix the scene, not the flags.")
         return 3
 
-    # --- Tier 2: oracle validity (one oracle per cadence family) ----------
-    for oracle, repeat in (("reference", "reference-repeat"), ("boundary", "boundary-repeat")):
+    # --- Tier 2: oracle validity (one oracle per family) ------------------
+    for oracle, repeat in (
+        ("reference", "reference-repeat"),
+        ("boundary", "boundary-repeat"),
+        ("acr", "acr-repeat"),
+    ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
             report_divergence(repeat, runs[oracle], runs[repeat], where)
@@ -946,17 +1039,22 @@ def main() -> int:
             print("bitwise feature equality cannot be judged here.")
             return 2
 
-    # --- Tier 3: feature equivalence (within each cadence family) ---------
+    # --- Tier 3: feature equivalence (within each family) -----------------
     failed = False
     for name, _env_cell, _ in configs:
-        if name in ("reference", "reference-repeat", "boundary", "boundary-repeat"):
+        if name in ("reference", "reference-repeat", "boundary", "boundary-repeat", "acr", "acr-repeat"):
             continue
-        family_ref, family = ("boundary", "boundary") if name in BOUNDARY_FAMILY else ("reference", "reference")
-        where = first_divergence(runs[family_ref], runs[name])
+        if name in BOUNDARY_FAMILY:
+            family = "boundary"
+        elif name in ACR_FAMILY:
+            family = "acr"
+        else:
+            family = "reference"
+        where = first_divergence(runs[family], runs[name])
         if where is None:
             print(f"PASS[{name}]: bitwise identical to {family} over {K_BOUNDARIES} boundaries")
         else:
-            report_divergence(name, runs[family_ref], runs[name], where)
+            report_divergence(name, runs[family], runs[name], where)
             failed = True
     print(f"equivalence iterations per boundary (reference): {iters.tolist()}")
     print(f"equivalence iterations per boundary (boundary):  {b_iters.tolist()}")
@@ -994,6 +1092,7 @@ def main() -> int:
             "NEWTON_SAP_DETERMINISTIC": "1",
             "NEWTON_SAP_CONTAINMENT": "0",
             "NEWTON_SAP_MARCH_COMPACT": "0",
+            "NEWTON_SAP_ATTEMPT_CONSISTENT_R": "0",
         },
         z0,
         vz,

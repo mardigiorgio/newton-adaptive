@@ -17,7 +17,15 @@ What this probe establishes:
       single per-world dt buffer (contact_solve._dt_world), which the
       near-rigid regularization indexes as dt[env]; with per-world impact
       severities the controller's dts must spread, and the guard asserts the
-      buffer is non-uniform across worlds after the impact boundary.
+      buffer is non-uniform across worlds after the impact boundary. This
+      march pins NEWTON_SAP_ATTEMPT_CONSISTENT_R=0: the spread guard needs
+      the dt-coupled law difference between the step-doubling trials, and
+      under the attempt-consistent default this scene accepts every attempt
+      at the cap (uniform dt, guard unmeetable by construction).
+    * The attempt-consistent law's DEFAULT resolves ON: a second solver is
+      built with the variable unset and must report the law active with the
+      constitutive-dt buffer wired into the contact solve, then march
+      boundaries to a finite committed state.
 
 Deliberately NOT established here:
     * Numerical correctness of the SAP solve (equivalence probes own that).
@@ -128,6 +136,9 @@ def main() -> int:
     state_1.assign(state_0)
 
     # ---- construction (the 1.5 breakage point) ------------------------------
+    # Guard-march law pin: see the docstring -- the dt-spread guard is only
+    # meetable under the dt-coupled trial law.
+    os.environ["NEWTON_SAP_ATTEMPT_CONSISTENT_R"] = "0"
     try:
         solver = newton.solvers.SolverSAPAdaptive(
             model,
@@ -184,6 +195,40 @@ def main() -> int:
     z = state_0.joint_q.numpy()[2::coords]
     print(f"final sphere heights: {np.array2string(z, precision=5)} (radius {R})")
     print(f"cumulative substeps: {solver.cumulative_substeps()}")
+
+    # ---- attempt-consistent-law default resolution (variable UNSET) ---------
+    os.environ.pop("NEWTON_SAP_ATTEMPT_CONSISTENT_R", None)
+    dmodel = build_model()
+    dcontrol = dmodel.control()
+    d0, d1 = dmodel.state(), dmodel.state()
+    d0.joint_q.assign(q)
+    d0.joint_qd.assign(qd)
+    newton.eval_fk(dmodel, d0.joint_q, d0.joint_qd, d0)
+    d1.assign(d0)
+    dsolver = newton.solvers.SolverSAPAdaptive(
+        dmodel,
+        mode="adaptive",
+        tol=TOL,
+        dt_inner_init=DT_OUTER,
+        dt_inner_min=1e-7,
+        dt_inner_max=DT_OUTER,
+        max_substeps=64,
+        line_search_variant=LINE_SEARCH,
+    )
+    check(
+        "attempt-consistent law defaults ON with the constitutive dt wired into the contact solve",
+        dsolver._attempt_consistent_r and dsolver._sap.contact_solve._constitutive_dt is not None,
+    )
+    default_finite = True
+    for _ in range(10):
+        d0, d1 = dsolver.step_dt(DT_OUTER, d0, d1, dcontrol)
+        if not np.all(np.isfinite(d0.joint_q.numpy())):
+            default_finite = False
+            break
+    check(
+        "default-law solver marches to finite committed state over 10 boundaries",
+        default_finite and int(dsolver.diverged.numpy().sum()) == 0,
+    )
 
     if _FAILURES:
         print("SAP-NEWTON15-CONSTRUCT: FAIL")
