@@ -63,6 +63,54 @@ def mark_unfinished_with_status(
 
 
 @wp.kernel
+def mark_unfinished_with_status_target(
+    sim_time: wp.array[wp.float32],
+    target: wp.array[wp.float32],
+    solve_ok: wp.array[int],
+    flag: wp.array[wp.int32],
+):
+    """:func:`mark_unfinished_with_status` against a per-call scalar target.
+
+    ``target[0]`` (device, written by the caller at boundary open -- graph-replay
+    safe) replaces the per-world ``next_time`` in the finish test, so a world
+    whose own boundary clock has RUN AHEAD of the call target still counts as
+    finished for this call. Used by the SAP run-ahead march, where per-world
+    boundary targets advance inside the call while the call itself only owes
+    the batch ``target[0]`` of sim time. The solve-status fold is identical to
+    the per-world kernel's.
+    """
+    i = wp.tid()
+    if solve_ok[i] == 0:
+        wp.atomic_max(flag, 0, 2)
+    elif sim_time[i] < target[0]:
+        wp.atomic_max(flag, 0, 1)
+
+
+@wp.kernel
+def mark_unfinished_contained_target(
+    sim_time: wp.array[wp.float32],
+    target: wp.array[wp.float32],
+    solve_ok: wp.array[int],
+    fail_world: wp.array[wp.int32],
+    flag: wp.array[wp.int32],
+):
+    """:func:`mark_unfinished_contained` against a per-call scalar target.
+
+    Same containment semantics (failures stay per-world; ``flag[1]`` sticky
+    latch + per-world event counter), with the finish test taken against the
+    device scalar ``target[0]`` instead of per-world ``next_time`` -- see
+    :func:`mark_unfinished_with_status_target` for why the run-ahead march
+    needs the scalar form.
+    """
+    i = wp.tid()
+    if solve_ok[i] == 0:
+        fail_world[i] = fail_world[i] + 1
+        wp.atomic_max(flag, 1, 1)
+    if sim_time[i] < target[0]:
+        wp.atomic_max(flag, 0, 1)
+
+
+@wp.kernel
 def mark_unfinished_contained(
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],

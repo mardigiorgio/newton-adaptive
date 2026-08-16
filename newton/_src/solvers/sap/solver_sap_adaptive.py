@@ -95,7 +95,12 @@ from sim.solver_sap import SolverSAP
 
 import newton
 
-from ..adaptive_boundary import mark_unfinished_contained, mark_unfinished_with_status
+from ..adaptive_boundary import (
+    mark_unfinished_contained,
+    mark_unfinished_contained_target,
+    mark_unfinished_with_status,
+    mark_unfinished_with_status_target,
+)
 
 # ---- step-evolution mode codes (passed to _adapt_dt as a uniform kernel arg) ----
 _MODE_FIXED = wp.constant(0)
@@ -911,6 +916,168 @@ def _debt_guard(
 
 
 @wp.kernel
+def _debt_guard_target(
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    t_call: float,
+    dt_outer: float,
+    dt_init: float,
+    ceiling_init: float,
+    ideal_dt: wp.array[wp.float32],
+    dt_ceiling: wp.array[wp.float32],
+    consec_rej: wp.array[wp.int32],
+    guard_hits: wp.array[wp.int32],
+):
+    """:func:`_debt_guard` for the run-ahead march: "in debt" is measured
+    against the CALL target ``t_call``, not the per-world boundary clock -- a
+    run-ahead world legitimately sits mid-boundary (``sim_time < next_time``)
+    at call exit and must not have its controller reissued. A world short of
+    ``t_call`` is short of its own (not-yet-bumped) boundary too, so the
+    per-world carry bound and controller reissue below are the original
+    kernel's, verbatim."""
+    i = wp.tid()
+    if sim_time[i] < t_call:
+        floor_t = next_time[i] - dt_outer
+        if sim_time[i] < floor_t:
+            sim_time[i] = floor_t
+        ideal_dt[i] = dt_init
+        dt_ceiling[i] = ceiling_init
+        consec_rej[i] = 0
+        wp.atomic_add(guard_hits, 0, 1)
+
+
+@wp.kernel
+def _ra_advance_boundary(
+    mode: int,
+    dt_outer: float,
+    window_end: float,
+    dt_fixed: float,
+    dt_min: float,
+    dt_max: float,
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
+    ideal_dt: wp.array[wp.float32],
+    diverged: wp.array[wp.bool],
+    substeps_frame: wp.array[wp.int32],
+    crossed: wp.array[wp.int32],
+    crossed_any: wp.array[wp.int32],
+    crossings: wp.array[wp.int32],
+):
+    """The run-ahead crossing: a world that reached its boundary target inside
+    the action window does not park -- its boundary bookkeeping is applied
+    in-place and it marches on toward the next boundary, capped at the window
+    end. Runs after the commit; per-world data flow only.
+
+    The bookkeeping mirrors what integrate() applies between boundary calls:
+    the :func:`_seed_dt` clamp of the carried ``ideal_dt`` into ``dt`` /
+    ``dt_half`` (a landing accept already left dt at exactly this value, so
+    the reseed is idempotent -- kept for exactness against the per-boundary
+    path) and the per-world ``substeps_frame`` rollover. ``next_time``
+    advances by one ``dt_outer`` add, the same fp operation the host-side
+    target chain uses, so boundary targets stay bit-comparable everywhere.
+
+    A ``diverged`` world does NOT run ahead: its floor-latch froze its state
+    and clock at its boundary, and this kernel parks it at the window end
+    (clock force-advanced, latch left visible for the caller's post-call
+    read) so it stays isolated for the rest of the window -- the run-ahead
+    analogue of the per-boundary latch's freeze-to-boundary.
+
+    ``crossed``/``crossed_any`` arm the crossing-batched collide+adopt node
+    at the top of the next march iteration (the world's contact set refreshes
+    at ITS boundary-entry state, preserving per-world contact cadence);
+    ``crossings`` is the cumulative engagement counter probes read.
+    """
+    w = wp.tid()
+    if sim_time[w] < next_time[w]:
+        return
+    if next_time[w] >= window_end:
+        return
+    if diverged[w]:
+        sim_time[w] = window_end
+        next_time[w] = window_end
+        return
+    nt = next_time[w] + dt_outer
+    if nt > window_end:
+        nt = window_end
+    next_time[w] = nt
+    if mode == _MODE_FIXED:
+        d = wp.clamp(dt_fixed, dt_min, dt_max)
+    else:
+        d = wp.clamp(ideal_dt[w], dt_min, dt_max)
+    dt[w] = d
+    dt_half[w] = d * wp.float32(0.5)
+    substeps_frame[w] = 0
+    crossed[w] = 1
+    wp.atomic_max(crossed_any, 0, 1)
+    wp.atomic_add(crossings, 0, 1)
+
+
+@wp.kernel
+def _ra_resync_reset_worlds(
+    t_prev: float,
+    t_call: float,
+    mode: int,
+    dt_fixed: float,
+    dt_min: float,
+    dt_max: float,
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    dt: wp.array[wp.float32],
+    dt_half: wp.array[wp.float32],
+    ideal_dt: wp.array[wp.float32],
+    substeps_frame: wp.array[wp.int32],
+    crossed: wp.array[wp.int32],
+    crossed_any: wp.array[wp.int32],
+):
+    """Mid-window re-entry for reset worlds (run-ahead mode only).
+
+    ``reset()`` zeroes a world's clocks; between windows the normal window-open
+    rebase absorbs that, but a mid-window reset (the manager resets diverged
+    worlds after every boundary call) would otherwise leave the world at local
+    time 0 and re-march the whole window. ``next_time == 0`` is an exact
+    reset signature (every live target is a positive dt_outer chain value), so
+    this kernel re-seats exactly those worlds at the current call's start:
+    one ``dt_outer`` of marching this call, run-ahead from there. The seed
+    clamp mirrors :func:`_seed_dt` (reset wrote a raw ``dt_init``). The world
+    is flagged ``crossed`` so the march's first collide+adopt node refreshes
+    its contact set at its post-reset state."""
+    w = wp.tid()
+    if next_time[w] != wp.float32(0.0):
+        return
+    sim_time[w] = t_prev
+    next_time[w] = t_call
+    if mode == _MODE_FIXED:
+        d = wp.clamp(dt_fixed, dt_min, dt_max)
+    else:
+        d = wp.clamp(ideal_dt[w], dt_min, dt_max)
+    dt[w] = d
+    dt_half[w] = d * wp.float32(0.5)
+    substeps_frame[w] = 0
+    crossed[w] = 1
+    wp.atomic_max(crossed_any, 0, 1)
+
+
+@wp.kernel
+def _ra_clear_crossed(
+    crossed: wp.array[wp.int32],
+    crossed_any: wp.array[wp.int32],
+    adopts: wp.array[wp.int32],
+):
+    """Disarm the crossing-batch flags after a collide+adopt node consumed
+    them (stream-ordered after the masked collide and the adopt, which read
+    ``crossed`` as their mask). ``adopts`` counts consumed batches -- the
+    device engagement counter for the conditional node itself (replays
+    included)."""
+    i = wp.tid()
+    crossed[i] = 0
+    if i == 0:
+        crossed_any[0] = 0
+        adopts[0] = adopts[0] + 1
+
+
+@wp.kernel
 def _count_rejects(
     accepted: wp.array[wp.bool],
     dt: wp.array[wp.float32],
@@ -1486,6 +1653,65 @@ class SolverSAPAdaptive:
         self._shared_assembly = os.environ.get("NEWTON_SAP_SHARED_ASSEMBLY", "1") != "0" and self._do_doubling
         self._sa_execs = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # ---- cross-boundary overlap: RUN-AHEAD single march (default OFF) ----
+        # NEWTON_SAP_RUNAHEAD=1 opts in: a world reaching its boundary target
+        # inside the action window does not park -- a device crossing kernel
+        # applies its boundary bookkeeping in place and it marches on, capped
+        # at the window end (NEWTON_SAP_RUNAHEAD_WINDOW boundary calls per
+        # action window; must equal the env's decimation). The call-return
+        # predicate compares sim_time against a per-call device scalar target,
+        # so run-ahead worlds count as finished for the call and the LAST call
+        # of the window returns only when every world sits at the window end
+        # (action-edge state stays batch-synchronized). Boundary collides
+        # become crossing-batched conditional nodes inside the march body
+        # (masked collide + per-env set ADOPT); per-world contact cadence and
+        # anchoring are semantically identical to the per-boundary march.
+        # Per-world dt control, the step-doubling estimator and accept/reject
+        # are untouched. BATCH-VISIBLE semantic change: state written back at
+        # mid-window calls shows run-ahead worlds at mixed boundary times
+        # (action-edge reads are unaffected); shipping this ON requires the
+        # consumer to have no sub-action-cadence state reader and no
+        # per-physics-step control variation. Engagement counters are
+        # allocated unconditionally so an OFF-configuration read is a real
+        # observation (leak tripwire), mirroring the march-compact counters.
+        self._ra_crossings = wp.zeros(1, dtype=wp.int32, device=device)
+        self._ra_adopts = wp.zeros(1, dtype=wp.int32, device=device)
+        self._runahead = os.environ.get("NEWTON_SAP_RUNAHEAD", "0") == "1"
+        if self._runahead:
+            if self._contact_refresh_per_attempt:
+                raise ValueError(
+                    "NEWTON_SAP_RUNAHEAD=1 requires the boundary contact cadence "
+                    "(NEWTON_ADAPTIVE_CONTACT_REFRESH=attempt re-collides inside the eval core; "
+                    "the run-ahead crossing node owns the collide cadence instead)."
+                )
+            if self._solve_precision != "fp64":
+                raise ValueError(
+                    "NEWTON_SAP_RUNAHEAD=1 supports the fp64 solve stack only "
+                    "(the fp32 stack has no certified adopt/anchor coverage)."
+                )
+            self._runahead_window = int(os.environ.get("NEWTON_SAP_RUNAHEAD_WINDOW", "4"))
+            if self._runahead_window < 1:
+                raise ValueError(f"NEWTON_SAP_RUNAHEAD_WINDOW must be >= 1, got {self._runahead_window}.")
+            # Call-phase offset for callers whose boundary-call stream does not
+            # start on an action-window edge (e.g. startup settle steps).
+            self._ra_phase = int(os.environ.get("NEWTON_SAP_RUNAHEAD_PHASE", "0")) % self._runahead_window
+            self._ra_call_idx = 0
+            self._ra_window_pos = 0
+            self._ra_t_call = wp.zeros(1, dtype=wp.float32, device=device)
+            self._ra_t_call_host = 0.0
+            self._ra_crossed = wp.zeros(wc, dtype=wp.int32, device=device)
+            self._ra_crossed_any = wp.zeros(1, dtype=wp.int32, device=device)
+            self._ra_all_worlds = wp.ones(wc, dtype=wp.int32, device=device)
+            self._ra_target_cache: dict = {}
+            # Per-world contact persistence: the global buffer only ever holds
+            # the latest crossing batch, so per-env sets own the anchored
+            # rows; the per-attempt scatter becomes the ANCHOR re-derivation.
+            self._sap.contact_jacobian.enable_runahead_set_store()
+            # Deterministic slot ranks are computed per crossing batch inside
+            # adopt_contact_set; the per-boundary external-slot walk is
+            # superseded.
+            self._sap.contact_jacobian.det_slots_external = False
+
         # Engagement counters (dim-1 increments recorded FIRST inside each
         # branch body). Allocated UNCONDITIONALLY so an OFF-configuration read
         # is a real observation: any branch-body emission in an OFF cell
@@ -1583,6 +1809,29 @@ class SolverSAPAdaptive:
         return (
             int(self._mc_narrow_execs.numpy()[0]),
             int(self._mc_wide_execs.numpy()[0]),
+        )
+
+    @property
+    def runahead(self) -> bool:
+        """True when the run-ahead single march is active (``NEWTON_SAP_RUNAHEAD=1``;
+        default OFF -- the OFF path is the per-boundary march, byte-untouched)."""
+        return self._runahead
+
+    @property
+    def runahead_window(self) -> int:
+        """Boundary calls per action window in run-ahead mode (0 when off)."""
+        return self._runahead_window if self._runahead else 0
+
+    def runahead_engagement(self) -> tuple[int, int]:
+        """(boundary crossings, consumed collide+adopt batches) -- the
+        run-ahead engagement tripwires. Host sync; call outside the hot path.
+        Always a real device read (the counters exist in every
+        configuration), so an OFF configuration's (0, 0) observes that the
+        crossing kernel and the conditional collide node never fired rather
+        than restating the flag."""
+        return (
+            int(self._ra_crossings.numpy()[0]),
+            int(self._ra_adopts.numpy()[0]),
         )
 
     def _raise_if_march_compact_poisoned(self) -> None:
@@ -2036,8 +2285,54 @@ class SolverSAPAdaptive:
             if self._march_compact:
                 self._sap.contact_solve.set_env_grid(None)
 
+    # ------------------------------------------------------- run-ahead helpers
+    def _ra_targets(self, dt_outer: float) -> np.ndarray:
+        """Boundary-target chain for one action window: ``[T_0 .. T_W]`` with
+        ``T_k`` built by k successive float32 adds of ``dt_outer`` -- the SAME
+        fp operation the device-side crossing bump performs -- so host targets
+        and per-world ``next_time`` values are bit-comparable (the window-end
+        park test and the reset-resync signature rely on exact equality).
+        Cached per dt_outer."""
+        key = round(float(dt_outer), 12)
+        targets = self._ra_target_cache.get(key)
+        if targets is None:
+            w = self._runahead_window
+            step = np.float32(dt_outer)
+            targets = np.zeros(w + 1, dtype=np.float32)
+            acc = np.float32(0.0)
+            for k in range(1, w + 1):
+                acc = np.float32(acc + step)
+                targets[k] = acc
+            self._ra_target_cache[key] = targets
+        return targets
+
+    def _ra_crossing_refresh(self) -> None:
+        """Body of the crossing-batched conditional node: masked collide at
+        the crossed worlds' boundary-entry states (sentinel AABBs keep every
+        other world out of the broad phase), per-env set ADOPT for exactly
+        those worlds, then flag disarm. Device-only launches with no
+        allocations -- records under both capture tiers and runs eagerly
+        during warmup. In deterministic mode the pass skips the global
+        contact sort (its native implementation allocates temp memory, which
+        a conditional graph body cannot contain) and the adopt derives the
+        SAME canonical per-env slot order from the per-contact sort keys
+        directly."""
+        wp.copy(self._collide_state.body_q, self._state_cur.body_q)
+        self._pipeline.collide(self._collide_state, self._contacts, world_mask=self._ra_crossed, sort_contacts=False)
+        self._sap.contact_jacobian.adopt_contact_set(
+            self._sap_contacts,
+            self._ra_crossed,
+            sort_keys=self._pipeline._sort_key_array if self._deterministic else None,
+        )
+        wp.launch(
+            _ra_clear_crossed,
+            dim=self._world_count,
+            inputs=[self._ra_crossed, self._ra_crossed_any, self._ra_adopts],
+            device=self.model.device,
+        )
+
     # ----------------------------------------------------------- substep body
-    def _substep_body(self, eff_dt_max: float) -> None:
+    def _substep_body(self, eff_dt_max: float, dt_outer: float) -> None:
         """One masked substep iteration: clamp -> evals -> error -> adapt -> commit -> mark.
 
         Identical flat kernel sequence every iteration, so it captures ONCE and replays per
@@ -2046,9 +2341,26 @@ class SolverSAPAdaptive:
         final boundary-exit kernel (``mark_unfinished_contained`` by default,
         ``mark_unfinished_with_status`` in strict mode) sets the boundary flag the loop reads to stop early; the
         flag is reset by the caller before each iteration so it reflects this step only.
+
+        Run-ahead mode adds three fixed nodes to the same flat stream: a
+        crossing-batched conditional collide+adopt at the top (fires only when
+        some world crossed a boundary since the last consume), the crossing
+        kernel after the commit, and the scalar-target boundary-exit kernels
+        in place of the per-world ones. ``dt_outer`` shapes only these nodes
+        (the graph cache is keyed per dt_outer either way).
         """
         n = self._world_count
         dev = self.model.device
+
+        # Crossing-batched contact refresh: worlds flagged by the crossing
+        # kernel (or the mid-window reset resync) get a masked collide at
+        # their boundary-entry state plus a per-env set ADOPT, then the flags
+        # disarm. Recorded as one conditional node; the whole subgraph is
+        # skipped while no world has crossed. Placed FIRST so a world that
+        # crossed on the previous iteration (or previous call) refreshes
+        # before its next attempt consumes the contact set.
+        if self._runahead:
+            wp.capture_if(self._ra_crossed_any, on_true=self._ra_crossing_refresh)
 
         # Sample BEFORE _clamp_dt_to_boundary: dt still holds the controller's chosen
         # step here, not a landing sliver (worlds already landed are skipped in-kernel).
@@ -2221,14 +2533,61 @@ class SolverSAPAdaptive:
                 device=dev,
             )
 
+        # Run-ahead crossing: worlds that just landed on their boundary target
+        # bump it (capped at the window end), apply their boundary bookkeeping
+        # in place, and arm the next iteration's collide+adopt node. Runs
+        # after the commit so the crossing state IS the committed boundary
+        # state; per-world data flow only.
+        if self._runahead:
+            wp.launch(
+                _ra_advance_boundary,
+                dim=n,
+                inputs=[
+                    self._mode_code,
+                    dt_outer,
+                    float(self._ra_targets(dt_outer)[self._runahead_window]),
+                    self._dt_inner_init,
+                    self._dt_min,
+                    eff_dt_max,
+                    self._sim_time,
+                    self._next_time,
+                    self._dt,
+                    self._dt_half,
+                    self._ideal_dt,
+                    self._diverged,
+                    self._substeps_frame,
+                    self._ra_crossed,
+                    self._ra_crossed_any,
+                    self._ra_crossings,
+                ],
+                device=dev,
+            )
+
         # Boundary flag for early termination: reset in-body (so the flag reflects
         # this step only, with no host write between replays), then set to 1 if any
         # world is still unfinished. Containment (default) keeps a solve failure
         # per-world -- the controller's reject/shrink/floor-latch absorbs it --
         # and records it in the sticky slot-1 latch + per-world counter; strict
-        # mode folds it into the batch-fatal status 2 instead.
+        # mode folds it into the batch-fatal status 2 instead. Run-ahead mode
+        # judges "finished" against the per-call scalar target (run-ahead
+        # worlds count as finished for the call).
         wp.launch(_boundary_reset, dim=1, inputs=[self._unfinished], device=dev)
-        if self._containment:
+        if self._runahead:
+            if self._containment:
+                wp.launch(
+                    mark_unfinished_contained_target,
+                    dim=n,
+                    inputs=[self._sim_time, self._ra_t_call, self._solve_ok, self._solve_fail_world, self._unfinished],
+                    device=dev,
+                )
+            else:
+                wp.launch(
+                    mark_unfinished_with_status_target,
+                    dim=n,
+                    inputs=[self._sim_time, self._ra_t_call, self._solve_ok, self._unfinished],
+                    device=dev,
+                )
+        elif self._containment:
             wp.launch(
                 mark_unfinished_contained,
                 dim=n,
@@ -2317,12 +2676,17 @@ class SolverSAPAdaptive:
             # future mutable-precision refactor cannot replay the other
             # dtype's launch stream.
             self._solve_precision,
+            # The run-ahead march adds the crossing-batched collide+adopt
+            # node, the crossing kernel and the scalar-target boundary-exit
+            # kernels to the body, so the flag selects a different launch
+            # stream.
+            self._runahead,
         )
         graph = self._graph_cache.get(key)
         if graph is None:
             try:
                 with wp.ScopedCapture() as cap:
-                    self._substep_body(eff_dt_max)
+                    self._substep_body(eff_dt_max, dt_outer)
                 graph = cap.graph
                 self._graph_cache[key] = graph
             except Exception:
@@ -2349,12 +2713,12 @@ class SolverSAPAdaptive:
         except Exception:
             return False
 
-    def _conditional_march_body(self, eff_dt_max: float) -> None:
+    def _conditional_march_body(self, eff_dt_max: float, dt_outer: float) -> None:
         """One while-node trip: the substep body, then the loop-condition update.
 
         The update runs AFTER ``_iters_exhausted_stop`` (the last launch of the
         body) so the budget cap and a solve-failure status both close the loop."""
-        self._substep_body(eff_dt_max)
+        self._substep_body(eff_dt_max, dt_outer)
         wp.launch(
             _march_continue_from_status,
             dim=1,
@@ -2362,13 +2726,13 @@ class SolverSAPAdaptive:
             device=self.model.device,
         )
 
-    def _march_conditional(self, eff_dt_max: float) -> None:
+    def _march_conditional(self, eff_dt_max: float, dt_outer: float) -> None:
         """Record the whole march as a device-side loop: seed the loop condition
         open, then ``wp.capture_while`` over the substep body. The seed records
         INSIDE the graph so every replay is self-contained (the body always runs
         at least once per boundary, matching the per-iteration tier)."""
         wp.launch(_march_continue_set, dim=1, inputs=[self._march_continue], device=self.model.device)
-        wp.capture_while(self._march_continue, lambda: self._conditional_march_body(eff_dt_max))
+        wp.capture_while(self._march_continue, lambda: self._conditional_march_body(eff_dt_max, dt_outer))
 
     def _abort_active_capture(self) -> None:
         """Best-effort: never leave the stream in capture mode after a failed capture.
@@ -2429,6 +2793,11 @@ class SolverSAPAdaptive:
             # the captured solves, so the flag selects a different launch
             # stream.
             self._attempt_consistent_r,
+            # The run-ahead march adds the crossing-batched collide+adopt
+            # node, the crossing kernel and the scalar-target boundary-exit
+            # kernels to the body, so the flag selects a different launch
+            # stream.
+            self._runahead,
         )
 
     def _launch_conditional_march(self, eff_dt_max: float, dt_outer: float) -> bool:
@@ -2439,7 +2808,7 @@ class SolverSAPAdaptive:
         if graph is None:
             try:
                 with wp.ScopedCapture() as cap:
-                    self._march_conditional(eff_dt_max)
+                    self._march_conditional(eff_dt_max, dt_outer)
                 graph = cap.graph
                 self._conditional_graph_cache[key] = graph
             except Exception as exc:
@@ -2825,7 +3194,7 @@ class SolverSAPAdaptive:
         """
         if self._conditional_enabled:
             if self._external_capture_active():
-                self._march_conditional(eff_dt_max)
+                self._march_conditional(eff_dt_max, dt_outer)
                 if self._march_iters is not None:
                     wp.copy(self._march_iters, self._iteration_count_buf)
                 return
@@ -2857,9 +3226,9 @@ class SolverSAPAdaptive:
                     self._graph_cache.clear()
                     self._graph_enabled = False
                     graph = None
-                    self._substep_body(eff_dt_max)
+                    self._substep_body(eff_dt_max, dt_outer)
             else:
-                self._substep_body(eff_dt_max)
+                self._substep_body(eff_dt_max, dt_outer)
             st = self._unfinished.numpy()
             status = int(st[0])
             # Slot 1 is sticky across the boundary's iterations, so the last
@@ -2893,25 +3262,83 @@ class SolverSAPAdaptive:
         # Load the incoming Newton state into the internal working buffer.
         self._copy_state(self._state_cur, sap_state_from_newton(state))
 
-        # Open the frame: rebase clocks (Fix B), set the new boundary, seed per-world dt,
-        # clear per-frame work counters and the divergence latch.
-        wp.launch(_open_frame, dim=n, inputs=[self._sim_time, self._next_time, dt_outer], device=device)
-        wp.launch(
-            _seed_dt,
-            dim=n,
-            inputs=[
-                self._mode_code,
-                self._ideal_dt,
-                self._dt_inner_init,
-                self._dt_min,
-                eff_dt_max,
-                self._dt,
-                self._dt_half,
-            ],
-            device=device,
-        )
-        self._substeps_frame.zero_()
-        self._diverged.zero_()
+        # Open the frame. Per-boundary (default): rebase clocks (Fix B), set
+        # the new boundary, seed per-world dt, clear per-frame work counters
+        # and the divergence latch. Run-ahead: the same opening happens once
+        # per WINDOW (all worlds sit batch-synchronized at the previous
+        # window's end there); mid-window calls only advance the device call
+        # target and re-seat any world the manager reset since the last call
+        # -- every other world already carries its own run-ahead clock and
+        # bookkeeping from the crossing kernel.
+        if self._runahead:
+            targets = self._ra_targets(dt_outer)
+            pos = (self._ra_call_idx + self._ra_phase) % self._runahead_window
+            self._ra_window_pos = pos
+            t_call = float(targets[pos + 1])
+            self._ra_t_call_host = t_call
+            self._ra_t_call.fill_(t_call)
+            if pos == 0:
+                wp.launch(_open_frame, dim=n, inputs=[self._sim_time, self._next_time, dt_outer], device=device)
+                wp.launch(
+                    _seed_dt,
+                    dim=n,
+                    inputs=[
+                        self._mode_code,
+                        self._ideal_dt,
+                        self._dt_inner_init,
+                        self._dt_min,
+                        eff_dt_max,
+                        self._dt,
+                        self._dt_half,
+                    ],
+                    device=device,
+                )
+                self._substeps_frame.zero_()
+                self._diverged.zero_()
+                # The window-open full collide+adopt below covers every world;
+                # disarm any flags left by final-iteration crossings.
+                self._ra_crossed.zero_()
+                self._ra_crossed_any.zero_()
+            else:
+                wp.launch(
+                    _ra_resync_reset_worlds,
+                    dim=n,
+                    inputs=[
+                        float(targets[pos]),
+                        t_call,
+                        self._mode_code,
+                        self._dt_inner_init,
+                        self._dt_min,
+                        eff_dt_max,
+                        self._sim_time,
+                        self._next_time,
+                        self._dt,
+                        self._dt_half,
+                        self._ideal_dt,
+                        self._substeps_frame,
+                        self._ra_crossed,
+                        self._ra_crossed_any,
+                    ],
+                    device=device,
+                )
+        else:
+            wp.launch(_open_frame, dim=n, inputs=[self._sim_time, self._next_time, dt_outer], device=device)
+            wp.launch(
+                _seed_dt,
+                dim=n,
+                inputs=[
+                    self._mode_code,
+                    self._ideal_dt,
+                    self._dt_inner_init,
+                    self._dt_min,
+                    eff_dt_max,
+                    self._dt,
+                    self._dt_half,
+                ],
+                device=device,
+            )
+            self._substeps_frame.zero_()
+            self._diverged.zero_()
         self._iteration_count_buf.fill_(0)
         self._guard_hits.fill_(0)
         if self._containment:
@@ -2929,8 +3356,15 @@ class SolverSAPAdaptive:
         # reuses this contact SET, re-anchored to its own eval state by the
         # per-attempt Jacobian rebuild. Runs OUTSIDE the captured substep
         # body by construction. Per-attempt mode collides inside the body
-        # instead (diagnostic-only).
-        if not self._contact_refresh_per_attempt:
+        # instead (diagnostic-only). Run-ahead: the full pass runs at the
+        # WINDOW open only (every world is crossing into its first boundary
+        # there); interior boundary collides are the crossing-batched
+        # conditional nodes inside the march body.
+        if self._runahead:
+            if self._ra_window_pos == 0:
+                self._collide_from(self._state_cur)
+                self._sap.contact_jacobian.adopt_contact_set(self._sap_contacts, self._ra_all_worlds)
+        elif not self._contact_refresh_per_attempt:
             self._collide_from(self._state_cur)
             if self._sap.contact_jacobian.det_slots_external:
                 self._sap.contact_jacobian.compute_deterministic_contact_slots(self._sap_contacts)
@@ -2956,23 +3390,46 @@ class SolverSAPAdaptive:
 
         # Bound truncation damage BEFORE the next boundary consumes the carried
         # state; device-only work, legal graphs on or off. A completed march
-        # makes this a no-op.
-        wp.launch(
-            _debt_guard,
-            dim=n,
-            inputs=[
-                self._sim_time,
-                self._next_time,
-                dt_outer,
-                self._dt_inner_init,
-                self._ceiling_init,
-                self._ideal_dt,
-                self._dt_ceiling,
-                self._consec_rej,
-                self._guard_hits,
-            ],
-            device=device,
-        )
+        # makes this a no-op. Run-ahead: debt is judged against the CALL
+        # target (a run-ahead world sits mid-boundary legitimately and must
+        # not have its controller reissued); the per-world carry bound is
+        # unchanged.
+        if self._runahead:
+            wp.launch(
+                _debt_guard_target,
+                dim=n,
+                inputs=[
+                    self._sim_time,
+                    self._next_time,
+                    self._ra_t_call_host,
+                    dt_outer,
+                    self._dt_inner_init,
+                    self._ceiling_init,
+                    self._ideal_dt,
+                    self._dt_ceiling,
+                    self._consec_rej,
+                    self._guard_hits,
+                ],
+                device=device,
+            )
+            self._ra_call_idx += 1
+        else:
+            wp.launch(
+                _debt_guard,
+                dim=n,
+                inputs=[
+                    self._sim_time,
+                    self._next_time,
+                    dt_outer,
+                    self._dt_inner_init,
+                    self._ceiling_init,
+                    self._ideal_dt,
+                    self._dt_ceiling,
+                    self._consec_rej,
+                    self._guard_hits,
+                ],
+                device=device,
+            )
 
         # Opt-in telemetry readout: host reads of post-march state, which are only
         # legal outside an active capture -- hence gated, never unconditional. Runs
