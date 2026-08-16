@@ -417,24 +417,95 @@ NEWTON_SAP_ADAPTIVE_GRAPH=0 in the run env. Provenance: p12_chain.log
 p12_g8_phi0_{hfp32,hfp64}.json, p12_ab16_hfp32.{log,telemetry},
 p12_ab16b_hfp64.{log,telemetry}, p12_np_hfp32.log (probe crash).
 
+## Landed: ACR default ON (2026-08-16, loop pass 13 — closes backlog
+## item 1; commit 45095218, sap_warp untouched — the flag is
+## solver-side only)
+
+NEWTON_SAP_ATTEMPT_CONSISTENT_R is now default ON ("0" disables,
+!= "0" convention) and joins BOTH graph cache keys (the constitutive
+scale kernels record inside the captured solves, so the flag selects a
+different launch stream). Gates 8/8 on the final bytes:
+(1) construct PASS, 225 fingerprint intact — the probe pins ACR=0 for
+its dt-spread guard march (under the attempt-consistent law the sphere
+scene accepts EVERY attempt at the cap: 18 vs 81 substeps over 6
+boundaries, no rejections, no dt spread — measured p13_scene_probe.py)
+and adds a default-resolution arm (unset env must construct ON, wire
+the constitutive dt, march finite).
+(2) flag-equivalence PASS all arms: scheduling cells now pin ACR=0
+explicitly; new ACR family (variable UNSET) with its own
+reference/repeat oracle + graph/conditional arms proves the
+attempt-consistent launch stream captures and replays bitwise; law
+engagement proven by divergence from the ACR-off boundary family.
+(3) march-equivalence [6,25,20,24,19] exact — twins stay twins.
+(4) determinism certificate PASS (954 substeps both workers, ACR-ON
+stack). (5) containment PASS (35 contained events, healthy worlds
+bitwise clean). (6) err_tol: 0/2880 violations, 0 floor visits,
+dt_run_min 1.87e-3, 0 samples < 1e-4. (7) rest smoke: 0 early
+terminations. (8) penetration phi0 flip-OFF vs flip-ON: deepest
+-5.396e-5 vs -5.584e-5 m, median P5 -2.755e-5 vs -2.756e-5, identical
+pattern across rest/press/swing — no regression (1.9 um on a ~55 um
+equilibrium depth).
+DECISIVE A/B (1024x8, seed 42, production det-unset): cumulative
+substeps ON/OFF 0.902 whole-run, 0.880 late-3-iter window; ms/substep
+(collection wall) 7.002 vs 7.845 whole-run (0.893), 6.990 vs 8.075
+late (0.866) — the demand lever also cuts rejected-attempt work per
+accepted substep, so the per-substep price IMPROVES; raw wall 90.14 vs
+111.84 s (0.806, trajectory-confounded — cite substeps and
+per-substep). The prior opt-in A/B measured advantage ~0 at the
+violent plateau, so book this as a ramp-regime win until a fresh
+25-iter plateau run re-measures the plateau point.
+Provenance: scratchpad p13_g1_construct.log, p13_g2_flag_equiv.log,
+p13_g3_march_equiv.log, p13_g4_determinism.log,
+p13_g5_containment.log, p13_g6_err_tol.{json,log},
+p13_g7_rest.{json,log}, p13_g8_phi0_{off,on}.{json,log},
+p13_ab_{on,off}.{log,telemetry,stamps,gpumem}, p13_ab_compare.py,
+p13_scene_probe.py, p13_gates.sh, p13_ab_run.sh.
+
+PASS-13 DISCOVERY — Newton-iteration budget per solve (measurement
+only, no solver edits; backlog 2(a) measured): the contact solve
+resets newton_iterations_env / ls_iterations_total at every solve
+entry, so a probe-side wrapper around SolverSAPAdaptive.substep
+accumulates them per solve class (full/half1/half2 by warm-start
+guess identity) with device-side kernels gated by world_active; host
+reads post-march only; eager required (GRAPH=0 CONDITIONAL=0
+MARCH_COMPACT=0 — a Python wrapper records once under capture and
+would misattribute replays). Scripted press+flail rig, 512 envs,
+production law (ACR ON), 3064 slabs total.
+FLAIL (money regime, 2944 slabs): Newton iters/solve full 2.441,
+half1 1.608, half2 1.519 — the warm-start chain saves 33-36% of the
+full solve's iteration count in each half, so the Richardson pair
+costs 1.31x the full solve, not 2x (3-solve Newton-budget shares:
+full 43.3%, half1 29.1%, half2 27.6%). LS trips per Newton iteration
+2.29 / 2.67 / 2.97 — the halves' surviving iterations carry MORE
+trips each; the trip chain does not shrink with the warm start.
+PRESS (gentle, 120 slabs): halves floor-quantized at exactly 1.0
+Newton iteration and exactly 2.0 LS trips per iteration (full 1.17)
+— in gentle regimes slab price is per-solve FIXED work (assembly,
+base cost, projection setup), not iteration count, consistent with
+the pass-10 flat kernel profile.
+READING FOR THE 10s GOAL: total demand is ~5.24 Newton iterations
+per attempt vs 2.27 for the full solve alone (estimator marginal cost
+~2.3x), but the halves already sit near the 1-iteration floor — no
+large warm-start-waste pocket exists INSIDE the 3-solve scheme.
+Factor-scale relief must come from per-solve fixed work (launch/
+fusion consolidation, backlog 2(b)) or fewer solves (estimator
+semantics — EXCLUDED rail). Caveats: 512-env eager rig, demand
+counts not wall; the 1024 plateau regime mix is unmeasured.
+Provenance: p13_newton_budget.{json,log}, p13_newton_budget_probe.py.
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
-1. ACR default ON (NEWTON_SAP_ATTEMPT_CONSISTENT_R): measured -9..-11%
-   substeps ramp, -14.9% late wall in its A/B, ~0 at violent plateau,
-   penetration clean, 9/9 gates already run on the opt-in. Under the
-   renewed grant this is in-scope: flip default, re-run the full gate
-   suite on final bytes, fixed-seed before/after confirm. Cheapest
-   remaining measured win.
-2. Remaining un-narrowed env-axis launches outside contact_solve.py
+1. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes) — few-percent
    class, mechanical, bitwise.
-3. STRUCTURAL DISCOVERY (the only route to 10 s): the slab is FLAT
+2. STRUCTURAL DISCOVERY (the only route to 10 s): the slab is FLAT
    (no group >21%), GPU-busy 99.9%, dtype-insensitive — so the next
    factor-scale lever is work-count, not work-price. Candidates to
-   measure, all in-grant: (a) Newton-iteration/LS-trip budget per solve
-   at plateau (how many of the 3x solves' inner iterations actually
-   move the state? warm-start quality half1/half2 vs full); (b) launch/
+   measure, all in-grant: (a) Newton-iteration/LS-trip budget per
+   solve: MEASURED pass 13 (discovery subsection above) — halves run
+   at 1.5-1.6 iters/solve vs full 2.4, no warm-start-waste pocket;
+   remaining open sub-question is the 1024 plateau mix; (b) launch/
    fusion consolidation of the ~25% "small assembly/misc spread thin"
    + solve-misc groups (16726 tiny launches at 512 — persistent-kernel
    or megakernel candidates); (c) per-boundary D2H readback chain
@@ -442,7 +513,7 @@ p12_ab16b_hfp64.{log,telemetry}, p12_np_hfp32.log (probe crash).
    conditional structure?); (d) cross-boundary overlap of independent
    worlds' marches (capture mechanics proven feasible pass 4).
    Each candidate gets a MEASUREMENT first, no code.
-4. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
+3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
 
