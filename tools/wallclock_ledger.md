@@ -700,6 +700,27 @@ re-ran p13_gates.sh after the pass-13 entry was written. Treat the
 ledger's pass-13 numbers, not the current p13_* files, as pass-13
 evidence.
 
+CLOSED IN THE SAME PASS: candidate 2(a) tiled search-direction
+(NEWTON_SAP_TILED_DIRECTION) — MEASURED SPEED-NEUTRAL AT PRODUCTION,
+reverted per the pass-12 rule (physics-visible + <5% fails default-ON).
+Implemented and fully gated on final bytes (construct 225;
+flag-equivalence all arms with the flag joined to the fused-LS family +
+its own engagement/OFF-leak counters; march-equivalence
+[6,25,20,24,19]; determinism 954/954; containment 35; err_tol 0/2880,
+0 floor; rest 0 early terms; phi0 OFF vs ON identical to the last
+digit — chain p15c_progress.txt all exit 0). Decisive A/B (1024x8 seed
+42 det-unset, fused-LS ON both arms, p15_ab_{ton,toff}.*,
+p15_ab_compare3.py): ms/substep ON/OFF 0.990 whole-run / 0.986 late-3
+— ~1%, inside trajectory-mix noise; raw wall 0.875 is confounded (OFF
+ran 13% more substeps). The pass-14 0.68 -> 0.06 ms/slab projection is
+REFUTED as a production lever: the 512-eager flail window overweights
+the serial kernel; on the post-fusion ~4 ms/substep production slab the
+whole direction chain is ~1%. Candidate 2(b) (GEMM epilogue absorbing
+hessian_total + pack_dense) is foreclosed by the same arithmetic:
+measured 0.086 ms/slab on the p15b trace = ~1% class. Full diffs
+preserved at p15_tiled_direction_{sapwarp,newton}.patch; restoration
+proof p15_g1c_restore.log (construct PASS on the reverted trees).
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -717,10 +738,11 @@ evidence.
    — tiny kernels are 84.3% of flail-slab GPU time, LS trial machinery
    58-63%; pass-15 LANDED candidate 1 (fused armijo LS, entry above:
    -36.5%/-42.8% per-substep); candidate 2 (direction-chain
-   consolidation: search_direction serial->tiled ~0.68->0.06 ms/slab
-   flagged+gated, GEMM-epilogue absorption of hessian_total+pack_dense
-   bitwise-class) remains OPEN for pass 16, alongside a fresh 25-iter
-   plateau re-measure on the fused stack; (c) per-boundary D2H readback chain
+   consolidation) is CLOSED same pass — tiled search_direction measured
+   ~1% at production and was reverted, GEMM-epilogue absorption
+   foreclosed at ~1% class (closure paragraph in the pass-15 entry).
+   Pass-16 opener: fresh 25-iter plateau re-measure on the fused
+   stack; (c) per-boundary D2H readback chain
    (~48/boundary, overlapped today but serializing the march's
    conditional structure?); (d) cross-boundary overlap of independent
    worlds' marches (capture mechanics proven feasible pass 4).
