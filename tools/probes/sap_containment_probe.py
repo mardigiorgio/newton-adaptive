@@ -348,8 +348,25 @@ def main() -> int:
         )
 
     # ---- Tier 3c: exact cross-world isolation ----------------------------
+    # Under the run-ahead march (ambient NEWTON_SAP_RUNAHEAD=1) the two arms
+    # legally run DIFFERENT batch schedules: the failing world's stall
+    # changes when marches return, so mid-window boundary records show
+    # healthy worlds at different (mixed) boundary times across arms -- the
+    # consented batch-visibility change, not a physics leak. Per-world
+    # physics equivalence is judged where times coincide by construction:
+    # the action-window edges, where every world sits at the window end in
+    # both arms. The OFF path keeps the full per-boundary comparison.
+    ra_window = int(getattr(sol_a, "runahead_window", 0)) if bool(getattr(sol_a, "runahead", False)) else 0
+    iso_boundaries = [k for k in range(K_BOUNDARIES) if not ra_window or (k + 1) % ra_window == 0]
+    if ra_window:
+        print(
+            f"note: run-ahead active (window {ra_window}) -- isolation judged at "
+            f"window-edge boundaries {iso_boundaries} (mid-window batch states are mixed-time by design)"
+        )
     iso_failed = False
     for k, (ra, rb) in enumerate(zip(rec_a, rec_b, strict=True)):
+        if k not in iso_boundaries:
+            continue
         for field in STATE_FIELDS + PER_WORLD_FIELDS:
             pw = model_rows.get(field, 1)
             for w in range(N_WORLDS):
@@ -369,7 +386,7 @@ def main() -> int:
     if not iso_failed:
         print(
             f"PASS[c]: all {N_WORLDS - 1} healthy worlds bitwise identical to control over "
-            f"{K_BOUNDARIES} boundaries ({len(STATE_FIELDS + PER_WORLD_FIELDS)} fields)"
+            f"{len(iso_boundaries)} compared boundaries ({len(STATE_FIELDS + PER_WORLD_FIELDS)} fields)"
         )
     failed |= iso_failed
 

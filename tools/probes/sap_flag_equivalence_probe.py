@@ -262,9 +262,17 @@ ALL_FLAGS = (
     "NEWTON_SAP_PACK_PERCONTACT",
     "NEWTON_SAP_FUSED_UPDATE",
     "NEWTON_SAP_NARROW_V3",
+    "NEWTON_SAP_RUNAHEAD",
+    "NEWTON_SAP_RUNAHEAD_WINDOW",
+    "NEWTON_SAP_RUNAHEAD_PHASE",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
+
+# The run-ahead contact split's emission-time site tags (contact_jacobian
+# side): they may emit ONLY in run-ahead ON cells; any appearance in a
+# pinned-off cell is a leak.
+RUNAHEAD_SITES = frozenset({"runahead_adopt", "runahead_anchor"})
 
 _SCRATCH = tempfile.mkdtemp(prefix="sap_flag_probe_")
 
@@ -362,6 +370,7 @@ def _cfg(
     pack: str = "0",
     fusedupdate: str | None = "0",
     narrowv3: str | None = "0",
+    runahead: str = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -444,6 +453,17 @@ def _cfg(
     # None so the default resolution is itself under test.
     if narrowv3 is not None:
         env["NEWTON_SAP_NARROW_V3"] = narrowv3
+    # The run-ahead single march (default OFF in the solver; "1" opts in) is
+    # a DIFFERENT (legal) batch SCHEDULE: worlds cross action-window
+    # boundaries mid-call, so per-call committed states and clocks are not
+    # comparable across its states and no cross-mode bitwise contract exists.
+    # Every OFF cell pins "0" explicitly (the per-boundary march those cells
+    # certify, byte-for-byte, plus the leak-counter asserts); the run-ahead
+    # family cells pin "1" with their own reference + repeat oracle
+    # (determinism-in-mode) and graph/conditional arms. The mixed-time
+    # SEMANTIC contract (per-world trajectory equivalence to a solo march)
+    # is owned by tools/probes/sap_runahead_oracle_probe.py.
+    env["NEWTON_SAP_RUNAHEAD"] = runahead
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -862,6 +882,98 @@ CONFIGS = [
         fusedupdate=None,
         narrowv3=None,
     ),
+    # ---- run-ahead family (opt-in: NEWTON_SAP_RUNAHEAD=1) ----
+    # The full production stack shape (march compaction chain, fused kernels
+    # and v3 routing at their defaults) under the rejection-generating law
+    # (acr="0": per-world dt spread makes worlds genuinely run ahead). The
+    # run-ahead march is a different legal schedule, so the family carries
+    # its own reference + repeat oracle (determinism-in-mode) rather than a
+    # cross-mode equality; varied factors within it are graph capture and
+    # the whole-march conditional tier, which must record and replay the
+    # crossing-batched collide+adopt conditional node bitwise. Engagement is
+    # the device crossing/adopt counters plus the adopt/anchor site tags
+    # (asserted > 0 / present here, == 0 / absent in every pinned-off cell).
+    _cfg(
+        "runahead-on",
+        "0",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+        runahead="1",
+    ),
+    _cfg(
+        "runahead-on-repeat",
+        "0",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+        runahead="1",
+    ),
+    _cfg(
+        "runahead-graph",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+        runahead="1",
+    ),
+    _cfg(
+        "runahead-conditional",
+        "1",
+        None,
+        False,
+        compact="1",
+        refresh="1",
+        solve_compact="1",
+        ls_compact="1",
+        conditional="1",
+        march="1",
+        shared="1",
+        gemm="1",
+        pack="1",
+        acr="0",
+        fused=None,
+        alphamax=None,
+        fusedupdate=None,
+        narrowv3=None,
+        runahead="1",
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -924,6 +1036,15 @@ NARROWV3_FAMILY = (
     "narrowv3",
     "narrowv3-graph",
     "narrowv3-conditional",
+)
+
+# Arms judged bitwise against "runahead-on" (scheduling-only changes within
+# the run-ahead schedule: graph capture and the whole-march conditional
+# tier; "runahead-on-repeat" doubles as the family's oracle-validity pair).
+RUNAHEAD_FAMILY = (
+    "runahead-on-repeat",
+    "runahead-graph",
+    "runahead-conditional",
 )
 
 
@@ -1090,6 +1211,21 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         f"[{name}] narrow-v3 switch did not resolve on the contact jacobian "
         f"(env {env.get('NEWTON_SAP_NARROW_V3')!r} -> expected {narrowv3_expected})"
     )
+    # Run-ahead march: "1" opts in (default OFF -- an OFF cell inheriting it
+    # would be running a different schedule than the one it certifies).
+    runahead_expected = env.get("NEWTON_SAP_RUNAHEAD") == "1"
+    assert solver.runahead == runahead_expected, (
+        f"[{name}] runahead switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_RUNAHEAD')!r} -> expected {runahead_expected})"
+    )
+    if runahead_expected:
+        assert solver._sap.contact_jacobian._runahead_store, (
+            f"[{name}] runahead ON but the per-env contact set store was never enabled"
+        )
+    else:
+        assert not solver._sap.contact_jacobian._runahead_store, (
+            f"[{name}] contact set store enabled in a runahead-OFF cell (leak)"
+        )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
         march_requested
@@ -1209,7 +1345,10 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     # a restricted (non-identity) mask reaches compute(), which tail
     # compaction guarantees on this scene.
     if narrowv3_expected:
-        if compact_requested:
+        if compact_requested and not runahead_expected:
+            # Run-ahead cells replace the direct scatter with the adopt/anchor
+            # split, so the scatter's gate site legitimately never records
+            # there (the anchor site engagement is asserted below instead).
             assert "scatter_world_gate" in jac_narrow_sites, (
                 f"[{name}] narrow-v3 ON with a live world mask but the world-gated "
                 "scatter never recorded -- the gate does not reach the scatter."
@@ -1399,6 +1538,38 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             f"[{name}] fused-update counter advanced with the switch off -- the fused path leaked into an OFF cell."
         )
 
+    # Run-ahead engagement: the crossing counter increments once per
+    # boundary crossing inside the march (replays included) and the adopt
+    # counter once per consumed collide+adopt batch, so nonzero totals prove
+    # worlds genuinely marched across boundary targets mid-call and the
+    # conditional contact-refresh node really executed; the adopt/anchor
+    # site tags prove the contact split routed. Any count or tag in a
+    # pinned-off cell means the run-ahead path leaked into the certified
+    # per-boundary stream. Host reads are post-march only.
+    ra_crossings, ra_adopts = solver.runahead_engagement()
+    if runahead_expected:
+        assert ra_crossings > 0, (
+            f"[{name}] run-ahead crossing kernel never advanced a world "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+        assert ra_adopts > 0, (
+            f"[{name}] run-ahead collide+adopt node never consumed a crossing "
+            "batch (engagement counter is zero) -- the flag is untested by this run."
+        )
+        assert RUNAHEAD_SITES <= jac_narrow_sites, (
+            f"[{name}] run-ahead ON but adopt/anchor site(s) "
+            f"{sorted(RUNAHEAD_SITES - jac_narrow_sites)} never recorded -- the contact split is not routed."
+        )
+    else:
+        assert (ra_crossings, ra_adopts) == (0, 0), (
+            f"[{name}] run-ahead counters advanced with the switch off "
+            f"({ra_crossings}, {ra_adopts}) -- the run-ahead path leaked into an OFF cell."
+        )
+        leaked_ra = RUNAHEAD_SITES & jac_narrow_sites
+        assert not leaked_ra, (
+            f"[{name}] run-ahead site(s) {sorted(leaked_ra)} emitted with the switch off -- the contact split leaked."
+        )
+
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
     # every mode (the collide runs outside the captured body); exact for the
     # per-attempt cadence only on eager (graph=0) arms -- graph replays do
@@ -1417,6 +1588,8 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "fused_alphamax_envs": fused_alphamax_envs,
         "pack_execs": pack_execs,
         "fused_update_envs": fused_update_envs,
+        "ra_crossings": ra_crossings,
+        "ra_adopts": ra_adopts,
     }
 
 
@@ -1673,6 +1846,24 @@ def main() -> int:
         }
     )
 
+    # Run-ahead family: its own contact/divergence vacuity certificate plus
+    # engagement via the device crossing/adopt counters and the adopt/anchor
+    # site tags (the per-arm asserts already hard-fail; the guards surface
+    # them in the tier-1 report). Determinism-in-mode is the family's tier-2
+    # oracle; no cross-mode bitwise judgment exists (a run-ahead march is a
+    # different legal schedule of the same per-world physics -- the semantic
+    # contract is owned by sap_runahead_oracle_probe.py).
+    raref = runs["runahead-on"]
+    guards.update(
+        {
+            "runahead arm produced pipeline contacts": extras["runahead-on"]["ncon_seen"] > 0,
+            "runahead arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in raref),
+            "runahead crossings engaged (device counter > 0)": extras["runahead-on"]["ra_crossings"] > 0,
+            "runahead collide+adopt engaged (device counter > 0)": extras["runahead-on"]["ra_adopts"] > 0,
+            "runahead adopt/anchor sites engaged": RUNAHEAD_SITES <= set(extras["runahead-on"]["jac_narrow_sites"]),
+        }
+    )
+
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
         print(f"guard: {g}: {'ok' if ok else 'NOT MET'}")
@@ -1689,6 +1880,7 @@ def main() -> int:
         ("fusedam", "fusedam-repeat"),
         ("fusedup", "fusedup-repeat"),
         ("narrowv3-ref", "narrowv3-ref-repeat"),
+        ("runahead-on", "runahead-on-repeat"),
     ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
@@ -1715,6 +1907,8 @@ def main() -> int:
             "fusedup-repeat",
             "narrowv3-ref",
             "narrowv3-ref-repeat",
+            "runahead-on",
+            "runahead-on-repeat",
         ):
             continue
         if name in BOUNDARY_FAMILY:
@@ -1729,6 +1923,8 @@ def main() -> int:
             family = "fusedup"
         elif name in NARROWV3_FAMILY:
             family = "narrowv3-ref"
+        elif name in RUNAHEAD_FAMILY:
+            family = "runahead-on"
         else:
             family = "reference"
         where = first_divergence(runs[family], runs[name])
