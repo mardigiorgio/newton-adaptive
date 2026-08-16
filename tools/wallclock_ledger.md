@@ -2076,6 +2076,461 @@ p23_g1..g8 logs/JSONs, p23_oracle.log, p23_oracle_smoke*.log.
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
 
+## EXPERIMENTAL VALIDITY AUDIT (pass 25) — 2026-08-16; MEASUREMENT +
+## SOURCE AUDIT ONLY, ZERO CODE EDITS. Marco's directive: "make sure
+## nothing that could compromise the results leaks in ... make sure
+## something like [the near-rigid approximation] wasn't removed."
+
+Stack audited: newton-adaptive 3c7e74f1 (march-counter-log), sap_warp
+2a119d2 (main), IsaacLab 135480c7dc (develop) — all three verified at
+the certified HEADs, worktrees clean, GPU idle (438 MiB, 0 compute
+apps) before and after. Campaign ranges: newton-adaptive
+9c9dc934..HEAD (38 commits), sap_warp 79e43bd..2a119d2 (11), IsaacLab
+82c0679d88..HEAD (3). Every headline number below was re-measured this
+session on the current bytes; ledger and commit-message prose was
+treated as folklore and re-derived.
+
+### AXIS A — NEAR-RIGID APPROXIMATION: **DRIFTED** (not removed)
+
+WHERE IT LIVES. The SAP regularization is built in sap_warp, not in
+newton-adaptive (newton/_src/solvers/sap/__init__.py:14 puts
+SAP_WARP_PATH on sys.path). Canonical site
+sap_warp/sim/sap_helpers.py:2395-2416, replicated verbatim at
+contact_solve.py:947 / :1180 / :1278 / :2760 and the f32 twins:
+
+    R_t     = sigma * W
+    R_n     = max( beta^2/(4 pi^2) * W ,  1 / (h * k * (h + tau)) )
+              \___ near-rigid clamp ___/  \____ compliant ____/
+    vhat_n  = -phi0 / (h + tau)
+
+WAS IT REMOVED OR ALTERED? No. Machine-diff of every contact-law
+function body across both campaign ranges: the R arithmetic, the
+friction cone, the projection ladder and the PD/limit clamps are
+expression-for-expression IDENTICAL to the pre-campaign snapshots. The
+only edits are launch-domain remapping (`env, c = wp.tid()` ->
+list-indexed `env_idx/env_n`), which cannot perturb an fp value because
+every write is env-private. Module constants unchanged across both
+repos: beta 1.0, sigma 1e-3, fallback_stiffness 1e10, _SAP_PD_BETA 0.1,
+_SAP_LIMIT_BETA 0.1, _SAP_LIMIT_STIFFNESS 1e12, _CONTACT_SOFT_NORM_TOL
+1e-7. Sole added constant campaign-wide:
+_CONTACT_HESSIAN_PACK_TILE_C = 32 (a GEMM tile width). The step-doubling
+estimator and dt controller in newton-adaptive are byte-identical
+(_step_error, _error_and_commit, _adapt_dt 163 lines, _seed_dt,
+_clamp_dt_to_boundary, _debt_guard).
+
+EFFECTIVE RUNTIME VALUES, dumped from a live production env (NOT from
+source) — p25_nearrigid.json, 8 envs, task IsaacContrib-Lift-Spatula-
+Trossen-v0, env clean of NEWTON_SAP_* overrides:
+  tol 1e-3 | optimality_rel_tol 1e-8 | dt_inner_min 1e-12 |
+  max_substeps 256 | line_search armijo_decay | preset approx32 |
+  solve_precision fp64 | contact_solve_precision fp64 |
+  contact_beta 1.0 | contact_sigma 1e-3 | attempt_consistent_r TRUE |
+  contact_k 1250.0 N/m (single value, all contacts) |
+  contact_tau_d 0.02 s (per-pair = 2 x the 0.01 cfg fallback) |
+  w_eff median 14.917 | max_rigid_contact 16384 (= 2048/world).
+
+THE DRIFT — ACR (NEWTON_SAP_ATTEMPT_CONSISTENT_R, flipped to DEFAULT ON
+in pass 13, commit 45095218). The commit is a ONE-LINE default change
+(`get(...,"0") == "1"` -> `get(...) != "0"`); the mechanism predates the
+campaign. What it does: set_constitutive_dt(D) pre-scales W by
+    s = D(D+tau) / (h(h+tau))
+before R is built (contact_solve.py:4882-4909), where D = the ATTEMPT dt
+and h = that solve's own dt. Consequences, derived from source and
+confirmed against the measured constants:
+  - rn_hard (near-rigid clamp) scaled by s.
+  - rt = sigma*W scaled by s UNCONDITIONALLY — there is no max() to
+    absorb it, so it applies at 100% of contacts.
+  - rn_soft is NOT scaled (it reads h directly).
+  - Full solve: h == D, so s == 1 exactly, bitwise no-op.
+  - Half solves: h = D/2, so s = 4(D+tau)/(D+2tau). At the MEASURED
+    tau 0.02 and dt 1.3e-3..3.2e-3 this is s = 2.06..2.15.
+THE SOURCE COMMENT IS WRONG. solver_sap_adaptive.py:1494 asserts
+"committed-step laws unchanged" because the full solve transforms at
+s=1. But :1602 sets `self._commit_src = self._scratch_full if
+self._mode == "fixed" else self._scratch_double`, and _scratch_double is
+produced by half1+half2 (:3217-3220). In adaptive mode the full solve is
+the DISCARDED trial; the committed state comes from the halves, which
+are exactly the solves scaled by s ~ 2.1. So ACR DOES change the
+committed constitutive law, and it changes it in the SOFTER direction.
+Note this is adaptive-only by construction: in "fixed" mode
+_do_doubling is False and s == 1, so ACR is inert there.
+
+HOW MUCH DOES IT ACTUALLY MOVE THE PHYSICS? Measured, not argued
+(p25_phi0_{on,off}.json, this session, current bytes):
+  ACR OFF: deepest phi0 -5.396e-5 m, median boundary P5 -2.755e-5
+  ACR ON : deepest phi0 -5.584e-5 m, median boundary P5 -2.756e-5
+i.e. +3.48% on the deepest sample, +0.036% on P5, identical across
+rest/press/swing. The effect is small BECAUSE the scene is mostly not
+in the near-rigid branch (Axis B) — s scales rn_hard, which only reaches
+rn for ~11% of contacts. RESIDUAL RISK, NAMED: the rt (tangential /
+friction) scaling by s ~ 2.1 is unconditional and was NOT measured by
+any gate in this campaign, including this pass. phi0 is a normal-
+direction statistic and is blind to it. For a MUG-LIFT task, whose
+success depends on friction holding the object, a ~2x softer tangential
+regularization in every committed step is the single most consequential
+unmeasured quantity in the stack. RECOMMENDED (not done — ACR changes
+what the estimator measures, which is comparison semantics = MARCO'S):
+a slip/grasp-retention A/B on ACR ON vs OFF.
+
+### AXIS B — THE CENIC MECHANISM: **NOT PRESENT IN THIS CONFIGURATION**
+
+The prior session's note ("adaptive fixes penetration via dt^-2
+contact-stiffness coupling (SAP near-rigid), not the error metric; our
+dt-independent solimp forecloses it by design") was treated as folklore
+and re-derived from the current code plus a live probe. Verdict: the
+CONCLUSION is right, the stated MECHANISM is wrong, and the real
+situation is now measured rather than asserted.
+
+DERIVATION FROM THE CODE. With gamma = R_n^-1 (vhat_n - v_n) and
+f = gamma/h, the penetration-proportional force is
+f = x / (R_n * h * (h+tau)), so k_eff = 1 / (R_n h (h+tau)).
+  - COMPLIANT branch (R_n = rn_soft = 1/(h k (h+tau))):
+    k_eff = k exactly. dt-INDEPENDENT. d ln k_eff / d ln h = 0.
+  - NEAR-RIGID branch (R_n = rn_hard = beta^2/(4pi^2) W, no h in it):
+    k_eff = 4pi^2 / (beta^2 W h (h+tau)),
+    d ln k_eff / d ln h = -(1 + h/(h+tau))
+    = -2 only when tau << h (or tau ~ h); = -1 when tau >> h.
+
+WHICH BRANCH IS LIVE — MEASURED, p25_nearrigid.json, 154,479 contact
+samples over rest/press/swing/flail:
+  rn_hard / rn_soft, median            0.1115  (soft wins by ~9x)
+  fraction in the near-rigid branch    11.09% overall
+                                       14.6% rest / 14.5% press /
+                                       14.7% swing / **0.25% flail**
+  d ln k_eff / d ln dt, mean           -0.1435 overall
+                                       **-0.0031 in flail**
+                                       (min -1.294, max 0.0)
+So the production scene runs COMPLIANT, not near-rigid, and in the
+violent flail regime — the regime that dominates training — it is
+compliant at 99.75% of contacts with a dt-exponent of essentially ZERO.
+
+WHY. The near-rigid clamp is only reached when the authored stiffness
+exceeds k_eff. sap_warp's own fallback is 1e10 (which WOULD be near-
+rigid), but the IsaacLab model authors a real stiffness: NewtonShapeCfg
+default ke = 2500 N/m per shape, combined in series by
+_sap_combine_stiffness -> contact_k = 1250 N/m, which is what the live
+probe reads. A 1250 N/m contact is soft enough that rn_soft dominates.
+The exponent is additionally halved even where near-rigid DOES win,
+because tau_d = 0.02 s >> dt ~ 1.3e-3 s, putting that minority at
+dt^-1, never dt^-2.
+
+WHAT THIS MEANS FOR THE KILLER EXPERIMENT. The paper's mechanism —
+shrinking dt automatically stiffens contact as dt^-2 and thereby kills
+penetration — is NOT the mechanism operating here. Any adaptive
+advantage this stack demonstrates is TRUNCATION-ERROR CONTROL ALONE
+(the step-doubling estimator holding local error <= tol), which is a
+different and weaker claim than reproducing the PI's result. Two
+independent settings would have to change to enter the paper's regime:
+raise the authored contact stiffness by ~6-7 orders of magnitude
+(task/asset config = Marco's), AND drive tau_d << dt (task config =
+Marco's). NOTHING WAS CHANGED. This is a characterization, not a
+regression: the campaign did not cause it, and the pre-campaign
+snapshot had the same authored constants.
+
+### AXIS C — FIXED-vs-ADAPTIVE COMPARISON FAIRNESS: **COMPROMISED**
+
+C(i) OPTIMIZATION INHERITANCE — FAIR. All six named optimizations live
+in SHARED sap_warp contact-solve code reached by any caller of
+SapContactSolve.solve(), gated only by env vars that default ON: fused
+armijo ladder (_run_sap_backtracking, contact_solve.py:7826), alpha-max
+fold (:7889), per-contact pack + live-k GEMM truncation
+(_assemble_contact_hessian_from_terms, :6736), fused update-eval
+(_solver_update_active, :6134), narrow-v3 env lists (solve()), narrow-v3
+scatter world gate (contact_jacobian.py:2669). A fixed-step SAP arm
+would inherit every one. Adaptive-only (API opt-in, no in-repo caller):
+run-ahead adopt/anchor, ACR constitutive-dt pinning, env-grid narrowing
+budget, shared-assembly reuse, per-world dt arrays. So a wall-clock
+comparison is NOT rigged by the kernel work — the timing claims survive
+on this axis. Classification of the six: GEMM truncation, per-contact
+pack, narrow-v3 and blocked-Cholesky narrowing are bit-identical; fused
+ladder, alpha-max fold and fused update-eval are ALGEBRAICALLY exact but
+NOT bitwise (they change fp reduction order and the route to an equal
+expression), so convergence decisions can flip on ties. Combined with
+the determinism default flip (ON->OFF at 4 sites: solver_sap_adaptive.py
+:1621, contact_solve.py:5507, contact_jacobian.py:1941,
+free_motion.py:1663), NO post-campaign run is bitwise reproducible
+against a pre-campaign run, even with ACR forced off. That is an
+accepted, already-priced campaign cost, not a new finding.
+
+C(ii) IDENTICAL TASK/SCENE/SEEDS — the config source is fair, the
+capacity is NOT. Both arms read the same cfg fields for the contact law
+(contact_preset_variant, contact_tau_d, line_search_variant,
+max_iterations), so the constitutive parameters are identical by
+construction. Two asymmetries, both measured:
+  1. CONTACT CAPACITY, 16x. mjwarp_manager.py:313-326 gives the
+     ADAPTIVE arm max(128, min(2048, rigid_contact_max // world_count))
+     plus a triangle-pair budget; :355-358 gives the FIXED arm
+     solver_cfg.sap_max_rigid_contact = 128 verbatim, with no scene
+     sizing and no triangle-pair budget. Measured live at 8 envs:
+     adaptive jac max_contacts 16384 (2048/world) vs fixed 1024
+     (128/world). MEASURED LIVE CONTACT DEMAND PEAKS AT 133 CONTACTS IN
+     ONE WORLD during flail (p25_nearrigid.json) — already ABOVE the
+     fixed arm's 128 budget, and the manager comment at :309-312 states
+     overflow "drops mesh contacts silently". A fixed arm run this way
+     would shed contacts in exactly the violent regime the comparison is
+     about, and would "fail" for a reason that is not timestepping.
+  2. ENV-VAR SURFACE. NEWTON_SAP_PRESET / NEWTON_SAP_LINE_SEARCH /
+     NEWTON_SAP_SOLVE_PRECISION are read ONLY on the adaptive branch
+     (:345-350). The fixed branch reads the cfg alone. Any of those set
+     in the shell silently changes one arm's contact law and not the
+     other's.
+
+C(iii) CONTAINMENT — a real asymmetry, measured at zero occurrence.
+Containment is adaptive-only and structurally cannot exist on the fixed
+arm: _diverged_pending is allocated only under `if cls._adaptive`
+(mjwarp_manager.py:431-437), and get_diverged_env_mask returns None
+when not adaptive (:664-666). Therefore the `physics_diverged`
+termination term is a PERMANENT NO-OP on any fixed arm. Splitting the
+rescue into its two parts: the dt SHRINK-RETRY is intrinsic to
+adaptivity and IS the thesis — legitimate, keep it. The rest (per-world
+failure detection, floor-latch, bitwise state freeze, world isolation,
+and the termination that excises the world from the training
+distribution) is separable engineering that a fair fixed-step baseline
+could also be given. Does it flatter adaptive in practice? Re-measured
+this session: sap_containment_probe PASS on current bytes (35 contained
+events, failing world 2 latched at boundary 0, all 5 healthy worlds
+bitwise identical to control over 30 boundaries, strict mode raises).
+But at PRODUCTION scale the term fires ZERO times — grep of the
+production run logs returns physics_diverged: 0.0000, and the p14
+1024x25 run recorded 0. So the asymmetry is structural and real but has
+had no measured effect on the training distribution to date. It must be
+either given to the fixed arm or characterized in the paper text; it
+must not be left implicit.
+
+C(iv) DEFAULTS — confirmed. Determinism default OFF (production runs
+det-unset); run-ahead default OFF and confirmed inert in the plateau
+artifacts (p23 telemetry ra_cross=0 ra_fires=0 on the OFF arm). Nothing
+default-ON changes batch-visible semantics: the mixed-time oracle's
+window-edge records are bitwise across throttle gate rules, and
+run-ahead — the only default that would change batch-visible mid-window
+state — is OFF.
+
+C(v) **THE FINDING THAT OUTRANKS THE REST: THE FIXED-STEP SAP ARM DOES
+NOT RUN, AND NO SAP COMPARISON HAS EVER BEEN RUN.**
+  (a) MEASURED: building the task with the fixed arm
+      (solver_cfg.adaptive = False, NEWTON_SAP=1) constructs SolverSAP
+      successfully and then dies on the FIRST env.step with
+      `TypeError: SolverSAP.update_contacts() takes 2 positional
+      arguments but 3 were given` (p25_fixedarm.json /
+      p25_fixedarm.log). The call site is
+      newton_manager.py:2376 `cls._solver.update_contacts(eval_contacts,
+      cls._state_0)`; sap_warp/sim/solver_sap.py:1553 defines
+      `update_contacts(self, contacts)` and its body is
+      `raise NotImplementedError("SolverSAP does not expose
+      contact-force writeback yet.")`. So even with the signature fixed
+      it would raise. The task registers contact sensors
+      (trossen_spatula_lift_env_cfg.py:214/223), so _report_contacts is
+      True and this path is unavoidable.
+  (b) NOT A CAMPAIGN REGRESSION. The call site dates to IsaacLab
+      77a17abf91 (2026-03-02, "Adds newton engine (#4761)") and the
+      SolverSAP stub to sap_warp 431adf2 (2026-06-11, initial commit).
+      Both far predate the campaign; nothing this campaign did caused
+      it.
+  (c) NO SAP RUN IS RECORDED. 416/416 dumped params/env.yaml across all
+      354 run directories read `backend: mujoco` and `sap_adaptive:
+      false`. The comparison script itself —
+      trossen_spatula_lift/run_comparison.sh, headed "THE COMPARISON:
+      fixed-step vs adaptive" — launches `--solver mujoco` vs
+      `--solver mujoco-adaptive`. The killer experiment as actually
+      executed is MuJoCo-Warp fixed (2 substeps) vs MuJoCo-Warp
+      adaptive (1 substep). It is NOT a SAP experiment.
+  (d) THE CAMPAIGN'S OWN SAP RUNS ARE REAL — do not over-read (c). The
+      p13..p23 plateau/A-B runs force the SAP backend with
+      `NEWTON_SAP=1 NEWTON_SAP_ADAPTIVE=1` env vars while passing
+      `--solver mujoco-adaptive`; _resolve_solver_mode
+      (mjwarp_manager.py:233-241) applies the env override AFTER
+      params/env.yaml is dumped, so those runs are SolverSAPAdaptive
+      despite dumping `backend: mujoco`. Verified independently: the p23
+      plateau telemetry carries cumulative_accepted / ra_cross /
+      ra_fires, which only SolverSAPAdaptive emits. The yaml is
+      misleading for every SAP run in this campaign; the env vars are
+      the only record.
+  (e) THE DOCUMENTED SAP-ADAPTIVE LAUNCH PATH IS BROKEN.
+      physics_presets.py:26 maps `sap-adaptive` to
+      {backend: sap, adaptive: False, sap_adaptive: True}, but
+      _validate_solver_substeps (trossen_spatula_lift_env_cfg.py:474)
+      tests `not solver_cfg.adaptive and num_substeps < 2` — it reads
+      the MuJoCo adaptivity latch, not sap_adaptive. So
+      `--solver sap-adaptive physics=newton_mjwarp_adaptive` raises
+      ValueError. The campaign's env-var workaround exists because of
+      this.
+NET: the comparison the experiment rests on has never been run on SAP,
+and cannot be until (a) and (e) are fixed and the C(ii)-1 capacity
+asymmetry is closed. All three are IsaacLab/task-side = MARCO'S. This
+does not invalidate any wall-clock number in this ledger — those are
+SAP-adaptive self-comparisons and stand — but the SUCCESS/FAILURE claim
+has no SAP evidence behind it today.
+
+### AXIS D — INVARIANT DRIFT ACROSS THE CAMPAIGN: **INTACT**
+
+Every invariant re-measured this session on the current bytes and
+compared to the EARLIEST equivalent artifact. Provenance for the
+pre-campaign comparison point: scratchpad phi0_{off,on}.json, written
+2026-08-15 12:07, i.e. BEFORE the snapshot commit 9c9dc934 (13:23) —
+a genuine pre-campaign baseline, not a reconstruction.
+
+  PENETRATION (phi0 rig, 8 envs, rest/press/swing, all phases):
+    pre-campaign ACR-OFF 12:07 : deepest -5.396e-5, P5 -2.755e-5
+    p25 ACR-OFF (this session) : deepest -5.396e-5, P5 -2.755e-5
+    pre-campaign ACR-ON  12:07 : deepest -5.584e-5, P5 -2.756e-5
+    p25 ACR-ON  (this session) : deepest -5.584e-5, P5 -2.756e-5
+  IDENTICAL TO THE DIGIT across 20 hours, 38 newton-adaptive commits
+  and 11 sap_warp commits. The full 28-artifact series (phi0_* through
+  p23_g8_*) shows exactly two values, selected by ACR and nothing else.
+  DRIFT: ZERO.
+
+  ACCEPTED-STEP ERROR / TOL (p25_err_tol.json, 2880 samples):
+    violations 0/2880; max accepted err/tol 0.7135;
+    per-phase max ratio rest 0.0179 / press 0.6137 / swing 0.7135 —
+    IDENTICAL to every recorded pass from cert_g5 (2026-08-14 17:30)
+    through p23. Only "flail" varies across draws (0.292 this pass;
+    0.50-0.99 historically), which is the expected det-unset chaotic
+    phase, not drift.
+    Rails confirmed live: tol 1e-3, dt_min 1e-12, inner_rel_tol 1e-8,
+    solve fp64, contact_solve fp64.
+
+  HEALTHY dt BAND: dt_run_min 3.166e-3; samples below 1e-4 = 0; floor
+  visits 0; saturation depth 0.0; capped boundaries 0; unfinished
+  worlds 0. Marco's dt >= 1e-4 criterion met with >30x margin.
+
+  INNER NEWTON CONVERGENCE TO 1e-8 — the certificate, not the claim.
+  The target is enforced, not advisory: solver_sap_adaptive.py:3346
+  raises "SolverSAPAdaptive inner SAP solve failed to converge to
+  optimality_rel_tol=1.000e-08", and an unconverged attempt is forced
+  to the divergence sentinel so it can never be committed. The
+  containment probe re-demonstrated the live raise this session
+  (PASS[d], strict mode, boundary 0, message quotes 1.000e-08). Every
+  probe run this pass completed without raising, so committed steps
+  genuinely converged. This is a real certificate because the failure
+  path is proven live in the same session.
+
+  CONTACT-SET INTEGRITY: contact counts censused live — max 54/world in
+  rest/press/swing, 133/world in flail; adaptive buffer 2048/world, so
+  headroom 15x and no truncation on the adaptive arm. march-equivalence
+  fingerprint [6,25,20,24,19] unchanged since pass 13.
+
+### AXIS E — THE 7-10 s QUESTION, AND THE STANDING RED LINE
+
+WHERE THE PLATEAU ACTUALLY IS. Recomputed this pass directly from the
+run logs (not from ledger prose), plateau = mean of iterations 19-24 at
+1024 envs:
+    p23_plateau_off  12.88 s/iter  (min 12.02, max 13.37)
+    p19_1024x25      14.21 s/iter
+    p22 (recorded)   15.09 s/iter
+    p14_1024x25      35.35 s/iter
+Same-config draws move +-8% because demand is draw-dependent, so the
+honest statement is: THE CURRENT DEFAULT STACK PLATEAUS AT 12.9-15.1
+s/iter @1024, best estimate ~13-14. Demand-normalized, run-ahead ON
+buys -4% to 0 at the plateau (pass 23), so the default-OFF number is
+the operative one.
+
+WHAT REMAINS TO 7-10 s. From 12.88 (best draw): 10 s needs -22%, 7 s
+needs -46%. From 15.09 (worst draw): -34% and -54%. The measured
+inventory of remaining levers:
+  - Backlog item 1 (un-narrowed env-axis launches): few-percent,
+    bitwise, in-rails. Real but nowhere near sufficient.
+  - Overlap / run-ahead: measured ~plateau-neutral (pass 23). CLOSED as
+    a plateau lever.
+  - Work-price inside the tail: CLOSED by measurement (pass 21, the
+    deep tail is dispatch-bound under graph replay).
+  - Estimator structure (3-solve step doubling -> single solve): the
+    ONLY priced lever with >20% headroom (~1.20 vs ~2.75 ms/substep).
+CONCLUSION: 7-10 s/iter is NOT REACHABLE IN-RAILS. Every route with
+enough headroom runs through the step-doubling estimator.
+
+THE RED LINE (standing rule for every future pass). The step-doubling
+estimator, tol 1e-3, optimality_rel_tol 1e-8, dt_inner_min 1e-12, the
+contact law (R, k, tau_d, beta, sigma) and the fixed-vs-adaptive
+comparison semantics are the PHYSICS BEING DEMONSTRATED, not
+optimization surface. A wall-clock win purchased from any of them is
+not a win — it deletes the result it was meant to enable. If a future
+pass finds that only an estimator/tolerance/contact-law change reaches
+the target, the correct output is an escalation to Marco, not a
+landing. The experiment's integrity outranks the wall-clock goal, and
+7-10 s is a goal, not a rail. No pass may treat the red-line list as a
+lever without Marco's explicit, in-channel consent.
+
+### FINDINGS, CLASSIFIED (loudest first)
+
+F1 COMPROMISED / MARCO'S — the fixed-step SAP baseline does not run
+   (measured TypeError -> NotImplementedError on step 1) and no SAP
+   comparison has ever been executed (416/416 runs backend mujoco;
+   run_comparison.sh is --solver mujoco vs mujoco-adaptive). The
+   "adaptive trains / fixed fails" claim has no SAP evidence. Pre-
+   existing, not campaign-caused. IsaacLab + sap_warp side.
+F2 COMPROMISED / MARCO'S — 16x contact-capacity asymmetry between arms
+   (128 vs 2048 per world) with measured live demand of 133/world
+   already exceeding the fixed arm's budget, and silent contact
+   dropping on overflow. Would make a fixed arm fail for a non-physics
+   reason. mjwarp_manager.py:313-326 vs :355-358.
+F3 DRIFTED / MARCO'S — ACR default-ON scales the near-rigid clamp AND
+   the tangential regularization by s ~ 2.1 in the COMMITTED half-
+   solves (the in-source "committed-step laws unchanged" comment is
+   false; _commit_src is _scratch_double). Measured normal-penetration
+   impact is small (+3.5% deepest, +0.04% P5); the tangential half is
+   UNMEASURED and matters most for a grasping task. Adaptive-only by
+   construction (s == 1 in fixed mode).
+F4 CHARACTERIZATION — the stack is NOT in the near-rigid regime the
+   CENIC mechanism needs (89% compliant overall, 99.75% in flail;
+   dt-exponent -0.003 in flail). Any adaptive advantage demonstrated
+   here is truncation-error control, not the paper's dt^-2 stiffness
+   coupling. Config-level, pre-campaign, unchanged by the campaign.
+F5 STRUCTURAL ASYMMETRY — containment / physics_diverged is adaptive-
+   only and permanently dead on any fixed arm; measured firing rate at
+   production is ZERO, so no measured distributional effect yet. Must
+   be given to the fixed arm or stated in the paper text.
+F6 HYGIENE — params/env.yaml records backend: mujoco for every SAP run
+   in this campaign because the NEWTON_SAP env override is applied
+   after the dump. Every SAP result's provenance lives only in the
+   launch scripts. Recommend recording resolved solver identity in the
+   run artifacts.
+F7 HYGIENE — sap_warp is joined to newton-adaptive by SAP_WARP_PATH,
+   not a submodule or pin. Any sap_warp commit silently changes the
+   physics under an unchanged newton-adaptive HEAD. For an experiment
+   whose validity is the contact law, that coupling should be pinned.
+CLEAN — Axis D. No campaign optimization altered any physical
+   invariant. Penetration, err/tol, dt band, convergence certificate,
+   contact-set integrity and containment all re-measured this session
+   and identical to the earliest available baselines.
+
+### RESIDUAL RISK — what could NOT be established, and why
+
+R1 The TANGENTIAL consequence of the ACR s-scaling. rt = sigma*W is
+   scaled at 100% of contacts and no gate in this campaign measures a
+   friction-direction observable; phi0 is normal-only. Unquantified.
+R2 The magnitude of the fp divergence from the three approximate
+   fusions (fused ladder, alpha-max fold, fused update-eval). They are
+   algebraically exact but change reduction order, so convergence
+   decisions can flip on ties. Bounded only by the flag-equivalence
+   gates' pass/fail, never by a distributional measurement.
+R3 Whether a fixed-step SAP arm, once runnable, reproduces the
+   contact set the adaptive arm sees. The arms use DIFFERENT contact
+   sources (fixed consumes the manager CollisionPipeline,
+   _needs_collision_pipeline True; adaptive owns its own pipeline).
+   Unmeasurable until F1 is fixed.
+R4 Contact-sensor liveness. Both arms report identically zero force on
+   pad_handle_contact and arm_body_contact across 280 scripted steps
+   (p25_sensors_{sap,mjc}.json), and SolverSAPAdaptive.update_contacts
+   is a documented no-op. This is SYMMETRIC across arms so it is not a
+   fairness finding, but I could not distinguish "sensors are dead"
+   from "my scripted actions never satisfied the prim-pair filters".
+   The active reward terms do not consume them.
+R5 narrow-v3's "dead state is never read" contract is enforced by
+   convention, not by code. Not exhaustively verified.
+R6 No pre-campaign SAP TRAINING baseline exists at all, so the effect
+   of the campaign on learning outcomes (as opposed to on physical
+   invariants, which is measured and null) is UNQUANTIFIED. Stated as
+   unquantified rather than assumed benign.
+
+Provenance (all this pass, p25_ prefix, no p13-p24 artifact
+overwritten): p25_nearrigid_probe.py + p25_nearrigid.{json,log};
+p25_fixedarm_probe.py + p25_fixedarm.{json,log};
+p25_sensor_liveness_probe.py + p25_sensors_{sap,mjc}.{json,log};
+p25_err_tol.{json,log}; p25_phi0_{on,off}.{json,log};
+p25_containment.log. Pre-campaign baseline: phi0_{off,on}.json
+(2026-08-15 12:07). Plateau recomputation: p23_plateau_off.log,
+p19_1024x25.log, p14_1024x25.log.
+
 ## Rails (non-negotiable)
 
 optimality_rel_tol 1.0e-8 fp64 (pinned; fp32 path uses its derived
@@ -2087,6 +2542,16 @@ changes need invariant gates + penetration check when contact law/R
 touched; twins stay twins (march_equivalence PASS); one GPU process at a
 time; no monitors; commits local only (GitHub auth broken — no push
 without Marco).
+
+VALIDITY RED LINE (added pass 25, standing): the step-doubling
+estimator, tol 1e-3, optimality_rel_tol 1e-8, dt_inner_min 1e-12, the
+contact law (R construction, contact_k, tau_d, beta, sigma) and the
+fixed-vs-adaptive comparison semantics are the PHYSICS BEING
+DEMONSTRATED, not optimization surface. No wall-clock target — 10 s,
+7 s, or lower — authorizes touching them. A pass that concludes the
+target is reachable only through one of them must ESCALATE to Marco
+and land nothing. The experiment's integrity outranks the wall-clock
+goal.
 
 ## Escalations to Marco (decisions only he makes)
 
