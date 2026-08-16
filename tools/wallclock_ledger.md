@@ -211,26 +211,51 @@ Provenance: scratchpad pass6_prof{,_flail,_eager}.nsys-rep,
 pass6_{eager,flail,stats}_cuda_gpu_kern_sum.csv, pass6_run*.log,
 pass6_profile_rig.py.
 
+WALL-VS-GPU SPLIT AT TRAINING SCALE (2026-08-15, loop pass 7 — closes the
+pass-6 open question; measurement only, repos untouched): on the real rig
+(1024 envs, 8 iters, seed 42, production flags, det unset) the host-shim +
+nsys split shows the wall is GPU WORK, full stop. (a) Solver region
+(SolverSAPAdaptive.step) = 98.4% of collection wall whole-run, 99.1% in
+the late window — manager/task/rsl_rl python is ~1-2%. (b) Inside the
+solver region at iters 5-7: union GPU-busy = 99.9% of solver wall
+(94.6 of 94.8 s); ~98% of GPU time is the whole-march conditional graph
+replays (one cudaGraphLaunch per boundary, 769 total, 0.10 s API cost);
+eager kernels (collision refresh + manager + torch) ~0.5 s/iter; memops
+negligible. Host-thread time sits inside cudaMemcpyAsync readbacks
+(~48 small D2H per boundary) fully OVERLAPPED with GPU execution — a
+waiting mechanism, not addable cost. ms-wall/slab 12.6-15.5 (late ~13.9)
+reconciles the pass-6 cross-rig gap: training slabs are genuinely
+~14 ms of GPU work at 1024 engaged (2x envs + deeper tails than the
+512-env probe rig). VERDICT: GPU-dominated — GEMM attack confirmed #1;
+no gap-closure/launch-overhead lever exists (0.1 s in 95 s). Caveat:
+graph-granularity "busy" can hide intra-graph dependency bubbles; the
+pass-6 roofline note (tile GEMM far from peak) still stands — the work
+itself is the target, not the scheduling. Perturbation honest: nsys run
+walls within ~3% of the clean shim run. Provenance: scratchpad
+pass7_walls4.{log,telemetry} + pass7_walls4_split.json.1860438 (clean
+walls), pass7_nsys.log + pass7_nsys_split.json.1861102 +
+pass7_train.{nsys-rep,sqlite} (split), pass7_shim/sitecustomize.py
+(method; per-PID output — a late-exiting helper process otherwise
+clobbers the sim process's JSON, root-caused this pass).
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Contact-Hessian GEMM attack (68% of engaged GPU time, measured pass 6):
-   (a) bitwise-safe first — reshape/batch the tile GEMM + fuse its input
-   pack (same fp64 math, better shape/occupancy; bitwise contract needs
-   canonical accumulation order preserved per tile); (b) physics-visible
-   second — fp32/tf32 Hessian GEMM (inexact-Newton direction; gradient +
-   certificate stay fp64), opt-in flag, full invariant gates + iteration
-   -count watch, escalate to Marco with numbers.
+1. Contact-Hessian GEMM attack (68% of engaged GPU time pass 6; pass 7
+   confirms GPU-work-dominated wall — this is now unambiguously the top
+   lever): (a) bitwise-safe first — reshape/batch the tile GEMM + fuse
+   its input pack (same fp64 math, better shape/occupancy; bitwise
+   contract needs canonical accumulation order preserved per tile);
+   (b) physics-visible second — fp32/tf32 Hessian GEMM (inexact-Newton
+   direction; gradient + certificate stay fp64), opt-in flag, full
+   invariant gates + iteration-count watch, escalate to Marco with
+   numbers.
 2. Collision-refresh cost (~1.05 ms/boundary constant, dominates gentle
    regimes): profile mesh_triangle_contacts_to_reducer at 1024/4096; check
    whether the BVH rebuild cadence (cuBQL every refresh) can key on motion
    bounds (bitwise-visible only in contact ORDER? verify) — measure first.
-3. Wall-vs-GPU reconciliation at training scale: one instrumented 1024-env
-   run splitting slab wall into GPU-kernel vs host/graph-gap time — if
-   wall >> GPU-busy at scale too, launch/host overhead is a separate
-   first-class target (whole-march capture coverage audit).
-4. Remaining un-narrowed env-axis launches outside contact_solve.py
+3. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-5. Housekeeping: run pre-commit across the accumulated commits and
+4. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
