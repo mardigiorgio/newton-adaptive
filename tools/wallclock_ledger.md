@@ -1310,6 +1310,226 @@ stands and is sharpened: percent levers project ~13.4-14.0 s/iter;
 the two routes to 10 s are overlap (bracket straddles it) and the
 estimator rail (~1.20 ms/substep single-solve arithmetic).
 
+## PASS-20 — straggler-regime profile + overlap point estimate + design
+## (2026-08-16, MEASUREMENT + DESIGN ONLY, zero solver edits; profiles
+## the 88%-of-plateau-slabs regime no map had ever scoped)
+
+RIG (method choice per the pass-19 open question): profile whole REAL
+plateau boundaries and split kernels by march-iteration index — NOT
+profiler-gating on the narrow predicate, which is impossible without
+duplicating the clamp+build on host (the attempt width is computed
+INSIDE _substep_body, after _clamp_dt_to_boundary) and would fragment
+the capture range hundreds of times. One rsl_rl training run, exact
+p19_occ replica (1024x25, seed 42, production flags, det unset) run
+EAGER (NEWTON_SAP_ADAPTIVE_GRAPH=0, kernel attribution; manager wraps
+no outer capture for SAP-adaptive, so the tier-3 per-iteration loop
+runs) under nsys `-t cuda,nvtx` with a cudaProfilerApi window scoped
+to boundaries [1928,1967] (40 boundaries fully inside train iter 20).
+The p20 import hook (p19 audit hook + profiler gating + NVTX) wraps
+every _substep_body call in an NVTX range "sb<k>" and reads
+_active_counts[0] post-body (the exact post-clamp dt>0 attempt width
+the narrow/wide branch predicate consumed); boundary calls wrapped in
+"bnd<b>". Offline: kernels -> runtime rows by correlationId -> NVTX by
+per-thread bisect (698 slabs, 489,815 kernel rows, 0 unmatched).
+Audited+eager+profiled walls are perturbed and never cited; only
+kernel sums, the itermap and the audit are consumed. Run clean:
+exit 0, physics_diverged 0, full 2400-boundary audit.
+
+REGIME REPLICATION: window widths p50=12, narrow (a<=64) 80.8% of
+slabs, deep (a<=16) 55.7%, mean 13.8% — the p19 occupancy structure
+reproduced at the profiled window (82.5% narrow / mean 12.8%).
+Slabs/boundary 17.45 in-window (audit late window 17.47). Demand
+cross-check: late-window slabs 10,061/6 iters ~ 5,030 evals/iter vs
+p19's 5,170 (det-unset trajectory, -3%). GPU-bound cross-check: eager
+GPU-kernel sum 143.5 ms/boundary (131.7 slab + 11.5 boundary-cadence
++ 0.3 outside) vs graph-mode plateau wall 148 ms/boundary = 0.97 —
+kernel-time fractions transfer to wall.
+
+(a) THE STRAGGLER MAP — cost by active-width bucket (ms/slab GPU):
+  full  a>=922:  80 slabs (11.5%)  19.53   29.7% of window GPU
+  high 257-921:  10 slabs ( 1.4%)  16.07    3.1%
+  mid   65-256:  44 slabs ( 6.3%)  13.24   11.1%
+  narrow 17-64: 175 slabs (25.1%)   7.08   23.5%
+  deep    1-16: 389 slabs (55.7%)   4.43   32.7%
+Group ranking, DEEP slab (4.43 ms): fused_ladder 0.97 (21.9%),
+fused_update 0.78 (17.5), ls_chain 0.63 (14.3), solve_prep 0.60
+(13.6), free_motion 0.39 (8.8), gemm_tile 0.33 (7.5), cholesky 0.24
+(5.4), gemm_pack 0.15 (3.4). FULL slab (19.53 ms): fused_ladder 4.62
+(23.7), gemm_pack 4.50 (23.1), gemm_tile 2.43 (12.4), fused_update
+2.25 (11.5), ls_chain 1.84 (9.4), free_motion 1.63 (8.3). WHOLE-WINDOW
+plateau-mix map (7.55 ms/slab — the map that replaces the saturated
+p18 ranking for lever pricing): fused_ladder 24.5%, fused_update
+15.2, gemm_pack 12.5, ls_chain 12.1, gemm_tile 9.4, solve_prep 8.2,
+free_motion 7.6, cholesky 4.4. (p18's 512-saturated map is a
+different scale and regime — kept for its deltas, not for ranking.)
+Boundary-cadence work: 11.54 ms/boundary, 98.9% collision
+(mesh_triangle_contacts_to_reducer alone 9.06 ms/pass). Outside-bnd
+GPU work: 0.28 ms/boundary (the whole env-side between-boundary
+pipeline — empirically negligible).
+
+(b) THE ANSWER: a ~4-active slab costs 4.43 ms = 0.227 of a full
+slab. Piecewise fit: narrow branch c(a) = 3.91 + 0.0965*a ms (R2
+0.65), wide c(a) = 12.58 + 0.0069*a (R2 0.91). The narrow-branch
+FLOOR (3.9 ms) is the straggler regime's cost, and crossing the
+mc_width=64 branch line triples the slab price (7.1 -> 13.2 ms).
+
+(c) FULL-WIDTH-BY-DESIGN in the straggler regime: 46.8% of a deep
+slab (2.07/4.43 ms), 44.9% over all narrow slabs = 25.2% OF WINDOW
+GPU. Classification: per-kernel deep-vs-full per-instance time ratio
+plus grid behavior. The FWBD population: fused_update (the WHOLE
+kernel: grid fixed, t-ratio 0.70 — it never got the narrow env_grid),
+the ls_chain serial direction/init components (0.60 of deep slab,
+t-ratio ~0.74-0.97 — the pass-15c "~1% at production" refutation was
+REGIME-DEPENDENT: in the straggler mix it is ~13% of the slab), the
+per-attempt contact scatter _scatter_sap_contacts_to_env_direct*
+(t-ratio 1.07: it walks ALL 1024 worlds' frozen contacts regardless
+of world_active — 0.37 ms of every deep slab), base_cost, and the
+prep copy/list fleet. This 25.2% is deletable GPU WORK (not launch
+count — pass-19 law respected): route fused_update and the serial
+LS-direction chain through the narrow env_grid, world-gate the
+scatter's contact rows. It is the NEW TOP LEVER, semantics-free.
+
+(d) OVERLAP BRACKET COLLAPSED: actual late-window cost model from the
+reconstructed per-boundary widths (survival of the accepts hist,
+validated in-window: mean |err| 11 worlds, bias 1.085 — see
+CORRECTION below) under the measured c(a). Ideal merged single-march
+schedule per 4-boundary action window, join across boundaries
+bracketed and ANCHORED TO MEASUREMENT: rank-persistence Monte Carlo
+with P = the measured lag-1 straggler-set overlap 0.374 (p19
+rotation), validated: its per-window ideal-slab mean 39.3 vs the
+top-16 identity arithmetic's 37.7 on this same audit (independent
+P=0 gives 25.5, comonotone P=1 gives 55.9 — both rejected by the
+identity check). RESULT:
+  value = 0.197 of late-window GPU cost (bracket ends: 0.345
+  independent, ~0.00 comonotone — the wide-branch price of merged
+  tails kills the comonotone case);
+  slab count 10,061 -> 5,661 (identity arithmetic: 5,434 = 0.4599,
+  replicating p19's 0.458);
+  PROJECTED PLATEAU AT OVERLAP CEILING: 14.21 -> ~11.4 s/iter gross;
+  ~11.5 with masked catch-up collides (~12 extra masked passes/window
+  at ~0.3-0.5 ms each), ~12.6 s/iter worst-case if catch-up collides
+  stay full-batch (432 unmasked passes = 8.1% of cost).
+The pass-19 bracket [16.7%, 45.8%] collapses to 19.7%, near its
+proportional end — because a straggler slab costs 0.227 of full, not
+1.0. INTERPLAY: landing the (c) FWBD narrowing first shrinks the
+narrow floor c0 (~3.9 -> ~2.5 ms at 70% realization), repricing
+overlap to roughly 12-15% of the post-narrowing window — still above
+the 10% kill line, but second in order.
+
+CORRECTION to pass-19: the audit's "rejects 0" was a NULL READ —
+NEWTON_ADAPTIVE_MARCH_LOG was unset in the occ/pers runs, so
+_count_rejects never launched and _reject_count_buf held its
+allocated zeros. Rejects/floor-latch at the plateau are real:
+measured attempt widths exceed accepts-survival widths by 8.5%
+(p20 in-window). The p19 slab-count ceiling stands (per-boundary
+iters were measured directly, not derived from accepts); the
+accepts-based active-fraction stats are ~8% understated.
+
+VERDICT: overlap SURVIVES the kill line (19.7% > ~10%) — the pass-21
+IMPLEMENTATION DESIGN follows, but the recommended ORDER is FWBD
+narrowing first (bigger, semantics-free, and it must land first so
+overlap is priced against the stack it would ship on).
+
+DESIGN — cross-boundary overlap as a RUN-AHEAD SINGLE MARCH (no
+second workspace; blockers (b)(c)(d) resolved):
+- SHAPE: one march per integrate call, as today, but a world reaching
+  its boundary target inside the action window does not park: a new
+  device crossing kernel (_advance_boundary) bumps its per-world
+  next_time by dt_outer (capped at the action-window end), applies
+  the per-world boundary bookkeeping in-place (_seed_dt's clamp of
+  ideal_dt into dt/dt_half, _debt_guard's carry bound, per-world
+  substeps_frame rollover), and sets a per-world "crossed" flag. The
+  existing per-world clocks carry the whole design: sim_time,
+  next_time, dt, dt_half, ideal_dt, dt_ceiling, consec_rej are
+  already per-world arrays; _clamp_dt_to_boundary and _adapt_dt work
+  UNCHANGED (each world lands exactly on each T_j via the clamp —
+  landing-sliver and boundary-commit semantics preserved per world).
+  Call-return predicate: mark_unfinished_contained compares sim_time
+  against a per-call scalar target T_{j+1} (device 1-int written at
+  integrate entry, graph-replay safe) instead of per-world next_time
+  — run-ahead worlds count as finished for the call; the LAST call of
+  the window returns only when every world sits at the window end, so
+  the env-visible action-edge state stays batch-synchronized.
+- COLLISION (blocker b): all boundary collides become crossing-
+  batched conditional nodes inside the march body: wp.capture_if(any
+  crossed since last collide) { masked collide + ADOPT }. Masking =
+  one new world-mask input to compute_shape_aabbs (newton-adaptive
+  newton/_src/sim/collide.py): non-crossing worlds' shapes emit
+  sentinel AABBs, so SAP broadphase yields no pairs and every
+  downstream pair/candidate-parallel kernel (incl. the 9.06 ms
+  mesh_triangle reducer) scales with the crossing subset; pipeline
+  call structure otherwise untouched. Contact-set persistence moves
+  from the global Contacts buffer (today re-read by EVERY attempt) to
+  a per-env SET store: split _scatter_sap_contacts_to_env_direct*
+  (sap_warp sim/contact_jacobian.py, 4 variants) into ADOPT (global
+  buffer -> per-env topology/material rows, runs once per crossing
+  batch for crossed worlds only) and ANCHOR (per-env SET + body_q ->
+  phi0/jac/R_WC, per attempt, list-indexed by world_active — which
+  also deletes the scatter's FWBD cost from (c), 0.37 ms/deep-slab).
+  Each world's contact set stays anchored at ITS boundary-entry
+  states — per-world contact cadence and anchoring are SEMANTICALLY
+  IDENTICAL to today; what changes is buffer packing order (det-off:
+  same class as today's atomic arrival order; det=1: canonical ranks
+  are per-world state functions, computed per crossing batch —
+  det_slots_external becomes per-batch). mjwarp_manager: NO change
+  (boundary call signature and cadence unchanged).
+- HOST PIPELINE (blocker c): measured 0.28 ms/boundary GPU — the
+  env-side per-physics-step work (apply_action, write_data_to_sim,
+  scene.update, sensor FK/force accumulation, actuator state update)
+  is element-wise per world and control is CONSTANT across the
+  window (process_action once per action; apply_action rewrites the
+  same targets — run-ahead under current control is exact). Two
+  task-level invariants must hold and be asserted at construction:
+  (1) no consumer of sub-action-cadence state — in this task the
+  contact-sensor reward terms read latest-value force_matrix_w at
+  action cadence and no history/air-time terms exist; (2) no
+  per-physics-step control variation. Mid-window scene.update/sensor
+  reads DO see run-ahead worlds at mixed times — dead reads in this
+  task, but a BATCH-VISIBLE semantic change of stepping: flagged for
+  Marco's consent in the escalation section (it is NOT the
+  estimator/comparison-semantics rail: per-world dt control, the
+  3-solve step-doubling estimator, accept/reject, tol and optimality
+  are bit-for-bit untouched per world).
+- TWINS/GATES: per-boundary iteration counts change by construction,
+  so the march-equivalence gate g3 and the audit/telemetry
+  (_iteration_count_buf, _substeps_frame, _log_march_boundary)
+  redefine to per-window totals + per-world accept sequences; twin
+  worlds still march in lockstep (identical per-world state =>
+  identical crossings), so the twins rule survives at per-world
+  granularity. Containment/status word semantics unchanged (slot 1
+  sticky across the window's calls).
+- CONDITIONAL GRAPH: the whole-march while-node body gains the
+  capture_if collide/adopt node and the crossing kernel; the body
+  stays a fixed conditional stream, keyed per dt_outer as today.
+  max_substeps cap stays per call.
+
+GRANT ARITHMETIC REFRESH: 10 s/iter needs 0.70x of the 2.75
+ms/substep plateau price. Measured ceilings now in hand: FWBD
+narrowing 25.2% of window (realizable share TBD by implementation,
+est. 15-20%) THEN overlap ~12-15% post-repricing => combined
+~0.65-0.75x — THE 10 s GOAL IS ARITHMETICALLY REACHABLE INSIDE THE
+RAILS FOR THE FIRST TIME, without touching the estimator. The
+estimator escalation stands as the route BEYOND ~10 s (single-solve
+arithmetic ~1.20 ms/substep), no longer the only route to it.
+
+PASS-21 RECOMMENDATION: (1) implement the FWBD narrowing set from
+(c) — fused_update through the narrow env_grid, serial LS-direction
+chain list-indexed, world-gated scatter rows (or pull the ADOPT/
+ANCHOR split forward from the overlap design — it deletes the same
+scatter cost and pre-builds the overlap foundation), default-ON
+bitwise-classed flags, full gate chain, decisive production A/B;
+(2) re-price overlap on the post-narrowing bytes with this pass's
+c(a) method (the p20 splitter is committed tooling for that);
+(3) put the mid-window-visibility consent question to Marco alongside
+the standing estimator escalation. No speedup promised beyond stated
+bounds; FWBD realizable share is the pass-21 measurement.
+Provenance: p20_prof_run.sh, p20_prof_hook/ (import hook: audit +
+profiler gating + NVTX, refuses to arm per-iteration wrapping unless
+eager), p20_prof_1024x25.{log,telemetry,audit,itermap,stamps},
+p20_prof_plateau.{nsys-rep,sqlite}, p20_split_kernels.py ->
+p20_split.txt (the maps, FWBD, c(a) fits), p20_overlap_value.py ->
+p20_overlap.txt (joins, validation, point estimate).
+
 ## Backlog (ranked for the 10 s goal; teardown of contact_solve
 ## internals is AUTHORIZED)
 
@@ -1343,15 +1563,24 @@ estimator rail (~1.20 ms/substep single-solve arithmetic).
    ms/substep measured; prep/free-motion + env-list consolidation
    MEASURED SPEED-NEUTRAL and reverted (launch-count law — closure
    entry above); plateau-tail occupancy measured and the overlap
-   ceiling priced (entry above). Next in line: the pass-20 plateau-
-   window profile (the unprofiled 88%-of-slabs regime), then the
-   overlap design-or-kill decision;
+   ceiling priced (entry above). Pass-20 DONE: the straggler regime
+   profiled at production scale (entry above) — the two live levers,
+   in order:
+   (e) FWBD NARROWING (NEW TOP LEVER, pass-20 (c)): 25.2% of
+   plateau-window GPU is full-width-by-design work inside narrow
+   slabs — fused_update (whole kernel), the serial LS-direction
+   chain (regime-dependent revival of the pass-15c refutee), the
+   per-attempt contact scatter (t-ratio 1.07), base_cost + prep
+   copies. Deletable GPU WORK (launch-count law respected);
+   semantics-free; pass-21 implementation target;
    (c) per-boundary D2H readback chain: DEPRIORITIZED (pass-7
    overlap evidence, pass-18 note); (d) cross-boundary overlap of
-   independent worlds' marches: PRICED pass 19 (ceiling bracket
-   [17%, 46%] of the late window inside the 4-boundary action
-   window, straggler rotation measured; blockers named in the
-   pass-19 occupancy entry) — design measurement next, no build.
+   independent worlds' marches: POINT-PRICED pass 20 — 19.7% of
+   late-window GPU at ceiling (~11.4-11.5 s/iter projected),
+   reprices to ~12-15% after (e) lands; run-ahead single-march
+   design written (pass-20 entry), blockers (b)(c)(d) resolved,
+   mid-window-visibility consent pending with Marco — implement
+   AFTER (e), pricing against the post-(e) stack.
 3. Collision-refresh attack: CLOSED (pass 10, <1%). fp32-Hessian:
    CLOSED (pass 12, neutral). Mixed-precision LS: CLOSED (pass 2).
    Pure fp32 solve: CLOSED. Full/half1 overlap: BLOCKED (pass 4).
@@ -1370,13 +1599,21 @@ without Marco).
 
 ## Escalations to Marco (decisions only he makes)
 
-- ESTIMATOR STRUCTURE (pass 18): the step-doubling 3-solve estimator
-  (excluded rail, comparison semantics) is now the DOMINANT residual —
-  pass-13 arithmetic prices a single-solve SAP at ~1.15-1.26
-  ms/substep vs the current 2.90 (2.63 projected with C); percent
-  levers alone project ~11.5-12.5 s/iter against the 10 s ideal.
-  Whether any estimator-semantics change is on the table for pass-20+
-  is his call; nothing has been touched.
+- ESTIMATOR STRUCTURE (pass 18, reframed pass 20): the step-doubling
+  3-solve estimator (excluded rail, comparison semantics) remains the
+  route BEYOND ~10 s — single-solve arithmetic ~1.20 ms/substep vs
+  the current 2.75. Pass-20 arithmetic makes ~10 s reachable WITHOUT
+  it (FWBD narrowing + overlap); whether estimator-semantics changes
+  are on the table is still his call; nothing has been touched.
+- OVERLAP MID-WINDOW VISIBILITY (new, pass 20): the run-ahead
+  single-march design keeps per-world physics, contact anchoring and
+  estimator semantics bit-for-bit, but lets scene.update/sensor reads
+  BETWEEN boundaries see run-ahead worlds at mixed times inside one
+  action window (action-edge states stay batch-synchronized). Dead
+  reads in this task (contact-sensor rewards are latest-value at
+  action cadence, no history terms) — but it is a batch-stepping
+  semantic change and ships only with his consent + a construction-
+  time assert that no sub-action-cadence state consumer exists.
 - TRIANGLE-PAIR CAP RIGHT-SIZE (new, unblocks 4096 det-unset + frees
   ~11 GB @1024): the task cfg authors max_triangle_pairs=192M, sized
   blind in the always-det era when the CONTACT_ID_BITS clamp silently
