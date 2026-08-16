@@ -265,6 +265,12 @@ ALL_FLAGS = (
     "NEWTON_SAP_RUNAHEAD",
     "NEWTON_SAP_RUNAHEAD_WINDOW",
     "NEWTON_SAP_RUNAHEAD_PHASE",
+    # Crossing-batch throttle knobs: cleared per cell so every run-ahead
+    # family arm resolves the solver defaults identically (the family's
+    # bitwise contract is within-configuration; cross-rule window-edge
+    # invariance is owned by sap_runahead_oracle_probe.py tier 5).
+    "NEWTON_SAP_RUNAHEAD_BATCH",
+    "NEWTON_SAP_RUNAHEAD_BATCH_AGE",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")

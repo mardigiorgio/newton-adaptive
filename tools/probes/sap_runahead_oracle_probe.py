@@ -51,6 +51,22 @@ Assertion tiers:
        bitwise, every window edge, every recorded field.
     4. Semantic preservation (exit 1): ON vs OFF window-edge committed state
        within the sliver bound (bitwise result reported either way).
+    5. Throttle invariance (exit 1): the crossing-batch throttle
+       (NEWTON_SAP_RUNAHEAD_BATCH count bound + NEWTON_SAP_RUNAHEAD_BATCH_AGE
+       max-hold age) HOLDS a world parked at its boundary -- state, clock
+       and controller carry untouched, contact set still adopted at exactly
+       its boundary-entry state when the batch fires -- so the gate rules
+       may change only the batch SCHEDULE, never any world's committed
+       trajectory: window-edge records must be BITWISE identical across
+       (bound, age) arms {(1, inf) -- fire every crossing, the unthrottled
+       schedule; (3, inf) -- count batching; (N_WORLDS, inf) -- fire only
+       when nothing else can march; (N_WORLDS, 2) -- age-dominated firing},
+       with crossings at the structural count in every arm, no throttled
+       arm consuming MORE adopt batches than unthrottled, and at least one
+       consuming strictly fewer (the engagement guard: all-equal would mean
+       the gate never held a world -- vacuous). Mid-window clocks are
+       legitimately schedule-dependent (held worlds lag) and are excluded
+       from the cross-arm compare.
 
 Residual risk (what a clean pass does NOT establish):
     * One sphere-on-plane contact per world; mesh manifolds and
@@ -124,6 +140,8 @@ FLAGS = (
     "NEWTON_SAP_RUNAHEAD",
     "NEWTON_SAP_RUNAHEAD_WINDOW",
     "NEWTON_SAP_RUNAHEAD_PHASE",
+    "NEWTON_SAP_RUNAHEAD_BATCH",
+    "NEWTON_SAP_RUNAHEAD_BATCH_AGE",
     "NEWTON_SAP_DETERMINISTIC",
     "NEWTON_SAP_ATTEMPT_CONSISTENT_R",
     "NEWTON_ADAPTIVE_MARCH_LOG",
@@ -157,11 +175,14 @@ def _apply_env(env: dict[str, str]):
     os.environ.update(env)
 
 
-def run_arm(name: str, runahead: bool, world_subset: list[int], z0, vz):
+def run_arm(name: str, runahead: bool, world_subset: list[int], z0, vz, batch_bound: int = 1, batch_age: int = 64):
     """March K_BOUNDARIES; record per-call clocks and window-edge state.
 
     ``world_subset`` selects which worlds exist in this arm's model (the
-    solo arms build single-world models with the same per-world ICs)."""
+    solo arms build single-world models with the same per-world ICs).
+    ``batch_bound``/``batch_age`` pin the crossing-batch throttle: bound 1
+    fires every crossing immediately and a large age never trips (the
+    reference schedule for tiers 1-4); tier 5 varies both."""
     env = {
         # Rejection-generating law: under the attempt-consistent default this
         # scene accepts every attempt at the cap (uniform dt, no spread, no
@@ -170,6 +191,8 @@ def run_arm(name: str, runahead: bool, world_subset: list[int], z0, vz):
         # Canonical orders everywhere: the bitwise judgments require it.
         "NEWTON_SAP_DETERMINISTIC": "1",
         "NEWTON_SAP_RUNAHEAD_WINDOW": str(WINDOW),
+        "NEWTON_SAP_RUNAHEAD_BATCH": str(batch_bound),
+        "NEWTON_SAP_RUNAHEAD_BATCH_AGE": str(batch_age),
     }
     if runahead:
         env["NEWTON_SAP_RUNAHEAD"] = "1"
@@ -200,6 +223,15 @@ def run_arm(name: str, runahead: bool, world_subset: list[int], z0, vz):
         max_substeps=64,
     )
     assert solver.runahead == runahead, f"[{name}] runahead switch did not reach construction"
+    expected_bound = batch_bound if runahead else 0
+    assert solver.runahead_batch_bound == expected_bound, (
+        f"[{name}] throttle bound did not reach construction "
+        f"(got {solver.runahead_batch_bound}, expected {expected_bound})"
+    )
+    expected_age = batch_age if runahead else 0
+    assert solver.runahead_batch_age == expected_age, (
+        f"[{name}] throttle age did not reach construction (got {solver.runahead_batch_age}, expected {expected_age})"
+    )
 
     calls = []
     edges = []
@@ -377,6 +409,54 @@ def main() -> int:
         if worst_q > BOUND_Q or worst_qd > BOUND_QD:
             print("FAIL: ON-vs-OFF deviation exceeds the sliver bound -- semantic difference, not rounding")
             return 1
+
+    # ---- tier 5: throttle invariance across crossing-batch gate rules ----
+    fail = False
+    min_adopts = on["adopts"]
+    for bound, age in ((3, 64), (N_WORLDS, 64), (N_WORLDS, 2)):
+        arm = run_arm(f"on-batch-b{bound}-a{age}", True, all_worlds, z0, vz, batch_bound=bound, batch_age=age)
+        if arm["crossings"] != expected_crossings:
+            print(
+                f"VACUOUS: bound-{bound}/age-{age} crossings {arm['crossings']} != structural "
+                f"{expected_crossings} (the throttle may delay a crossing, never skip one)"
+            )
+            return 3
+        for e in range(len(on["edges"])):
+            for f in on["edges"][e]:
+                # "dt" is EXCLUDED for the same reason world_fields() excludes
+                # it: at a window edge it is attempt-transient dead state whose
+                # value depends on how many trailing no-op clamp iterations ran
+                # after the world's last landing -- a pure schedule artifact of
+                # the gate rules. The carried controller step is ideal_dt,
+                # which IS compared (and _seed_dt reseeds dt from it at window
+                # open).
+                if f == "dt":
+                    continue
+                if on["edges"][e][f].tobytes() != arm["edges"][e][f].tobytes():
+                    a = on["edges"][e][f].astype(np.float64).reshape(-1)
+                    b = arm["edges"][e][f].astype(np.float64).reshape(-1)
+                    d = np.abs(a - b).max()
+                    print(f"FAIL throttle: bound {bound} age {age} window edge {e} field {f} differs (max |d| {d:.3e})")
+                    fail = True
+        if arm["adopts"] > on["adopts"]:
+            print(
+                f"FAIL throttle: bound {bound} age {age} consumed MORE adopt batches "
+                f"({arm['adopts']} > {on['adopts']}) -- batching must not multiply fires"
+            )
+            fail = True
+        min_adopts = min(min_adopts, arm["adopts"])
+        print(
+            f"throttle bound {bound} age {age}: window edges bitwise vs unthrottled, "
+            f"adopts {arm['adopts']} (unthrottled: {on['adopts']})"
+        )
+    if fail:
+        return 1
+    if min_adopts >= on["adopts"]:
+        print(
+            f"VACUOUS: no throttled arm consumed fewer adopt batches than unthrottled "
+            f"({min_adopts} >= {on['adopts']}) -- the gate never held a world"
+        )
+        return 3
 
     print("SAP-RUNAHEAD-ORACLE: PASS")
     return 0

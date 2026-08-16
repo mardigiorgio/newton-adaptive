@@ -931,12 +931,14 @@ def _debt_guard_target(
     """:func:`_debt_guard` for the run-ahead march: "in debt" is measured
     against the CALL target ``t_call``, not the per-world boundary clock -- a
     run-ahead world legitimately sits mid-boundary (``sim_time < next_time``)
-    at call exit and must not have its controller reissued. A world short of
-    ``t_call`` is short of its own (not-yet-bumped) boundary too, so the
-    per-world carry bound and controller reissue below are the original
-    kernel's, verbatim."""
+    at call exit and must not have its controller reissued. Debt requires
+    BOTH clocks short: a throttle-held world parked AT its boundary
+    (``sim_time == next_time``) completed its boundary and carries no debt
+    -- the per-boundary guard would not touch it, so neither does this one.
+    For worlds genuinely mid-boundary the carry bound and controller reissue
+    below are the original kernel's, verbatim."""
     i = wp.tid()
-    if sim_time[i] < t_call:
+    if sim_time[i] < t_call and sim_time[i] < next_time[i]:
         floor_t = next_time[i] - dt_outer
         if sim_time[i] < floor_t:
             sim_time[i] = floor_t
@@ -964,11 +966,20 @@ def _ra_advance_boundary(
     crossed: wp.array[wp.int32],
     crossed_any: wp.array[wp.int32],
     crossings: wp.array[wp.int32],
+    fire: wp.array[wp.int32],
 ):
     """The run-ahead crossing: a world that reached its boundary target inside
     the action window does not park -- its boundary bookkeeping is applied
     in-place and it marches on toward the next boundary, capped at the window
     end. Runs after the commit; per-world data flow only.
+
+    ``fire`` is the throttle gate written by :func:`_ra_throttle_decide`:
+    while it is closed an eligible world HOLDS at its boundary (state, clock
+    and controller carry untouched -- the parked-world state the per-boundary
+    march produces between calls), so the gate batches crossings without
+    skipping or reordering any world's adoption. The diverged latch-park is
+    NOT gated: it is a containment freeze, not a crossing, and must stay
+    visible the same call it latched.
 
     The bookkeeping mirrors what integrate() applies between boundary calls:
     the :func:`_seed_dt` clamp of the carried ``ideal_dt`` into ``dt`` /
@@ -997,6 +1008,8 @@ def _ra_advance_boundary(
     if diverged[w]:
         sim_time[w] = window_end
         next_time[w] = window_end
+        return
+    if fire[0] == 0:
         return
     nt = next_time[w] + dt_outer
     if nt > window_end:
@@ -1075,6 +1088,69 @@ def _ra_clear_crossed(
     if i == 0:
         crossed_any[0] = 0
         adopts[0] = adopts[0] + 1
+
+
+@wp.kernel
+def _ra_throttle_count(
+    window_end: float,
+    sim_time: wp.array[wp.float32],
+    next_time: wp.array[wp.float32],
+    diverged: wp.array[wp.bool],
+    counts: wp.array[wp.int32],
+):
+    """Classify every world for this iteration's crossing-gate decision.
+
+    ``counts[0]`` (pending): parked at a boundary target short of the window
+    end, not diverged -- eligible to cross. ``counts[1]`` (marching): still
+    integrating toward its current target. Worlds at the window end and
+    diverged latch-parks fall in neither class. Runs after the commit, so
+    the classification reflects this iteration's accepted steps; the decide
+    kernel consumes and resets the counts.
+    """
+    w = wp.tid()
+    if sim_time[w] < next_time[w]:
+        wp.atomic_add(counts, 1, 1)
+        return
+    if next_time[w] < window_end and not diverged[w]:
+        wp.atomic_add(counts, 0, 1)
+
+
+@wp.kernel
+def _ra_throttle_decide(
+    bound: int,
+    age: int,
+    counts: wp.array[wp.int32],
+    wait: wp.array[wp.int32],
+    fire: wp.array[wp.int32],
+):
+    """Open the crossing gate (dim=1) when any of three rules trips:
+    (1) COUNT -- the pending batch reached the bound (wide-regime batching:
+    fire exactly when a large batch is ready); (2) AGE -- some world has
+    been held ``age`` iterations (``wait`` counts consecutive iterations
+    with a non-empty pending set, so the FIRST lander bounds every holder's
+    delay): without it a sub-bound trailing set would wait on rule (3) for
+    the deepest straggler to land, a global barrier that serializes half
+    the fleet behind one world; (3) LIVENESS -- no world can advance
+    without crossing (once every unheld world is parked at the window end,
+    a diverged latch, or pending, the batch must fire or the march would
+    spin). Consumes and resets the counts so the next iteration classifies
+    afresh; ``wait`` persists across iterations and resets on fire or on an
+    empty pending set."""
+    pending = counts[0]
+    marching = counts[1]
+    w = wait[0]
+    if pending > 0:
+        w = w + 1
+    else:
+        w = 0
+    f = 0
+    if pending >= bound or (pending > 0 and (marching == 0 or w >= age)):
+        f = 1
+        w = 0
+    fire[0] = f
+    wait[0] = w
+    counts[0] = 0
+    counts[1] = 0
 
 
 @wp.kernel
@@ -1703,6 +1779,42 @@ class SolverSAPAdaptive:
             self._ra_crossed_any = wp.zeros(1, dtype=wp.int32, device=device)
             self._ra_all_worlds = wp.ones(wc, dtype=wp.int32, device=device)
             self._ra_target_cache: dict = {}
+            # Crossing-batch throttle: a world reaching its boundary is HELD
+            # parked there (making no attempts -- exactly the per-boundary
+            # march's parked-world state) until the pending batch reaches the
+            # bound, or until no world can advance without crossing (the
+            # liveness rule: the march must never spin with only parked
+            # worlds). Batching fires trades run-ahead depth for fewer
+            # masked collide+adopt passes; it can only DELAY a world's
+            # crossing, never skip or reorder it, and a held world's contact
+            # set still refreshes at exactly its boundary-entry state, so
+            # per-world contact cadence and anchoring are unchanged. Bound
+            # semantics: values >= 1 are an absolute pending-world count;
+            # values in (0, 1) are a fraction of the world count (scale-
+            # invariant across env counts). Bound 1 fires every crossing
+            # immediately (the unthrottled schedule); a bound at/above the
+            # world count degenerates to lockstep generations (fires only
+            # via the liveness rule), which forfeits the merge value -- the
+            # default sits between the two failure edges.
+            raw_bound = float(os.environ.get("NEWTON_SAP_RUNAHEAD_BATCH", "0.5"))
+            if raw_bound <= 0.0:
+                raise ValueError(f"NEWTON_SAP_RUNAHEAD_BATCH must be > 0, got {raw_bound}.")
+            if raw_bound < 1.0:
+                self._ra_batch_bound = max(1, int(round(raw_bound * wc)))
+            else:
+                self._ra_batch_bound = int(round(raw_bound))
+            # Max-hold age (march iterations a non-empty pending set may be
+            # held before the gate opens regardless of the count bound).
+            # Small values cap every holder's delay at a few cheap trailing
+            # iterations -- the plateau regime's escape hatch from the
+            # liveness barrier; the count bound still fires large batches
+            # immediately in the wide regime.
+            self._ra_batch_age = int(os.environ.get("NEWTON_SAP_RUNAHEAD_BATCH_AGE", "2"))
+            if self._ra_batch_age < 1:
+                raise ValueError(f"NEWTON_SAP_RUNAHEAD_BATCH_AGE must be >= 1, got {self._ra_batch_age}.")
+            self._ra_pending_counts = wp.zeros(2, dtype=wp.int32, device=device)
+            self._ra_wait = wp.zeros(1, dtype=wp.int32, device=device)
+            self._ra_fire = wp.zeros(1, dtype=wp.int32, device=device)
             # Per-world contact persistence: the global buffer only ever holds
             # the latest crossing batch, so per-env sets own the anchored
             # rows; the per-attempt scatter becomes the ANCHOR re-derivation.
@@ -1816,6 +1928,20 @@ class SolverSAPAdaptive:
         """True when the run-ahead single march is active (``NEWTON_SAP_RUNAHEAD=1``;
         default OFF -- the OFF path is the per-boundary march, byte-untouched)."""
         return self._runahead
+
+    @property
+    def runahead_batch_bound(self) -> int:
+        """Resolved crossing-batch throttle bound (worlds pending before the
+        gate opens; ``NEWTON_SAP_RUNAHEAD_BATCH``, fractions resolved against
+        the world count). 0 when run-ahead is inactive."""
+        return self._ra_batch_bound if self._runahead else 0
+
+    @property
+    def runahead_batch_age(self) -> int:
+        """Max-hold age of the crossing-batch throttle (march iterations a
+        non-empty pending set may be held; ``NEWTON_SAP_RUNAHEAD_BATCH_AGE``).
+        0 when run-ahead is inactive."""
+        return self._ra_batch_age if self._runahead else 0
 
     @property
     def runahead_window(self) -> int:
@@ -1934,6 +2060,18 @@ class SolverSAPAdaptive:
         so this counts evals, not equal-cost work units. Fixed mode runs one eval per
         iteration and is counted as such. Host sync; call outside the hot path."""
         return int(self._cum_iters.numpy()[0]) * (3 if self._do_doubling else 1)
+
+    def cumulative_accepted_steps(self) -> int:
+        """Total ACCEPTED per-world substeps since the last
+        :meth:`reset_compute_counter` (each accepting world counts one per
+        accepted attempt; rejections excluded). This is the DEMAND axis:
+        unlike :meth:`cumulative_substeps`, which counts batch march
+        iterations and therefore depends on how the march schedules worlds
+        into shared iterations, this counts per-world integration work and
+        is schedule-invariant -- equal demand between two runs makes their
+        wall ratio a pure speed comparison. Host sync; call outside the hot
+        path."""
+        return int(self._cum_accepted.numpy()[0])
 
     def get_status_summary(self) -> dict[str, float]:
         """Reduce per-world arrays to a 6-scalar summary via one GPU transfer."""
@@ -2537,15 +2675,38 @@ class SolverSAPAdaptive:
         # bump it (capped at the window end), apply their boundary bookkeeping
         # in place, and arm the next iteration's collide+adopt node. Runs
         # after the commit so the crossing state IS the committed boundary
-        # state; per-world data flow only.
+        # state; per-world data flow only. The count/decide pair ahead of it
+        # is the crossing-batch throttle: the gate opens only when the
+        # pending batch reaches the bound or nothing else can march, so
+        # scattered landings batch into few collide+adopt fires instead of
+        # arming the conditional node one world at a time.
         if self._runahead:
+            window_end = float(self._ra_targets(dt_outer)[self._runahead_window])
+            wp.launch(
+                _ra_throttle_count,
+                dim=n,
+                inputs=[window_end, self._sim_time, self._next_time, self._diverged, self._ra_pending_counts],
+                device=dev,
+            )
+            wp.launch(
+                _ra_throttle_decide,
+                dim=1,
+                inputs=[
+                    self._ra_batch_bound,
+                    self._ra_batch_age,
+                    self._ra_pending_counts,
+                    self._ra_wait,
+                    self._ra_fire,
+                ],
+                device=dev,
+            )
             wp.launch(
                 _ra_advance_boundary,
                 dim=n,
                 inputs=[
                     self._mode_code,
                     dt_outer,
-                    float(self._ra_targets(dt_outer)[self._runahead_window]),
+                    window_end,
                     self._dt_inner_init,
                     self._dt_min,
                     eff_dt_max,
@@ -2559,6 +2720,7 @@ class SolverSAPAdaptive:
                     self._ra_crossed,
                     self._ra_crossed_any,
                     self._ra_crossings,
+                    self._ra_fire,
                 ],
                 device=dev,
             )
@@ -2679,8 +2841,11 @@ class SolverSAPAdaptive:
             # The run-ahead march adds the crossing-batched collide+adopt
             # node, the crossing kernel and the scalar-target boundary-exit
             # kernels to the body, so the flag selects a different launch
-            # stream.
+            # stream. The throttle bound is a captured kernel scalar, so a
+            # cached graph must never replay another bound's value.
             self._runahead,
+            self._ra_batch_bound if self._runahead else 0,
+            self._ra_batch_age if self._runahead else 0,
         )
         graph = self._graph_cache.get(key)
         if graph is None:
@@ -2796,8 +2961,11 @@ class SolverSAPAdaptive:
             # The run-ahead march adds the crossing-batched collide+adopt
             # node, the crossing kernel and the scalar-target boundary-exit
             # kernels to the body, so the flag selects a different launch
-            # stream.
+            # stream. The throttle bound is a captured kernel scalar, so a
+            # cached graph must never replay another bound's value.
             self._runahead,
+            self._ra_batch_bound if self._runahead else 0,
+            self._ra_batch_age if self._runahead else 0,
         )
 
     def _launch_conditional_march(self, eff_dt_max: float, dt_outer: float) -> bool:
@@ -3469,7 +3637,7 @@ class SolverSAPAdaptive:
             self._march_log_file.write(
                 "boundary,iters,cum_iters,ideal_min,ideal_mean,ideal_max,"
                 "resid_min,resid_max,rejects,err_max,n_debt,n_subfloor,n_guard,"
-                "eworld,qmax_i,qmax,ncon\n"
+                "eworld,qmax_i,qmax,ncon,cum_acc,ra_cross,ra_fires\n"
             )
         iters = int(self._iteration_count_buf.numpy()[0])
         cum = int(self._cum_iters.numpy()[0])
@@ -3493,12 +3661,21 @@ class SolverSAPAdaptive:
         n_debt = int((resid > 0.0).sum())
         n_subfloor = int((ideal < self._dt_min).sum())
         n_guard = int(self._guard_hits.numpy()[0])
+        # Demand + run-ahead engagement, cumulative: cum_acc is the accepted
+        # per-world substep count (the schedule-invariant work axis next to
+        # the batch-iteration cum column); ra_cross/ra_fires are the crossing
+        # and consumed-adopt-batch counters (zero outside run-ahead mode --
+        # the buffers exist unconditionally, so an OFF read is a real
+        # observation).
+        cum_acc = int(self._cum_accepted.numpy()[0])
+        ra_cross = int(self._ra_crossings.numpy()[0])
+        ra_fires = int(self._ra_adopts.numpy()[0])
         self._march_log_file.write(
             f"{self._march_log_boundary},{iters},{cum},"
             f"{ideal.min():.6e},{ideal.mean():.6e},{ideal.max():.6e},"
             f"{resid.min():.6e},{resid.max():.6e},"
             f"{rejects},{err_max:.6e},{n_debt},{n_subfloor},{n_guard},"
-            f"{eworld},{qmax_i},{qmax:.6e},{ncon}\n"
+            f"{eworld},{qmax_i},{qmax:.6e},{ncon},{cum_acc},{ra_cross},{ra_fires}\n"
         )
         self._march_log_boundary += 1
         if self._dt_hist is not None and self._march_log_boundary % self._march_log_hist_every == 0:
