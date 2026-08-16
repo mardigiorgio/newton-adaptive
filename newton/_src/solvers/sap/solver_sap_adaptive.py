@@ -2280,6 +2280,10 @@ class SolverSAPAdaptive:
             # trip subgraph with a single-kernel walk, so the flag selects a
             # different launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_ls", False)),
+            # The folded alpha-max rung deletes the per-trip trial launch
+            # chain and swaps the ladder kernel, so the flag selects a
+            # different launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_alphamax", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,
@@ -2376,6 +2380,10 @@ class SolverSAPAdaptive:
             # trip subgraph with a single-kernel walk, so the flag selects a
             # different launch stream inside the captured solves.
             bool(getattr(self._sap.contact_solve, "_fused_ls", False)),
+            # The folded alpha-max rung deletes the per-trip trial launch
+            # chain and swaps the ladder kernel, so the flag selects a
+            # different launch stream inside the captured solves.
+            bool(getattr(self._sap.contact_solve, "_fused_alphamax", False)),
             str(getattr(self._sap, "line_search_variant", "")),
             self._tail_compact,
             self._march_compact,

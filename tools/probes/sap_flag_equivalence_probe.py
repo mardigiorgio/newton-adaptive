@@ -106,6 +106,15 @@ Oracle argument (why this is not a tautology or a snapshot):
     (> 0 in family cells, == 0 in every pinned-off cell) -- not by
     divergence, which a scene without threshold-adjacent accept decisions
     legally never shows.
+
+    NEWTON_SAP_FUSED_ALPHAMAX (default ON, "0" disables; effective only
+    under the fused ladder) folds the alpha_max trial into the ladder
+    kernel's rung 0 -- another fp evaluation-route change (ray-advanced
+    trial cost, analytic ray derivative in place of the chain's
+    dp/impulse dot products), so it gets the same treatment: every other
+    cell pins "0", the fused-alphamax family cells leave it UNSET with
+    their own reference + repeat oracle and graph/conditional arms, and
+    engagement is the device alphamax-env counter.
     The correct output of a switch-on run is therefore exactly computable by an
     independent route: the switch-off run of the identical scenario, same
     process, same build, same device, same seed. The probe asserts bitwise
@@ -249,6 +258,7 @@ ALL_FLAGS = (
     "NEWTON_SAP_SHARED_ASSEMBLY",
     "NEWTON_SAP_ATTEMPT_CONSISTENT_R",
     "NEWTON_SAP_FUSED_LS",
+    "NEWTON_SAP_FUSED_ALPHAMAX",
 )
 # Uniform-pinned across every cell (never the varied factor).
 PINNED_OFF = ("NEWTON_SAP_SPREAD_LOG", "NEWTON_ADAPTIVE_DT_HIST")
@@ -307,6 +317,7 @@ def _cfg(
     gemm: str = "0",
     acr: str | None = "0",
     fused: str | None = "0",
+    alphamax: str | None = "0",
 ):
     env = {
         "NEWTON_SAP_ADAPTIVE_GRAPH": graph,
@@ -352,6 +363,17 @@ def _cfg(
     # reference + repeat oracle and graph/conditional arms.
     if fused is not None:
         env["NEWTON_SAP_FUSED_LS"] = fused
+    # The alpha-max rung folded into the fused ladder (default ON in the
+    # solver) is a DIFFERENT fp evaluation route for the alpha_max trial
+    # cost/derivative, so no bitwise contract exists across its states:
+    # every other cell pins "0" (the per-trip trial launch chain,
+    # byte-for-byte the pre-flag behavior -- the fused-LS family keeps
+    # certifying the exact stream it certified before the fold existed),
+    # and the fused-alphamax family cells pass None to leave the variable
+    # unset so the default resolution is itself under test, with their own
+    # reference + repeat oracle and graph/conditional arms.
+    if alphamax is not None:
+        env["NEWTON_SAP_FUSED_ALPHAMAX"] = alphamax
     if march_log is not None:
         env["NEWTON_ADAPTIVE_MARCH_LOG"] = march_log
     return (name, env, dt_hist)
@@ -518,6 +540,32 @@ CONFIGS = [
         acr=None,
         fused=None,
     ),
+    # ---- fused-alphamax family (the solver default: flag UNSET) ----
+    # The production stack shape with BOTH ladder flags at their unset
+    # defaults: the folded rung 0 evaluates the alpha_max trial
+    # cost/derivative along the ray in-kernel, a different fp route from
+    # the launch-chain trial, so the family carries its own reference +
+    # repeat oracle; varied factors within it are graph capture and the
+    # whole-march conditional tier, which must record and replay the
+    # folded single-kernel stream bitwise. Engagement is the device
+    # alphamax-env counter (asserted > 0 here and == 0 in every
+    # pinned-off cell).
+    _cfg("fusedam", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
+    _cfg("fusedam-repeat", "0", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
+    _cfg("fusedam-graph", "1", None, False, refresh="1", shared="1", gemm="1", acr=None, fused=None, alphamax=None),
+    _cfg(
+        "fusedam-conditional",
+        "1",
+        None,
+        False,
+        refresh="1",
+        conditional="1",
+        shared="1",
+        gemm="1",
+        acr=None,
+        fused=None,
+        alphamax=None,
+    ),
 ]
 
 # Arms judged bitwise against "boundary" (scheduling-only changes within the
@@ -553,6 +601,14 @@ FUSEDLS_FAMILY = (
     "fusedls-repeat",
     "fusedls-graph",
     "fusedls-conditional",
+)
+
+# Arms judged bitwise against "fusedam" (scheduling-only changes under the
+# folded alpha-max rung's trial evaluation route).
+FUSEDAM_FAMILY = (
+    "fusedam-repeat",
+    "fusedam-graph",
+    "fusedam-conditional",
 )
 
 
@@ -687,6 +743,15 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
     assert solver._sap.contact_solve._fused_ls == fused_expected, (
         f"[{name}] fused-LS switch did not resolve "
         f"(env {env.get('NEWTON_SAP_FUSED_LS')!r} -> expected {fused_expected})"
+    )
+    # Folded alpha-max rung: absent or "1" resolves ON, but only under the
+    # fused ladder (the fold is a property of that kernel). Construction
+    # proof is the resolved switch; engagement is the device alphamax-env
+    # counter, asserted after the march below.
+    alphamax_expected = fused_expected and env.get("NEWTON_SAP_FUSED_ALPHAMAX") != "0"
+    assert solver._sap.contact_solve._fused_alphamax == alphamax_expected, (
+        f"[{name}] fused-alphamax switch did not resolve "
+        f"(env {env.get('NEWTON_SAP_FUSED_ALPHAMAX')!r} -> expected {alphamax_expected})"
     )
     march_requested = env.get("NEWTON_SAP_MARCH_COMPACT") == "1"
     march_expected = (
@@ -898,6 +963,24 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
             f"[{name}] fused-ladder counter advanced with the switch off -- the fused path leaked into an OFF cell."
         )
 
+    # Folded alpha-max engagement: the counter accumulates once per env
+    # whose alpha_max trial ran through the in-kernel rung 0, so a nonzero
+    # total proves the folded evaluation actually replaced the trial launch
+    # chain (a zero total in an ON cell means the line search never ran --
+    # vacuous); any count in a pinned-off cell means the folded kernel
+    # leaked into the certified launch-chain stream. Host read is
+    # post-march only.
+    fused_alphamax_envs = solver._sap.contact_solve.fused_alphamax_envs()
+    if alphamax_expected:
+        assert fused_alphamax_envs > 0, (
+            f"[{name}] folded alpha-max rung never evaluated an env "
+            "(engagement counter is zero) -- the flag is untested by this run."
+        )
+    else:
+        assert fused_alphamax_envs == 0, (
+            f"[{name}] alphamax counter advanced with the switch off -- the folded path leaked into an OFF cell."
+        )
+
     # Host-side pipeline-invocation count. Exact for the boundary cadence in
     # every mode (the collide runs outside the captured body); exact for the
     # per-attempt cadence only on eager (graph=0) arms -- graph replays do
@@ -912,6 +995,7 @@ def run_config(name: str, env: dict[str, str], dt_hist: bool, z0, vz):
         "narrow_sites": sorted(narrow_sites),
         "sa_execs": sa_execs,
         "fused_ladder_envs": fused_ladder_envs,
+        "fused_alphamax_envs": fused_alphamax_envs,
     }
 
 
@@ -1120,6 +1204,21 @@ def main() -> int:
             "fused armijo ladder engaged (device ladder-env counter > 0)": extras["fusedls"]["fused_ladder_envs"] > 0,
         }
     )
+    # Fused-alphamax family: same shape as the fused-LS family -- its own
+    # contact/divergence vacuity certificate plus rung-0 engagement via the
+    # device counter (divergence from the fusedls family is NOT required:
+    # the fold changes only the alpha_max trial's fp evaluation route, so a
+    # bitwise-identical march is a legal outcome; the counter is the
+    # engagement proof).
+    amref = runs["fusedam"]
+    guards.update(
+        {
+            "fusedam arm produced pipeline contacts": extras["fusedam"]["ncon_seen"] > 0,
+            "fusedam arm: no world diverged": all(int(r["diverged"].sum()) == 0 for r in amref),
+            "folded alpha-max rung engaged (device alphamax-env counter > 0)": extras["fusedam"]["fused_alphamax_envs"]
+            > 0,
+        }
+    )
 
     bad = [g for g, ok in guards.items() if not ok]
     for g, ok in guards.items():
@@ -1134,6 +1233,7 @@ def main() -> int:
         ("boundary", "boundary-repeat"),
         ("acr", "acr-repeat"),
         ("fusedls", "fusedls-repeat"),
+        ("fusedam", "fusedam-repeat"),
     ):
         where = first_divergence(runs[oracle], runs[repeat])
         if where is not None:
@@ -1154,6 +1254,8 @@ def main() -> int:
             "acr-repeat",
             "fusedls",
             "fusedls-repeat",
+            "fusedam",
+            "fusedam-repeat",
         ):
             continue
         if name in BOUNDARY_FAMILY:
@@ -1162,6 +1264,8 @@ def main() -> int:
             family = "acr"
         elif name in FUSEDLS_FAMILY:
             family = "fusedls"
+        elif name in FUSEDAM_FAMILY:
+            family = "fusedam"
         else:
             family = "reference"
         where = first_divergence(runs[family], runs[name])
@@ -1208,6 +1312,7 @@ def main() -> int:
             "NEWTON_SAP_MARCH_COMPACT": "0",
             "NEWTON_SAP_ATTEMPT_CONSISTENT_R": "0",
             "NEWTON_SAP_FUSED_LS": "0",
+            "NEWTON_SAP_FUSED_ALPHAMAX": "0",
         },
         z0,
         vz,
