@@ -161,13 +161,76 @@ are mechanically feasible.
 Tree state: zero repo edits made this pass (git status clean both repos;
 construct probe re-run PASS as restoration proof).
 
+## Kernel-level slab profile (2026-08-15, loop pass 6 — nsys, MEASURED)
+
+Method: nsys 2024.6.2 cuda-only traces of a scripted engaged-contact rig
+(scratchpad pass6_profile_rig.py; Trossen task, 512 envs, production
+defaults, det unset). Three traces: press+swing graph-mode (497 slabs,
+1.04/boundary — moderate regime), press+flail graph-mode (3112 slabs,
+6.5/boundary — money regime), press+flail EAGER (NEWTON_SAP_ADAPTIVE_GRAPH=0,
+1553 slabs) for per-kernel attribution since this nsys traces captured
+graphs at graph granularity (interior kernels invisible; the
+--cuda-graph-trace=node attempt broke capture detection under CUPTI and
+crashed with CUDA 700 — profiler artifact, rig runs clean without it;
+manager also warned it fell back to eager for ITS capture in that config).
+Shares are GPU-kernel-duration shares from the eager flail trace (launch
+gaps excluded; relative shares defensible, absolutes are per-kernel GPU ms).
+
+| group | ms/slab | % of GPU kernel time | notes |
+|---|---|---|---|
+| contact-Hessian GEMM tile | 0.575 | 51.3 | ONE kernel; 0.547 ms/launch avg |
+| Hessian GEMM input pack | 0.185 | 16.5 | pair with above = 68% |
+| collision pipeline (per-boundary refresh) | 0.132 | 11.8 | ~1.05 ms/boundary flat; mesh_triangle_contacts_to_reducer 94.4 ms + BVH (cuBQL) 64 ms |
+| solve-misc/masks/lists | 0.060 | 5.3 | 16726 tiny launches |
+| free-motion/assembly | 0.032 | 2.9 | post shared-assembly |
+| projection/gamma evals | 0.030 | 2.6 | (envs,128) grids |
+| LS trial chain | 0.009 | 0.8 | already compacted |
+| blocked Cholesky | 0.007 | 0.6 | already fp32+narrowed |
+| gradient/derivative | 0.006 | 0.6 | |
+| error metric + controller | 0.001 | 0.1 | |
+
+VERDICT — reshape-worthy, precisely targeted: the contact-Hessian GEMM
+tile kernel + its input pack are 68% of engaged-regime GPU time; every
+previously optimized group is now noise. Rough fp64 roofline for the
+per-env tile GEMM suggests the kernel sits far from peak — reshape /
+batching / tensor-core candidates all live here. NOTE the precision angle:
+this GEMM is in the fp64 region, but the Hessian only shapes the Newton
+DIRECTION (inexact-Newton tolerates approximate H; the 1e-8 certificate is
+measured on the fp64 gradient, and the mixed-precision dead-end was about
+LS COST COMPARISONS, not H) — an fp32/tf32 Hessian GEMM is therefore a
+live, UNTESTED hypothesis, physics-visible (direction changes ->
+trajectories), so opt-in flag + invariant gates + Newton-iteration-count
+watch + Marco escalation. Surprises: (1) collision refresh is a constant
+~1.05 ms/boundary tax that DOMINATES gentle regimes (44% of visible GPU
+time in the press+swing trace) — at 4096 envs it scales and is pure
+per-boundary overhead; (2) at 512 envs the eager GPU-busy content of a
+slab is only ~1.1 ms vs ~15 ms/slab training telemetry at 1024 — the
+wall-vs-GPU-kernel reconciliation at training scale is an OPEN question
+(bigger slabs at 1024 + host/graph overhead split unmeasured).
+Provenance: scratchpad pass6_prof{,_flail,_eager}.nsys-rep,
+pass6_{eager,flail,stats}_cuda_gpu_kern_sum.csv, pass6_run*.log,
+pass6_profile_rig.py.
+
 ## Backlog (ranked; teardown of contact_solve internals is AUTHORIZED)
 
-1. Fused attempt pipeline / dense-path tile reshape (the (envs,32,32) pack,
-   GEMM tiles): structural surgery, authorized; measure kernel-level first.
-2. Remaining un-narrowed env-axis launches outside contact_solve.py
+1. Contact-Hessian GEMM attack (68% of engaged GPU time, measured pass 6):
+   (a) bitwise-safe first — reshape/batch the tile GEMM + fuse its input
+   pack (same fp64 math, better shape/occupancy; bitwise contract needs
+   canonical accumulation order preserved per tile); (b) physics-visible
+   second — fp32/tf32 Hessian GEMM (inexact-Newton direction; gradient +
+   certificate stay fp64), opt-in flag, full invariant gates + iteration
+   -count watch, escalate to Marco with numbers.
+2. Collision-refresh cost (~1.05 ms/boundary constant, dominates gentle
+   regimes): profile mesh_triangle_contacts_to_reducer at 1024/4096; check
+   whether the BVH rebuild cadence (cuBQL every refresh) can key on motion
+   bounds (bitwise-visible only in contact ORDER? verify) — measure first.
+3. Wall-vs-GPU reconciliation at training scale: one instrumented 1024-env
+   run splitting slab wall into GPU-kernel vs host/graph-gap time — if
+   wall >> GPU-busy at scale too, launch/host overhead is a separate
+   first-class target (whole-march capture coverage audit).
+4. Remaining un-narrowed env-axis launches outside contact_solve.py
    (full-width consumers listed in agent a06d1420 notes).
-3. Housekeeping: run pre-commit across the accumulated commits and
+5. Housekeeping: run pre-commit across the accumulated commits and
    re-gate (hooks were deferred to keep certified bytes exact); fix the
    TAIL_COMPACT =="1" exact-match footgun; make the march-compact
    OFF-cell leak guard non-vacuous (review finding).
