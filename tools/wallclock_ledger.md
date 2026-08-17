@@ -2227,6 +2227,24 @@ Marco's). NOTHING WAS CHANGED. This is a characterization, not a
 regression: the campaign did not cause it, and the pre-campaign
 snapshot had the same authored constants.
 
+    [CORRECTION, pass 31, in place — the "~6-7 orders of magnitude" in
+    the paragraph above is WRONG and is the ORIGIN of the error pass 30
+    caught downstream. ORIGINAL CLAIM: entering the near-rigid regime
+    needs authored contact stiffness raised ~6-7 orders of magnitude.
+    THE ERROR: the distance was reasoned from the ratio of the authored
+    k to sap_warp's 1e10 fallback, not measured against the branch
+    boundary, which sits where rn_hard = rn_soft, i.e. at
+    k_cross = 1/(h (h+tau) rn_hard) — a function of the SUBSTEP, not of
+    the fallback. CORRECTED VALUE (pass 30's swept census,
+    p30_reg_fixed_s2_seed42.json): the clamp takes the majority of
+    contacts at k ~ 2.5e4 at the production substep, i.e. **1.3 decades**
+    above the authored 1250, and 100% by k = 1e6. The paragraph's
+    CONCLUSION — that this stack runs compliant and that an advantage
+    here is truncation-error control, not the paper's dt^-2 coupling —
+    is unaffected and confirmed. Only the distance was overstated, by
+    four to five decades. Not re-measured in pass 31; corrected against
+    pass 30's measurement.]
+
 ### AXIS C — FIXED-vs-ADAPTIVE COMPARISON FAIRNESS: **COMPROMISED**
 
 C(i) OPTIMIZATION INHERITANCE — FAIR. All six named optimizations live
@@ -3697,6 +3715,25 @@ pairs/world at 64 envs during scripted flail; 1,598-1,638/world at 1024 and
 4096 under press. The budget is 4.4x the flail peak and ~10.2x the press
 peak. Truncated contacts 0 on both arms in every probe this pass.
 
+    [CORRECTION, pass 31, in place. ORIGINAL CLAIMS: 16,384/world is
+    "4.4x the flail peak and ~10.2x the press peak", "truncated contacts
+    0 on both arms in every probe", and (section header) "4096 NOW
+    CONSTRUCTS". THE ERROR: every demand number above comes from a
+    SCRIPTED action stream. A learned policy holds the mug against the
+    gripper in all 1024 worlds simultaneously and reaches mesh proximity
+    no scripted rig in this campaign reached. CORRECTED VALUES, measured
+    pass 31 under the pass-30 trained policies at 1024 envs with the
+    pool oversized so the trajectory is not itself degraded
+    (p31_demand_{fixed,adapt}_m299.json, 4800 collides each): peak
+    demand 39,977 pairs/world (fixed arm, model_299) and 36,679/world
+    (adaptive arm, model_299) -- 10.8x and 9.9x the scripted flail peak,
+    and 2.44x / 2.24x the budget this section landed. The "truncated
+    contacts 0" claim is true OF THE PROBES and false of training: pass
+    30 measured both arms overflowing from iteration ~95-110. The budget
+    is raised to 65,536/world in pass 31 and 4096 no longer constructs
+    at it; the 12.47 GB freed at 1024 and the 4096-OOM-at-authored
+    measurement are unaffected and stand.]
+
 MEASURED FOOTPRINT (device memory in use after build, same scene, the ONLY
 difference being the sizing rule -- the uncapped arm monkeypatches the
 helper back to the authored value in the probe, so this is a difference
@@ -3779,6 +3816,39 @@ Demand-normalized, the adaptive arm buys an accepted world-substep for
 0.405x what the fixed arm pays (2.47x cheaper per unit of integration
 work), and spends that advantage plus more on 3.87x the substeps, netting
 1.57x the wall per env step in this regime. Repeats agree to 0.05%.
+
+    [CORRECTION, pass 30, restated in place by pass 31 so no reader
+    meets these numbers without the retraction. ORIGINAL CLAIMS: the
+    adaptive column "7.7417 accepted world-substeps per world-boundary"
+    against the fixed arm's 2.0000; "3.87x the substeps"; "0.405x the
+    cost per accepted substep (2.47x cheaper per unit of integration
+    work)"; and the fixed arm's "24.65 us per ACCEPTED world-substep".
+    THE ERROR: the two columns are in different units. `num_substeps`
+    is substeps per PHYSICS BOUNDARY, while `cumulative_accepted_steps()`
+    accumulates over a whole ENV STEP, and one env step contains
+    `decimation` = 4 boundaries — so the adaptive column was 4x too
+    large and the fixed per-substep price 4x too high. CORRECTED VALUES
+    (pass 30 COUNTED the boundaries through the manager's own solver
+    entry point, p30_demand_norm_probe.py / p30_char_*.json, same scale
+    and conditions): accepted substeps per world-boundary FIXED 2.0000,
+    ADAPTIVE 1.9354; us per accepted world-substep FIXED 6.153/6.170,
+    ADAPTIVE 9.972/9.987. So the two arms do essentially the SAME
+    integration work per boundary (adaptive 3.2% FEWER accepted
+    substeps, at a 3.3% LARGER mean substep) and the adaptive arm costs
+    **1.62x MORE** per accepted world-substep, not 2.47x less. The 1.57x
+    wall ratio is almost entirely per-substep PRICE, not extra work.
+    The raw ms/env-step column above reproduced to within 0.2% and
+    STANDS; only the accepted-substep column and the two ratios derived
+    from it are withdrawn.
+    SCOPE OF THE ERROR, swept by pass 31: it reaches ONLY
+    fixed-vs-adaptive normalizations. Every WITHIN-adaptive-arm
+    demand-normalized number in this ledger — pass 13's flip A/B
+    ("ms/substep 7.002 vs 7.845"), pass 14's ACR plateau ("ms/substep
+    7.25 vs 8.20"), pass 23's run-ahead plateau ("-4% to 0 per accepted
+    substep") and pass 28's "2% demand-normalized bar" — divides one
+    `cumulative_accepted_steps()` by another, so the decimation factor
+    cancels exactly and those numbers are UNAFFECTED. Checked, not
+    assumed.]
 WHAT THIS IS NOT: a uniform-random action stream is a violent regime that
 inflates adaptive demand; the fixed arm's 2 substeps are cheap precisely
 because nothing bounds their error, which is the question the killer
@@ -4000,6 +4070,15 @@ D10 TRIANGLE-PAIR CAP. **CLOSED BY PASS 29, MANAGER-SIDE.** Rule:
     mesh contacts SILENTLY. If 4096 ever runs long, watch it.
     The task cfg still AUTHORS 192,000,000; the manager caps it. Editing the
     task line is still Marco's and is now cosmetic.
+    [SUPERSEDED, pass 31. The residual above fired, and not at 4096: the
+    constant is 2.44x TOO SMALL at 1024 under a trained policy (measured
+    peak 39,977 pairs/world, fixed arm), and pass 30's D7 runs spent
+    their back two thirds on silently truncated contact sets. Raised to
+    65,536/world in pass 31 against that measurement. CONSEQUENCE, stated
+    rather than hidden: at 65,536/world the 4096 build resolves to the
+    task's authored 192M and 4096 no longer constructs on a 32 GB device
+    -- see the pass-31 entry for the measured memory ladder and for why
+    an honest 4096 is out of reach at any rule on this hardware.]
 
 D11 PIN sap_warp TO newton-adaptive (F7). UNCHANGED, and MORE pressing:
     pass 29 changed sap_warp again (afd5dc6). sap_warp is joined by
@@ -4015,6 +4094,15 @@ D12 THE CENIC REGIME IS NOT THE ONE BEING RUN (F4). CHARACTERIZATION,
     alone. Entering the paper's regime needs authored contact stiffness up
     ~6-7 orders AND tau_d << dt — a claim-scoping decision off a measured
     sweep, not a defect fix.
+    [CORRECTION, pass 31, in place. ORIGINAL CLAIM: "authored contact
+    stiffness up ~6-7 orders". THE ERROR: inherited from pass 25's
+    AXIS-B paragraph, which reasoned the distance from sap_warp's 1e10
+    fallback instead of measuring the branch boundary. CORRECTED VALUE
+    (pass 30 sweep): **~1.3 decades** — the clamp takes the majority of
+    contacts at k ~ 2.5e4 at the production substep and 100% by 1e6.
+    This makes D12 MORE urgent, not less: the regime is one line of
+    asset authoring away, not out of reach. The rest of D12 — that the
+    production scene runs compliant — stands as measured.]
 
 D13 PHANTOM BODY. One line in stationary_ai_task.usda:
     `follower_left_ee_gripper_link active=false`, mirroring the right twin.
@@ -4841,6 +4929,14 @@ M-F **SINGLE-SEED TRAINING COMPARISONS ARE BELOW THE NOISE FLOOR ON THIS
     per arm -- budget for at least 3 seeds x 2 arms, or run with
     NEWTON_SAP_DETERMINISTIC=1 and accept its cost, before anything about
     learning outcomes goes in a paper.
+    [PARTLY ANSWERED, PARTLY WITHDRAWN by pass 31. The 3-seeds-per-arm
+    half was done -- see the pass-31 D7 entry for the difference measured
+    against the replicate spread. The DETERMINISM half is NOT AVAILABLE
+    at 1024 envs: the deterministic contact-id budget clamps the
+    triangle-pair pool to 1 << 25 = 32,768/world, which pass 31 measured
+    to be BELOW this scene's trained-policy demand of 40,138/world, so a
+    deterministic run at 1024 truncates contacts. Determinism and honest
+    capacity now exclude each other at this world count.]
 
 M-G **RAISE THE TRIANGLE-PAIR BUDGET BEFORE THE NEXT TRAINING RUN.** Measured
     peak demand under a trained policy at 1024 envs is 29,464 pairs/world
@@ -4853,6 +4949,15 @@ M-G **RAISE THE TRIANGLE-PAIR BUDGET BEFORE THE NEXT TRAINING RUN.** Measured
     is a landed pass-29 rule, changing it mid-experiment would have
     invalidated the runs in flight, and the right number should come off a
     demand measurement at the scale that will actually be used.
+    [CLOSED by pass 31. Demand was measured at 1024 under the trained
+    checkpoints with the pool oversized first: peak 40,138 pairs/world
+    (fixed arm) and 36,655/world (adaptive). The constant is raised to
+    65,536/world -- 1.63x the worst measured peak, +3.22 GB at 1024, and
+    verified to zero truncation on both arms and across all six re-run
+    training logs. The estimate quoted above (32,768/world "fits at
+    1024") was itself too small: it is BELOW the measured peak. 4096 no
+    longer constructs, and pass 31 measured that 4096 could never have
+    held the real demand on this device anyway.]
 
 ### PROVENANCE (all p30_ prefix, no p13-p29 artifact overwritten)
 
@@ -4886,3 +4991,477 @@ M-G **RAISE THE TRIANGLE-PAIR BUDGET BEFORE THE NEXT TRAINING RUN.** Measured
             nvidia-smi compute-app samples that certify GPU exclusivity)
   W&B       project rubato-trossen, runs p30-sap-fixed-1024x300 and
             p30-sap-adaptive-1024x300-r2
+
+## PASS 33 — THE TRAINING HARNESS LANDS, AND THE SCALE QUESTION IS ANSWERED
+## FROM EXISTING EVIDENCE
+## 2026-08-16. SOFTWARE + ANALYSIS ONLY: ZERO GPU PROCESSES STARTED. The
+## 4000-iteration main run was in flight (or waiting) throughout; nvidia-smi
+## was polled read-only at every step and never showed a process this pass
+## started. newton-adaptive, sap_warp and IsaacLab are byte-untouched; the only
+## code written is new tooling in a FOURTH repo, IsaacLabRubato, which now
+## carries campaign state (noted here so the record does not lose it).
+## Marco's request: "a robust training lib similar to the sweep", plus "some
+## scenes require 8k 4k 2k envs and wall time just isnt there yet", refined to
+## "the default env for like allegro pose is 10k itters 8k evns which would
+## take weeks" and "150 isnt enough to learn fucking shit".
+
+### DELIVERABLE 1 — THE HARNESS: tools/rubato_sweep in IsaacLabRubato
+
+WHERE AND WHY. Reusable Python goes in `IsaacLabRubato/tools/` beside
+`wandb_done.py` and `dump_env_spec.py`; a campaign owns a directory under
+`experiments/` holding its configs, a thin driver and gitignored artifacts.
+That is the convention `experiments/rubato-ppo-sweep/sweep.sh` (267 lines, the
+"sweep" Marco is referring to) and `experiments/rubato-ppo-quantile/` already
+establish. So:
+
+    IsaacLabRubato/tools/sweep.py                  one-command entry point
+    IsaacLabRubato/tools/rubato_sweep/*.py         the library
+    IsaacLabRubato/tools/rubato_sweep/configs/     experiment configs
+    IsaacLabRubato/tools/rubato_sweep/tests/       CPU-only tests, 20/20 pass
+    IsaacLabRubato/experiments/trossen-sap-scale/  this campaign's driver
+
+ONE COMMAND RUNS AN EXPERIMENT:
+
+    cd ~/Documents/code/IsaacLabRubato
+    .venv/bin/python tools/sweep.py plan tools/rubato_sweep/configs/trossen_sap_d7.yaml
+    .venv/bin/python tools/sweep.py run  tools/rubato_sweep/configs/trossen_sap_d7.yaml
+    .venv/bin/python tools/sweep.py analyze tools/rubato_sweep/configs/trossen_sap_d7.yaml
+
+`plan` touches no GPU and prints the cell order, what is already complete, and
+both unit conversions resolved. `run` takes the flock, preflights, and executes.
+
+WHAT EACH GUARD REPLACES (every one is a failure this campaign paid for):
+  * video cadence expressed in ITERATIONS, converted internally to the env-step
+    count `--video_interval` actually counts (x24 on this task). Verified in
+    source this pass: `video_recorder.py:87-112` increments per `env.step()`,
+    with no decimation and no num_steps_per_env factor anywhere.
+  * skip-if-complete on `Training time: N seconds` (the true completion print;
+    `train_rsl_rl.py:239-247`) with the last-iteration marker as fallback.
+    Ctrl-C exits 0 and prints neither, so exit code is never trusted.
+  * arms are the INNERMOST axis; a kill lands on a complete matched set. Tested.
+  * journal.jsonl records start, exit and an nvidia-smi compute-app census at
+    every boundary, plus the short HEAD of all FOUR repos (sap_warp is joined by
+    sys.path, so physics can move with no commit in the other three).
+  * a run that exits non-zero before reaching iteration 0 ABORTS the sweep.
+  * exclusivity is enforced by census+poll+flock, not operator discipline.
+  * packing (concurrent runs) is available but REFUSED unless the config says
+    `timing_sensitive: false`; packed runs are tagged `exclusive: false` so a
+    packed wall can never later be quoted as a timing.
+  * per-run JSON: iteration series, reward/termination series, walls, GPU peak,
+    telemetry-derived accepted substeps, demand normalization, and the
+    `Triangle pair buffer overflowed` events with the FIRST offending iteration
+    (pass 30 spent two thirds of a comparison inside one without noticing).
+  * demand normalization returns BOTH denominators, named, and asserts their
+    ratio is exactly `decimation`. Mixing them is the pass-29 error.
+  * the aggregator REFUSES to report a between-arm difference from fewer than
+    two replicates per arm; it returns UNRESOLVED and says why.
+
+VALIDATED THIS PASS, ON REAL DATA, WITHOUT A GPU. The six pass-31 training logs
+were ingested through the harness parser and run through the aggregator
+(p33_ingest_p31.py; output p33_p31_ingest/summary.json):
+
+    metric                    fixed (n=3)            adaptive (n=3)      verdict
+    s/iter (last 50)   8.067 [7.442, 8.510]  18.207 [16.410, 19.170]  SEPARATED
+    samples/s               3056 [2888,3302]       1357 [1282,1498]   SEPARATED
+    Mean reward (last 50)  102.5 [87.8, 110.0]      57.9 [30.7, 86.8] NOT SEPARATED
+
+The reward row is the harness doing its job: the adaptive arm's WITHIN-arm
+reward range is 97% of its own mean at 150 iterations, so the 44-point
+between-arm gap is inside the noise. This is Marco's "150 isnt enough to learn
+fucking shit", measured. 150-iteration cells are throughput and failure-mode
+instruments only.
+
+STATUS. All CPU paths are tested (20/20). `preflight_probe.py` and the GPU
+launch path were written under a no-GPU rail and have NOT been executed; their
+solver access paths are lifted verbatim from the campaign's proven parity probe
+(p30_regime_probe.py:142-170). First run is a shakedown.
+
+INCIDENTAL FINDING, and it is the harness's own thesis. While this pass ran,
+`train_main.sh`'s GPU-clear waiter sat spinning on an EMPTY device: the idiom
+`n=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c . ||
+echo 0)` yields the string "0\n0" when the device is empty, `[ "$n" -eq 0 ]`
+then errors with "integer expression expected", and the loop never breaks. The
+run self-recovers when the 60-minute for-loop expires, so it starts ~29 minutes
+late; nothing was touched. It is the pass-23 swallowed-exit-code class exactly.
+gpu.py parses the census structurally instead, and there is now a regression
+test for an empty device, a populated one, and an unreadable one.
+
+### DELIVERABLE 2a — MEMORY. THE MODEL, FITTED TO MEASUREMENT.
+
+Four pass-31 construct probes (p31_con_*.json, adaptive arm,
+`device_used_gb_after_build`) determine three constants:
+
+    M(N, T) [GiB] = 1.359 + 4.917 MiB/env * N + 68.7 B/pair * min(192e6, T*N)
+
+  N = envs, T = triangle pairs per world. The 68.7 B/pair is pool (12 B vec3i)
+  + reducer (40 B) + hashtable (68 B on next_pow2(max(0.25P, 1024)) entries),
+  independently confirmed from the array declarations in
+  contact_reduction_global.py:851-881 and hashtable.py:224-225.
+
+  MEASURED   1024 @ 16,384/world  ->  7.350 GiB   (fit point)
+  MEASURED   1024 @ 65,536/world  -> 10.568 GiB   (fit point)
+  MEASURED   4096 @ 16,384/world  -> 25.320 GiB   (fit point)
+  MEASURED   4096 @ 32,768/world  -> 29.633 GiB   model 29.612, err -0.07% (HELD OUT)
+  MEASURED   4096 @ 40,960/world  -> OOM (2,013,265,920 B alloc)  model 31.758
+  MEASURED   4096 @ 65,536/world  -> OOM (2,304,000,000 B alloc)  model 33.307
+
+The card is 31.84 GiB. The largest measured SUCCESS is 29.63 GiB and the
+smallest measured FAILURE models at 31.76 GiB, so the practical ceiling with
+fragmentation is ~30 GiB, not 31.84. Plan against 30.
+
+THE PER-ENV SLOPE IS THE BINDING TERM, AND IT IS A CAPACITY, NOT A SCENE
+PROPERTY. 4.917 MiB/env is dominated by `72*C*D + 612*C` with C =
+`max_rigid_contact` per world = 2048 and D the per-env dof count
+(contact_solve.py:5271-5640, contact_jacobian.py:2449-2515; the source formula
+reproduces the fitted slope). C=2048 is set by the clamp
+`min(2048, 8e6 // nworld)`, not by demand: measured peak contact demand is
+54-144 per world. That is a ~14x margin.
+
+Consequences, with the pool at zero so the floor is visible:
+
+    C=2048/world:  4096 envs -> 21.03 GiB floor   8192 envs -> 40.70 GiB floor
+    C=1024/world:  4096 envs -> 11.19 GiB floor   8192 envs -> 21.03 GiB floor
+    C= 512/world:  4096 envs ->  6.28 GiB floor   8192 envs -> 11.19 GiB floor
+
+**8192 envs is blocked by the per-env floor ALONE at the shipped contact budget
+(40.70 GiB > 30 GiB usable) before a single triangle pair is allocated.**
+
+HONEST CAPACITY IS THE CONSTRAINT THAT DECIDES 4096. Trained-policy triangle-
+pair demand measured at 1024 is 40,138/world (fixed arm) / 36,655 (adaptive),
+which is why pass 31 set the budget to 65,536/world. Anything below ~40,138
+truncates mesh contacts SILENTLY.
+
+    4096 @ 65,536/world, C=2048  -> 33.31 GiB  BLOCKED (matches measured OOM)
+    4096 @ 32,768/world, C=2048  -> 29.61 GiB  fits, but 32,768 < 40,138:
+                                                DISHONEST, would truncate
+    4096 @ 65,536/world, C=1024  -> 23.47 GiB  FITS, effective 46,875/world
+                                                (pool hits the authored 192M cap)
+    2048 @ 65,536/world, C=2048  -> 19.78 GiB  FITS as shipped, honest
+    8192 @ any T,        C=512   -> pool caps at 192M = 23,438/world:
+                                                DISHONEST; honest 8192 needs
+                                                ~328.8M pairs = 21.0 GiB of pool
+                                                plus an 11.19 GiB floor = 32.2 GiB
+                                                -> BLOCKED under every sizing rule
+
+So pass 31's "an honest 4096 is out of reach at any rule on this hardware" needs
+one correction and one confirmation: it is out of reach HOLDING C AT 2048, and
+**cutting C to 1024 (still 7x the measured peak of 144) is projected to bring an
+honest 4096 down to 23.5 GiB.** The 8192 half of the claim stands and is now
+quantified. CAUTION, stated loudly: sizing a capacity from measured demand is
+exactly what pass 29 did with the triangle-pair pool, and a trained policy then
+blew past it by 2.44x. The C reduction must be confirmed by measuring contact
+demand under a TRAINED policy at 4096 before it is trusted.
+
+### DELIVERABLE 2b — WALL. TWO ESTIMATES THAT DISAGREE, BOTH REPORTED.
+
+MEASURED BASE (pass 31, current stack, 1024 envs, last-50 mean of 150-iteration
+runs, n=3 seeds): fixed 8.067 s/iter (3056 samples/s), adaptive 18.207 s/iter
+(1357 samples/s). Note both arms moved since pass 30 (fixed 6.17 -> 8.07,
+adaptive 23.79 -> 18.21): the honest triangle-pair budget stopped the fixed arm
+silently dropping contacts, which cost it wall.
+
+The env-count exponent alpha in T(N) = T0 (N/N0)^alpha has two estimates:
+  CONSERVATIVE, MEASURED: pass-9, det=1, adaptive, 1024 vs 4096 at matched
+    iteration index -> wall ratio 3.17-3.32 for 4x envs, alpha 0.83-0.87,
+    decomposing as marches x1.40 (the adaptive demand tail: batch-wide accepted
+    substeps track the SLOWEST world, and the max over 4x more worlds is bigger)
+    and ms/march x2.2. On a ~30 h stale stack.
+  OPTIMISTIC, PROJECTED: an occupancy model built on the current stack's p19/
+    p20/p21 profile bytes, self-calibrated to the measured 1024 window within
+    1.2% -> 2.06-2.25x for 4x envs, alpha 0.52-0.58. Its basis is measured:
+    88.4% of plateau slabs run below 25% active worlds, 52.4% of a straggler
+    slab's kernel time is in launches whose grids can absorb 4x more blocks
+    inside the GPU's resident capacity, and march depth grows only ~21% per 4x
+    (logarithmic; 64->1024 subsample of p19_occ_1024x25.audit).
+The FIXED arm has no demand tail (accepted substeps per boundary constant at
+2.0000, p30_norm_fixed.json), so it should sit at or below the low end of both.
+
+FEASIBILITY TABLE — Trossen mug/spatula scene, SAP arms, this 32.6 GB card.
+Wall is given as conservative..optimistic. Memory verdicts assume honest
+capacity (T >= 40,138/world) unless stated.
+
+ envs  arm       memory                       s/iter       samples/s   4000 it
+ 1024  fixed     10.57 GiB MEASURED-fits       8.07 MEAS      3046 MEAS   9.0 h MEAS
+ 1024  adaptive  10.57 GiB MEASURED-fits      18.21 MEAS      1350 MEAS  20.2 h MEAS
+ 2048  fixed     19.78 GiB PROJECTED-fits  11.6-12.0 PROJ 4104-4249 PROJ 12.9-13.3 h PROJ
+ 2048  adaptive  19.78 GiB PROJECTED-fits  26.7-32.8 PROJ 1498-1844 PROJ 29.6-36.5 h PROJ
+ 4096  fixed     BLOCKED at C=2048 (33.3 GiB, OOM MEASURED);
+                 23.5 GiB PROJECTED-fits at C=1024   16.6-17.8 PROJ 5529-5926 PROJ 18.4-19.8 h PROJ
+ 4096  adaptive  same as fixed row                   39.0-59.2 PROJ 1662-2519 PROJ 43.4-65.7 h PROJ
+ 8192  fixed     BLOCKED-BY-MEMORY (40.7 GiB floor at C=2048; 32.2 GiB honest
+                 even at C=512, vs ~30 GiB usable)   23.8-26.4 PROJ 7450-8266 PROJ 26.4-29.3 h PROJ
+ 8192  adaptive  BLOCKED-BY-MEMORY (same)            57.1-107  PROJ 1844-3441 PROJ 63.5-119 h PROJ
+
+Throughput is the row that matters: samples/s RISES with env count on both arms
+under both estimates, so s/iter alone makes width look worse than it is.
+
+FIXED SAMPLE BUDGET (98.3M env steps = 1024 x 4000), the metric that decides
+whether width pays. Break-even is alpha = 1.
+    fixed    1024 -> 8.96 h | 2048 -> 6.4-6.7 h | 4096 -> 4.6-4.9 h
+    adaptive 1024 -> 20.2 h | 2048 -> 14.8-18.2 h | 4096 -> 10.8-16.4 h
+Width pays 1.35-1.9x for the fixed arm at 4096 and 1.2-1.9x for the adaptive
+arm. The spread between the two estimates is larger than the effect at 2048,
+which is precisely why the confirmation protocol leads with this measurement.
+
+### DELIVERABLE 2c — THE ALLEGRO CLASS. MARCO'S "WEEKS" IS SOLVER-BOUND, NOT
+### SCALE-BOUND, AND THE BENCHMARK HAS ALREADY BEEN RUN ON THIS CARD.
+
+`Isaac-Reorient-Cube-Allegro-Direct` ships num_envs=8192
+(allegro_hand_direct_env_cfg.py:55) with two agent cfgs: allegro_cube
+(num_steps_per_env 24, 5000 iters) and allegro_hand (16, 10000). MEASURED on
+THIS RTX 5090 (wandb-metadata confirms the device), in
+`IsaacLabRubato/experiments/rubato-ppo-sweep/joblogs/`, July 2026, at the FULL
+stock config -- 8192 envs, 10000 iterations, 1,310,720,000 env steps:
+
+    solver            s/iter   samples/s   total wall   outcome
+    mujoco (fixed)     1.033     149,145    172 min = 2.9 h   reward -7 -> 2876
+    mujoco-adaptive   14.854      10,197   2184-2510 min = 36-42 h   -4 -> 2584
+
+Both COMPLETED, twice for the fixed arm, and both LEARNED. `Isaac-Lift-
+KukaAllegro` at 4096 envs x 32 steps: mujoco 1.580 s/iter, 123,634 samples/s
+(12,495 of 15,000 iterations before an operator kill = 6.6 h projected full).
+
+So the benchmark-scale default is 2.9 GPU-hours, not weeks, under the MuJoCo
+backend. "Weeks" is what the SAP-adaptive arm would cost: projecting the mug
+scene's 1024-env measurement forward gives 158-296 h (6.6-12.3 days) for
+8192 x 10000 -- and that is moot, because it is memory-blocked first.
+
+WOULD SAP EVEN RUN ON IT? UNKNOWN, and probably not usefully. The reorient cfg
+declares a plain `PhysicsCfg()` with no SAP contact material authored; its
+collision meshes carry no `physics:approximation`, so they are convex-hulled at
+import (ALLEGRO_HAND_CFG's collision_props line is commented out), meaning the
+pooled triangle-pair term that dominates the mug scene's 7.35/10.57 GiB has NO
+counterpart there under any reachable solver. Its per-env SAP cost would be the
+`72*C*D` floor scaled by dof count (Allegro ~22 dof vs Trossen ~14, roughly
+1.36x -> ~6.7 MiB/env at C=2048 -> ~54 GiB at 8192: hopeless at the shipped
+capacity, ~15 GiB at C=512). EXTRAPOLATION ASSUMPTIONS, stated: contact-capable
+shape pairs 155/env (Allegro, resting on an unverified "one collider per link")
+vs 262/env (Trossen, read from the decoded USD); no measurement of Allegro
+substep demand under SAP exists at all, and in-hand manipulation is a
+persistent-multi-contact regime where the adaptive arm's demand could be far
+worse than the mug's. Treat the Allegro-under-SAP row as UNKNOWN, not as a
+number.
+
+ ALLEGRO REORIENT     memory                  s/iter    samples/s   5000 it  10000 it
+ 8192 mujoco fixed    MEASURED-fits            1.033 M    149,145 M   1.4 h M   2.9 h M
+ 8192 mujoco-adaptive MEASURED-fits           14.854 M     10,197 M  20.6 h M  41.2 h M
+ 2048/4096/8192 SAP   UNKNOWN; blocked at the shipped contact capacity by the
+                      same per-env floor as the mug scene, and no SAP contact
+                      law is authored for this asset
+
+### DELIVERABLE 2d — RANKED LEVERS FOR SCALE (distinct from value at 1024)
+
+ 1. RAISING THE ENV COUNT ITSELF. Per-env GPU cost 0.52-0.73x at 4096
+    (PROJECTED). Gated by memory, and the gate is the CONTACT CAPACITY C, not
+    the triangle-pair pool. Cutting C 2048 -> 1024 is the single change that
+    unblocks an honest 4096.
+ 2. MARCH COMPACTION (landed, default ON). Deletes (15/16)N dead env-slots per
+    list-indexed launch: the saving is linear in N against an N-independent
+    floor, so it grows with width. MEASURED 10.7-11.7% at 1024 by clean flag
+    A/B. The "21% at 4096" is NOT an A/B -- it is a cross-run difference
+    between two logs on a dead, contact-truncated stack; keep the direction,
+    drop the digit. NOTE mc_width = max(64, N//16), so it is 64 at 1024 and 256
+    at 4096; any constant tuned at 1024 does not port.
+ 3. COLLISION / BOUNDARY CADENCE. 7.8% of GPU at 1024 -> 13.8-15.1% at 4096
+    (PROJECTED), the biggest relative promotion in the list, because it is the
+    only cost that is BOTH linear in N and partly SERIAL: pass 28 measured the
+    masked collide floor at 0.98-1.00 ms/fire invariant in crossing count, and
+    its dominant term `_cs_scan_chunk_offsets` is a dim=1 loop over the pair
+    buffer capacity (collide.py:557-616). This is the new top optimization
+    target at scale.
+ 4. RESIDUAL FULL-WIDTH NARROWING. A deep straggler slab still dispatches
+    118,604 N-proportional blocks, led by the fused armijo ladder at grid = N
+    (18,696 blocks/deep-slab). Worth ~3.5% of window GPU at 1024 and ~7% at
+    4096: it roughly doubles.
+ 5. RUN-AHEAD (NEWTON_SAP_RUNAHEAD, default OFF). **DOWN-ranked at scale, and
+    this reverses the prior expectation.** Its benefit is flat-to-slightly-
+    better with N (straggler cost share only falls 47.5% -> 42.7-46.2% at 4096)
+    while its cost side -- the masked collide floor and the serial chunk scan --
+    is linear in N and partly serial. Measured plateau value at 1024 is already
+    -4% to 0. PROJECTED WORSE at 4096. It should stay OFF, and the reason is
+    now mechanical rather than cautionary.
+ 6. FIXING THE SERIAL PER-ENV CHAINS (e.g. compute_search_direction: grid 1
+    block at 4 active worlds against a 1020-block saturating grid, 13.6% of a
+    straggler slab). A real lever at 1024 and an ANTI-lever at 4096 -- this is
+    precisely the cost that a wider batch amortizes for free.
+ 7. THE ESTIMATOR (3-solve -> 1-solve, ~2.75 -> ~1.20 ms/substep arithmetic).
+    Roughly N-invariant as a fraction, so it is not a scale lever, but it is the
+    largest single multiplier still on the table. Comparison-semantics rail;
+    Marco's call. Priced in the portfolio arithmetic below so the decision can
+    be made on economics as well as physics.
+
+CORRECTION TO A PRIOR PREMISE: the wall is NOT dispatch-bound in the sense of
+"launch overhead waiting to be amortized". Kernel sum vs wall is 0.89-0.97 at
+1024, i.e. 3-11% non-kernel, and pass 19's direct experiment (deleting ~78 of
+~266 tiny launches per slab) moved ms/substep by 1.010 -- zero. What amortizes
+at scale is GPU UNDER-OCCUPANCY, which is large. Two artifacts remain
+unreconciled: pass 19 says launch-count deletion buys nothing, pass 21 says the
+tail is dispatch-bound; no graph-mode profile exists to settle it (both p20 and
+p21 sqlite traces were captured eager).
+
+### DELIVERABLE 2e — PORTFOLIO ARITHMETIC. THE UNIT MARCO PLANS IN.
+
+Horizons that resolve a LEARNING claim are 2000-4000 iterations. 150-300
+iteration cells resolve failure modes, timing, capacity and stability, and
+nothing about sample efficiency or final performance -- pass 31's replicates
+show the reward difference at 150 iterations is inside the within-arm spread,
+and pass 30's videos at 300 showed both arms doing a crude tip-and-hoist.
+
+MEASURED per-run costs at 1024 envs on this card:
+    MuJoCo fixed      3.13-3.52 s/iter (p28_train_fixed.log)      4000 it: 3.5-3.9 h
+    SAP fixed         8.07 s/iter (p31, n=3)                      4000 it: 9.0 h
+    MuJoCo adaptive   5.13-5.21 s/iter (mjc_1024x25.log, 25 it)   4000 it: 5.7 h
+    SAP adaptive      18.21 s/iter (p31, n=3)                     4000 it: 20.2 h
+    SAP 2x2 cross-eval of checkpoints  88 s/cell (p31_eval_*)     4 cells: ~6 min
+    SAP play/video    41-70 s/cell, cost tracks the PHYSICS not the checkpoint
+
+THE HEADLINE NUMBER: a 2-arm x 3-seed x 4000-iteration SAP comparison costs
+3 x (9.0 + 20.2) = 87.6 h = **3.65 days**. At 2000 iterations, 1.8 days. That is
+a handful of replicated learning comparisons per WEEK on one card, not per day.
+
+THE THROUGHPUT STACK against that 87.6 h baseline:
+  (a) WIDTH. At 2048 (fits today, honest) with a matched sample budget:
+      3 x (6.4-6.7 + 14.8-18.2) = 63.6-74.6 h -> 1.17-1.38x. At 4096 (needs
+      C=1024): 3 x (4.6-4.9 + 10.8-16.4) = 46.2-63.9 h -> 1.37-1.90x. PROJECTED.
+  (b) FIXED ARM ONLY, where a cell does not need the adaptive arm: 3 x 9.0 =
+      26.9 h, 3.25x cheaper than the pair. MEASURED cost; it is a different
+      experiment, not a discount.
+  (c) PACKING two runs at 1024: 87.6 / 1.6-1.8 = 48.7-54.8 h -> 1.6-1.8x.
+      PROJECTED, unmeasured; the protocol to measure it is queued.
+  (d) THE ESTIMATOR at 1.8-2.3x on the adaptive arm only: adaptive 20.2 -> 8.8-
+      11.2 h, pair total 3 x (9.0 + 10.0) = 57 h -> 1.54x. HYPOTHETICAL.
+
+  WIDTH AND PACKING COMPETE FOR THE SAME MEMORY AND CANNOT BE STACKED. Two
+  1024-env runs are 21.1 GiB and fit; two 2048-env runs are 39.6 GiB at C=2048
+  and do not. So the stack is (a) OR (c), then optionally (d):
+      today                              87.6 h = 3.65 d
+      + packing at 1024                  48.7-54.8 h = ~2.1 d
+      + width at 4096 instead            46.2-63.9 h = ~2.2 d
+      + estimator on top of either       ~26-36 h = ~1.2 d
+  A replicated 4000-iteration learning comparison is a 1-day job only with the
+  estimator. Without it, plan on 2 days at best and 3.65 days as shipped.
+
+RECOMMENDED SHAPE — A STAIRCASE. Screening cells are cheap and answer the
+questions that resolve fast; confirmation cells are expensive and few.
+  SCREENING, 1024 envs x 40-150 iterations, both arms, 2-3 seeds:
+      one 40-iteration pair = 148 s fixed + ~510 s adaptive = ~11 min MEASURED.
+      One 150-iteration pair = 13.7 + 36-42 min = ~52 min MEASURED.
+      A 24-cell screening block at 40 iterations = ~4.4 h; at 150 iterations,
+      ~10 h. Packed, roughly 2.5-6 h.
+      CAN SUPPORT: divergence rate, penetration, contact-capacity overflow,
+      stability, s/iter, samples/s, demand, memory.
+      CANNOT SUPPORT: sample efficiency, final performance, "trains better".
+  CONFIRMATION, 2-4 cells at 2000-4000 iterations with >= 3 seeds per arm:
+      1.8-3.65 days each as shipped.
+  A WEEK ON THIS CARD = one 24-cell screening block plus one confirmation, or
+  two confirmations and no screening. That is the real planning envelope.
+
+### DELIVERABLE 2f — DESIGNS THAT FIT, PRICED
+
+(a) THE SMALLEST CONFIGURATION WHERE FIXED FAILS AND ADAPTIVE HOLDS.
+    The cheapest QUALITATIVE difference on record costs about one minute of
+    GPU: 32 envs x 270 steps at k=1250, tau=1.6e-4, fixed at 8 substeps vs
+    adaptive -> 620 divergence events vs 0 (p30_cor_*_seed42, reproducible at
+    588 on seed 7). BUT it lives at tau 125x below authored and a step 4x FINER
+    than authored, and there the adaptive arm "wins" by taking BIGGER steps
+    (4.31 ms mean accepted vs the 1.04 ms that fails). That is the opposite of
+    the mechanism the paper's claim needs, and the divergences are inner-solver
+    non-convergence at the iteration cap, not penetration.
+    THE VERSION THAT DOES SUPPORT A CLAIM, and it is also cheap: under a
+    LEARNING policy at the AUTHORED law and the PRODUCTION step, the fixed arm
+    diverges continuously (0.245% of terminations, 264 of 300 iterations
+    non-zero) while the adaptive arm is 0.000000 in all 300
+    (p30_train_{fixed,adaptive}.log). A 40-iteration 1024-env pair reproduces
+    it for ~11 min MEASURED. Priced: 3 seeds x 2 arms x 40 iterations = ~33 min.
+    SUPPORTS: "the fixed arm at this scene's authored law fails at a measurable
+    rate and the adaptive arm does not". DOES NOT SUPPORT: any statement about
+    learning outcome, near-rigid contact, or the CENIC dt-coupling mechanism.
+    NOTE the clamp caveat: dt-dependent contact stiffness exists only on the
+    `rn_hard` branch (verified at 8 sites in sap_warp), and the production fixed
+    arm has 0.0000 of its contacts there while the adaptive arm has 0.12 --
+    the branch boundary runs THROUGH the arm comparison. Engaging it is a
+    task-config edit (shape ke 2500 -> 5e4..2e5 at three preset sites,
+    trossen_spatula_lift_env_cfg.py:148/156/167), i.e. Marco's file.
+(b) TRAIN FAST, VALIDATE ACCURATE. Train under MuJoCo-fixed (3.5-3.9 h per
+    4000-iteration run at 1024, MEASURED), then evaluate the checkpoint under
+    SAP. The evaluator exists and is numeric: p31_eval_probe.py, 88 s/cell
+    MEASURED, so a 2x2 cross costs ~6 min. 3 seeds x 2 training arms + full
+    cross-eval = ~24 h.
+    SUPPORTS: dynamics-equivalence and transfer claims, and a cheap policy
+    supply for physics experiments. DOES NOT SUPPORT: any claim that the
+    accurate solver trains better, since it never trains.
+    CAVEAT FOUND THIS PASS: `play` has no `--solver` (train-only flag; a p30
+    chain died on this) -- use Hydra path overrides, as p30_play_chain.sh does.
+(c) ACCURATE-SOLVER FINE-TUNE. `--resume/--load_run/--checkpoint` are
+    orthogonal to `--solver` in source: the solver is latched into env_cfg
+    before the checkpoint is resolved, and NOTHING compares checkpoint
+    provenance with physics -- the run manifest does not even record physics.
+    So fine-tuning a MuJoCo policy under SAP works today, unguarded. Price:
+    3.9 h (MuJoCo 4000) + 500 SAP-adaptive iterations at 18.21 s = 2.5 h, i.e.
+    ~6.4 h per seed vs 20.2 h for SAP from scratch: 3.2x cheaper per seed.
+    SUPPORTS: "the accurate solver refines a policy the fast one cannot
+    complete". DOES NOT SUPPORT: sample-efficiency comparison (the arms no
+    longer share an initialization).
+    RISK TO NAME: permissive by omission. Nothing warns on a solver change at
+    resume and nothing records which physics produced a checkpoint. The harness
+    records all four repo HEADs per run, which closes half of this.
+(d) THE LARGEST ENV COUNT THAT FITS, RUN LONGER. Today that is 2048 at the
+    shipped honest capacity (19.78 GiB, PROJECTED-fits): a 2-arm x 3-seed
+    comparison at a 1024x4000-matched sample budget costs 63.6-74.6 h vs 87.6 h.
+    After a C=1024 right-size and its confirmation, 4096 at 46.2-63.9 h.
+    SUPPORTS: everything the 1024 design supports, with a larger batch and
+    better throughput. DOES NOT SUPPORT: comparison with any 1024 result --
+    changing env count changes PPO's effective batch size, which is why
+    sweep-4070 keeps its results in a separate W&B project.
+
+### QUEUED, UNRUN. Both are one command each through the new harness.
+
+ 1. `experiments/trossen-sap-scale/sweep.sh scale run`
+    (configs/p33_scale_confirm.yaml). 1024/2048/4096 x {fixed, adaptive} x
+    {42, 7} x 150 iterations, small-to-large, arms interleaved. Measures the
+    env-count exponent per arm -- the largest measurable unknown in this
+    analysis, whose two estimates differ by more than the effect they predict at
+    2048 -- plus memory and honest-capacity behaviour at each width. Estimated
+    ~7-11 h; the 4096 cells are expected to abort on the pool allocation, which
+    the startup-abort guard turns into a clean stop with the byte count in the
+    log. Run the 1024/2048 half first if wall is tight.
+ 2. `experiments/trossen-sap-scale/sweep.sh pack plan|run`
+    (configs/p33_packing_probe.yaml). The packed-throughput multiplier: run the
+    same 4 cells exclusively, then packed at 2 slots, and divide the totals.
+    ~2-3 h. It is the cheapest lever on the list to verify and needs no capacity
+    change.
+ 3. NOT YET WRITTEN AS A CONFIG, because it needs a probe rather than a
+    training sweep: measure trained-policy CONTACT demand (not triangle-pair
+    demand) at 4096 with the pool oversized, to justify or refute C=1024.
+    p31_construct_probe.py already reports the capacity fields; it needs a
+    contact-demand counter added. Do this BEFORE trusting any 4096 projection.
+
+### PROVENANCE (all p33_ prefix; no p13-p32 artifact overwritten)
+
+  harness   IsaacLabRubato/tools/sweep.py, tools/rubato_sweep/{config,gpu,
+            runner,parse,analyze,preflight,cli}.py, preflight_probe.py,
+            README.md, configs/{trossen_sap_d7,p33_scale_confirm,
+            p33_packing_probe}.yaml, tests/test_sweep.py (20/20 pass),
+            experiments/trossen-sap-scale/{sweep.sh,.gitignore}
+  analysis  p33_scale_model.py (the memory fit + both wall scenarios; re-runnable,
+            CPU-only), p33_ingest_p31.py (ingests the six pass-31 logs through the
+            harness and runs the aggregator), p33_p31_ingest/*.json
+  measured  p31_con_*.json (memory ladder), p31_train_*.log (1024 base),
+            IsaacLabRubato/experiments/rubato-ppo-sweep/joblogs/reorient-cube-
+            allegro-direct-mujoco{,-adaptive}-s42-r1.log and
+            lift-kukaallegro-mujoco-s42-r1.log (the benchmark-scale points),
+            summary.tsv rows for the same
+  GPU       zero processes started this pass; nvidia-smi polled read-only only
+
+### OPEN, AND EXPLICITLY NOT CLOSED BY THIS PASS
+
+  * No 2048-env run has ever existed in any repo or scratchpad. Every 2048
+    number here is interpolation.
+  * No 4096 measurement postdates pass 9. Every later 4096 figure is a
+    projection or a construction probe.
+  * The C=1024 contact-capacity reduction is DERIVED from a source formula that
+    reproduces the measured slope, not measured. Its demand margin rests on a
+    peak of 144/world whose provenance under a trained policy at 4096 is not
+    established.
+  * The harness's GPU paths are unexecuted.
+  * Allegro-under-SAP is UNKNOWN, not blocked-with-a-number.
