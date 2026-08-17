@@ -6259,7 +6259,7 @@ THE REST OF THE AUDIT, briefly, each verified in source:
     `NewtonContactSensorCfg` are constructed and stepped every tick; not one
     MDP term reads them. `pad_handle_contact` additionally targets
     `follower_left_carriage_.*` rather than the finger pads, so it would likely
-    be mis-targeted if it were ever wired up. Seven further non-contact MDP
+    be mistargeted if it were ever wired up. Seven further non-contact MDP
     functions are also unreferenced.
   * WHAT IS TRANSFER-FRIENDLY AND SHOULD BE KEPT: the 30 Hz control rate; the
     absolute-joint-position + binary-gripper interface; the vendor joint
@@ -6548,3 +6548,177 @@ config's header rather than applied.
   GPU              zero processes started this pass; nvidia-smi polled
                    read-only only, and it showed one process throughout: the
                    live 4000-iteration adaptive run.
+
+## PASS 36 — PROVENANCE AUDIT: WHAT THE CENIC PAPER SAYS, WHAT WE BUILT,
+## AND WHERE THE TWO PART COMPANY
+## 2026-08-16. SOURCE + LITERATURE ONLY: ZERO GPU PROCESSES STARTED. The
+## 4000-iteration main run (PID 2271848, 11129 MiB) was in flight throughout;
+## nvidia-smi was polled read-only and never showed a process this pass started.
+## NO CODE WAS CHANGED. The only files written are
+## tools/sap_cenic_provenance_audit.md and this entry.
+## Marco's request: "we did a lot of work on the solver i need you to determine
+## all changes made to the SAP solver, categorized by in line with CENIC paper
+## and our own changes."
+
+### DELIVERABLE — tools/sap_cenic_provenance_audit.md
+
+  A methods-section-grade document. Paper specification quoted from the source
+  LaTeX; every code claim carried to a file:line; every divergence quantified in
+  closed form. Counts: 17 FAITHFUL, 11 DIVERGENT, 9 physics-neutral additions,
+  12 physics-VISIBLE additions (6 of them default ON in the live run), 8 named
+  paper features not implemented. 17 sap_warp commits and 25 newton-adaptive
+  commits audited; ZERO upstream commits touch either SAP path.
+
+### THE PROVENANCE ANSWER, WHICH CHANGES WHAT "OUR CHANGE" MEANS
+
+  sap_warp is a FORK of github.com/sap-sim/sap_warp (AIVC Lab UCLA + TRI,
+  Apache-2.0), and the entire upstream repo at the fork point is FOUR commits
+  dated 2026-06-11, three of them documentation. The whole SAP solver -- convex
+  formulation, regularization, projection, line searches, Cholesky, collision,
+  loader -- arrives in one upstream commit 431adf2 (f1shel). Everything after
+  c0c861c is ours: 17 commits, 5810+/441-, all mardigiorgio.
+  newton-adaptive's SolverSAPAdaptive is 100% ours: of 492 commits since the
+  c336b7ae fork, 152 are ours and ~340 are merged upstream Newton, but the set
+  of non-mardigiorgio commits touching newton/_src/solvers/sap/ or
+  adaptive_boundary.py is EMPTY.
+  NOTE for the paper: newton/_src/geometry/broad_phase_sap.py is Sweep-And-Prune,
+  not Semi-Analytic Primal. Do not cite it as SAP-solver work.
+
+### THE TWO LOAD-BEARING ITEMS, BOTH RE-DERIVED FROM SCRATCH THIS PASS
+
+  (1) THE 4*PI^2 QUESTION IS SETTLED, AND OUR CODE IS RIGHT.
+      CENIC's printed Eq. (18), k = (1/(4 pi^2 beta^2)) m/dt^2, is INTERNALLY
+      INCONSISTENT. It contradicts (a) its own stated oscillator period beta*dt,
+      which forces k = 4 pi^2 m/(beta^2 dt^2); (b) its own tau = (beta/pi) dt,
+      which is the critical-damping value ONLY for that k; and (c) the source it
+      cites, arXiv:2110.10107, which states verbatim "k = 4 pi^2 m/(beta^2
+      dt^2)" and "R_n = beta^2/(4 pi^2) w" and its Eq. (29)
+      R_n = max(beta^2/(4pi^2)||W_ii||_rms, 1/(dt k (dt+tau_d))) -- which is
+      EXACTLY our code. The printed equation carries an inverted factor. Our
+      rn_hard = beta^2/(4 pi^2) w_i is FAITHFUL, not divergent.
+      Verified at all EIGHT contact-R sites (contact_solve.py 948/1180/1278/2760,
+      sap_helpers.py 2400/2475/2587/2660). FIVE are upstream 431adf2; THREE are
+      ours, added inside fused kernels by 3bff5c1 and a79539a -- and all three
+      are TEXTUALLY IDENTICAL to their upstream counterparts, same op order, same
+      dtype, so the fusions preserve R bitwise. That is checkable structure, not
+      a claim.
+      Had we used the printed form: R larger by 16 pi^4/(1+beta/pi) = 1182x at
+      beta=1, so the crossover would sit at ~21 N/m (NOT the ~98 N/m an earlier
+      pass quoted -- that number is superseded), i.e. 100% of contacts clamped,
+      contradicting the measured 11% near-rigid fraction.
+
+  (2) THE dt^-2 MECHANISM CANNOT OCCUR AT OUR AUTHORED TAU, AND THE PAPER NEVER
+      CLAIMED IT FOR CONTACT ANYWAY.
+      First, scope: "near-rigid" appears FOUR times in the CENIC paper and NEVER
+      in the contact section. Sec. IV-A says verbatim "For point contact,
+      stiffness is a user supplied parameter." The dt^-2 sentence in the Sec. V
+      intro is explicitly scoped "for limit and holonomic constraints". So the
+      dt^-2 CONTACT mechanism this campaign has been chasing is an SAP property,
+      not a CENIC contact claim. Any text saying "adaptive fixes penetration via
+      CENIC's dt^-2 contact-stiffness coupling" is wrong on the paper's own terms.
+      Second, magnitude: on the near-rigid branch R_n is dt-INDEPENDENT, so
+          k_eff = 1/(h(h+tau) R_n) = 4 pi^2/(beta^2 w h (h+tau))
+          d ln k_eff / d ln h = -(1 + h/(h+tau))
+      tau is a fixed MATERIAL value here: sap_contact_tau_d = 0.01 s per shape
+      (mjwarp_manager_cfg.py:231), doubled per pair by upstream solver_sap.py:956
+      (tau(shape0)+tau(shape1)), = 0.02 s effective, ~10x the step. That gives
+          -1.005 at h=0.1ms   -1.048 at 1ms   -1.094 at the 2.083ms production
+          step   -1.172 at the 4.15ms mean accepted step   -1.286 at 8ms
+      against -1.759 (beta=1) / -2 (beta<<pi) for the published law.
+      THE MEASURED -1.172 IS REPRODUCED TO FOUR FIGURES BY THIS CLOSED FORM at
+      h = 4.15 ms. Measurement and derivation corroborate; the mechanism is fully
+      explained by the fixed tau. Resting penetration correspondingly falls
+      LINEARLY not quadratically: 5.2 um at 1ms vs the paper's 0.33 um (16x),
+      11.4 um at 2.083ms vs 1.4 um (8x).
+      ATTRIBUTION: the CODE is upstream SAP Eq. (29), which does keep material
+      tau_d. The 0.01 s is OUR config. Not a code divergence; a parameter
+      divergence -- and it is the one that decides whether this implementation
+      can show the paper's mechanism at all. It cannot.
+
+### WHAT ELSE DIVERGES (all quantified in the document)
+
+  * FORMULATION. CENIC builds on the LAGGED member of ICF (normal impulse
+    lagged, Hunt & Crossley dissipation). We run SAP (both components implicit,
+    Kelvin-Voigt tau_d, analytic cone projection). A MODELLING difference that
+    does not vanish as dt -> 0. Inherited from upstream.
+  * ACR. Freezes the contact constitutive law at the attempt dt, s =
+    2(D+tau)/(D/2+tau) = 2.05..2.35 over our step range (2.345 at D = dt_outer;
+    the flat "2.34" on record is that endpoint, superseded by the formula).
+    Two framings, do not conflate: vs the law at D, rt/rn is INVARIANT (the point
+    of ACR); vs no-ACR at h, the SOFT branch -- ~89% of contacts -- gets rt/rn
+    larger by s, i.e. friction ~2.1-2.35x softer, and normal compliance likewise.
+    DEFAULT ON since 45095218, i.e. ON in the live run.
+  * ERROR NORM. S = identity (solver_sap_adaptive.py:1590-1596), so eps_acc is
+    NOT "digits of accuracy" as the paper intends but a mixed-unit threshold:
+    1 mm translation AND 0.057 deg per revolute joint AND 0.115 deg of free-body
+    rotation, simultaneously. Plus NEWTON_ADAPTIVE_RTOL=2e-6 is LIVE by default,
+    making the test |d| <= atol + rtol|q| (effect <1% at this scene's |q|).
+  * GEOMETRY CADENCE. Paper: 2 collision queries per accepted step. Ours: ONE
+    per boundary; the contact SET is frozen for the boundary and only
+    gap/points/Jacobian are re-anchored. The error estimator is structurally
+    blind to contact-set changes.
+  * LINE SEARCH. Paper specifies EXACT line search (Newton-Raphson + bisection);
+    we default to Armijo backtracking (440e58a flipped it from upstream's
+    monotone_decay). We IMPLEMENTED CENIC VI-D's cubic-Hermite seed (bd0c129)
+    and then DO NOT USE IT -- it lives only in the non-default exact_root path.
+  * VI-B. Commit 5a84f078 implemented CENIC Eq. (34) exactly
+    (optimality_rel_tol = max(1e-3*tol, 1e-8)); commit 9c9dc934 REMOVED it for a
+    hard 1e-8. Eq. (33)'s Theta criterion was never implemented, and the cost
+    early-exit is explicitly zeroed. So VI-B is gone, deliberately.
+  * VI-C Hessian reuse: not implemented on the SAP path at all. Largest untapped
+    speedup we have.
+  * CONVERGENCE-AS-REJECTION. The paper's headline claim #1 is that convexity
+    ELIMINATES discarded iterations. We cap inner Newton at 30 and map a cap-out
+    to err = 1e9, which forces a reject. That contradicts the claim, for a reason
+    the paper does not have: a throughput cap.
+  * THREE EXITS ALGORITHM 1 DOES NOT HAVE: floor acceptance (accept regardless of
+    e at dt_min); floor latch (state FROZEN, clock FORCE-ADVANCED to the
+    boundary); debt guard (carried debt capped at one dt_outer, remainder
+    DROPPED). Rates for all three are UNVERIFIED and belong in any accuracy table.
+  * CEILING MEMORY (9c9dc934): a one-sided cross-boundary hysteresis on top of
+    the paper's deadband; a rejected world needs 2 accepted steps to recover its
+    step. It shapes the accepted-dt distribution, which is exactly what a
+    work-precision plot reports. Not in the paper.
+  * k_Init: paper says 0.1*dt_max; ours effectively 1.0 (seeded ideal_dt clamps
+    to dt_outer).
+
+### THE REPORTABLE CONFIGURATION (read from /proc, not from a config file)
+
+  The live run was launched with NO NEWTON_* env overrides, so every env flag is
+  at source default. BUT the platform overrides three ctor defaults:
+  contact_preset_variant "drake" -> "approx32" (f32 Jacobians + f32 contact
+  linear solve, where the paper's reference is fp64 C++), max_substeps 16 -> 256,
+  and it pins the fixed arm's inner tolerances to the adaptive arm's on purpose.
+  Default ON and physics-visible in that run: fused update-eval, fused armijo
+  ladder, folded alpha-max, ACR, armijo_decay, containment. Default OFF:
+  determinism, run-ahead, static_substep, fp32 solve stack.
+
+### PROVENANCE (all p36_ prefix; no p13-p35 artifact overwritten)
+
+  paper     scratchpad p36_cenic.html/.txt (arxiv.org/html/2511.08771v1),
+            p36_sap.html/.txt (arxiv.org/html/2110.10107v2). Equations taken
+            from the LaTeXML alttext, i.e. the authors' own LaTeX.
+  document  tools/sap_cenic_provenance_audit.md
+  code read sap_warp @ afd5dc6, newton-adaptive @ 80d13a9a, both clean trees
+  GPU       zero processes started this pass; nvidia-smi polled read-only only
+  NOTE      no probe script was committed this pass (rails: audit only, no code).
+            Every number in the document is either quoted, read at a file:line,
+            or reproducible in closed form from a formula printed beside it.
+
+### OPEN, AND EXPLICITLY NOT CLOSED BY THIS PASS
+
+  * No C-class bitwise claim was re-measured. They rest on earlier
+    flag-equivalence and oracle probe runs.
+  * Floor-acceptance rate, floor-latch rate and _debt_guard fire count in the
+    reportable run: UNKNOWN. Any accuracy claim needs them.
+  * Share of rejections from inner-solve cap-out vs from error: UNKNOWN.
+  * Whether sap_warp's optimality test applies the paper's D = diag(M)^-1/2
+    scaling to the gradient norm: UNVERIFIED.
+  * Whether upstream sap_warp has advanced past c0c861c since the last fetch.
+  * TWO ONE-LINE RISKS FOUND, NEITHER FIXED (audit only, needs Marco's call):
+    SolverSAPAdaptive.__init__ ends in **kwargs that is accepted and DISCARDED
+    (solver_sap_adaptive.py:1275) -- a misspelled sweep parameter silently does
+    nothing, so an intended ablation can silently not happen; and
+    NEWTON_SAP_ATTEMPT_CONSISTENT_R is read with no default argument, so it is
+    ON for any value except the literal "0". Three different parse conventions
+    coexist in the NEWTON_SAP_* family.
