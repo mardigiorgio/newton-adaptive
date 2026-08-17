@@ -5465,3 +5465,365 @@ questions that resolve fast; confirmation cells are expensive and few.
     established.
   * The harness's GPU paths are unexecuted.
   * Allegro-under-SAP is UNKNOWN, not blocked-with-a-number.
+
+## PASS 34 — THE ARTIFACT INSTRUMENT AND THE MATCHED-N PROTOCOL
+## 2026-08-16. SOFTWARE + PROTOCOL ONLY: ZERO GPU PROCESSES STARTED. The
+## 4000-iteration adaptive main run (PID 2271848, main-sap-adaptive-1024x4000-s42,
+## W&B 8g1xi178) was live throughout at ~15.5-16.6 s/iter; nvidia-smi was polled
+## read-only at every step and never showed a process this pass started (the only
+## compute app was 2271848 at 11,129 MiB, start to finish). newton-adaptive,
+## sap_warp and IsaacLab are byte-untouched. All code lands in IsaacLabRubato.
+##
+## Marco's plan, verbatim: "we need to show that fixed creates artifact the policy
+## learns to exploit so after this run is finished or lets say whenever i see a
+## reward plateue we can kill the run and same # itters as when the reward plat
+## happened and then we see if fixed exploits an artifact".
+##
+## This pass builds the instrument that turns "is it exploiting an artifact" into
+## a measurement, and the one-command protocol that fires the moment N is known.
+
+### STACK, RE-DERIVED (the brief's certified list needed one correction)
+
+    newton-adaptive 80d13a9a   sap_warp afd5dc6   IsaacLabRubato 93966d7
+    IsaacLab        404eabb261 -- ONE COMMIT AHEAD of the brief's "certified"
+                    62c165b5f0, which is its parent: 404eabb261 "Size the SAP
+                    triangle-pair pool for a trained policy" is the pass-31
+                    192M-pool / 65,536-per-world budget. All four trees clean.
+
+### THE CENTRAL DESIGN DECISION, AND WHY IT IS NOT JUST THE 2x2
+
+Cross-play transfer asymmetry is the claim's strongest form, but ON ITS OWN it
+is ambiguous. A fixed-trained policy can collapse under adaptive physics for
+ordinary distribution-shift reasons and never have exploited anything. So the
+verdict requires THREE conditions, and the module names which ones held:
+
+  (i)   ASYMMETRY. retention(fixed) < retention(adaptive), where retention is the
+        PAIRED per-seed ratio of a policy's return under the other physics to its
+        return under its own. Paired, not a ratio of means: an unpaired ratio
+        hides exactly the seed variance this campaign keeps being burned by.
+  (ii)  MECHANISM. Under ONE physics (fixed), the fixed-trained policy earns a
+        larger share of its reward at invalid configurations than the adaptive-
+        trained policy does. Holding physics constant is what separates "this
+        POLICY exploits" from "this PHYSICS penetrates".
+  (iii) LOCALITY. The fixed-trained policy's invalid-configuration rate collapses
+        when the physics changes — the states it was farming stop existing.
+
+(i) alone is reported as ASYMMETRIC TRANSFER WITHOUT AN IDENTIFIED ARTIFACT,
+which is a real and different finding. (ii) without (i) is a physics difference
+the policy never monetized. Only the conjunction is the paper's claim.
+
+### WHAT THE TASK PAYS FOR — this is what fixes the target
+
+Read off trossen_spatula_lift_env_cfg.py:343-354 and mdp.py:353-390, live this
+pass. Of the 37 units of reward weight, 36 are gated on ONE predicate:
+
+    object root WORLD z > 0.08 m      (LIFT_HEIGHT; the mug's rest z is ~0.021,
+                                       the table slab top is z = 0.02)
+
+    lifting_object            w=15   object_is_lifted(z > 0.08)          DIRECT
+    object_goal_tracking      w=16   multiplied by (z > 0.08)            GATED
+    object_goal_tracking_fine w= 5   multiplied by (z > 0.08)            GATED
+    reaching_object           w= 1   1 - tanh(|obj - TCP| / 0.1)         ungated
+    action_rate / joint_vel   -1e-4 each, ramping to -5e-1 at 10k steps
+
+So "exploit" has an unambiguous operational meaning on this task: get the
+object's root above 0.08 m by means the solver permits and reality does not.
+
+### DELIVERABLE 1 — THE SIGNATURES, AND WHERE EACH THRESHOLD COMES FROM
+
+A HARD CONSTRAINT FOUND BEFORE DESIGNING ANYTHING, and it removes a whole family
+of signatures: pass 27 measured `contacts.force` as IDENTICALLY ZERO on BOTH SAP
+arms (SolverSAP.update_contacts and its adaptive twin are documented no-ops;
+only SolverMuJoCo fills the array). Every force-based test — force-balance
+residual, contact-force implausibility, grasp-force plausibility — would
+therefore silently read 0.0 on both arms and "pass". None are used. Every
+signature below is built from GEOMETRY and from the object's own reported
+motion, both of which are live under SAP.
+
+The geometry source is the SAP contact jacobian's own per-(env, slot) arrays,
+read live after each env step:
+    contact_env_phi0_wp    signed gap at the solve anchor, float64, METRES,
+                           NEGATIVE = penetration (the array pass 32's
+                           differentially verified reduction reads; that
+                           reduction is batch-global, so this pass adds a
+                           PER-ENV one, which is what a reward correlation needs)
+    contact_env_body0/1_wp global body index per contact slot, -1 = dead
+    contact_env_count_wp   live slot count per env
+    _set_margin0/1         per-slot collision margins, ADDED BACK so "overlap"
+                           means shared volume and not "inside the margin band"
+                           (NewtonShapeCfg default margin is 0.0, but it is read
+                           rather than assumed)
+
+  A1 INTERPENETRATION LIFT — the canonical exploit.
+     MEASURED: deepest gripper<->object overlap at every step where the reward
+     gate is open; reported as P95, max, the value AT THE ACQUISITION STEP (the
+     False->True edge of the gate, where a lift is bought), and the same
+     restricted to the top-decile-return episodes.
+     THRESHOLD 1, relative: P95 overlap / the SAME PHYSICS' measured resting
+     overlap of the mug on the table. That reference is the depth this compliant
+     law needs to carry exactly one body weight, so it is a unit, not a guess.
+     Flag at 3x.
+     THRESHOLD 2, absolute and unanswerable by compliance: overlap deeper than
+     the object's THINNEST COLLISION WALL, measured from the collision geometry's
+     bounding extents. Past that the finger is through the part.
+     RESIDUAL RISK, named: the resting reference carries 1x weight; a real grasp
+     also carries the pads' squeeze preload, which this reference does not bound.
+     The relative number is therefore suggestive alone and becomes evidence only
+     next to the matched cell. The wall thickness comes from a convex
+     decomposition, so a thin decomposed piece can UNDER-report the true wall.
+
+  A2 LEVITATION — held up by nothing.
+     MEASURED: share of reward-bearing steps at which the object's contact set is
+     EMPTY (no jacobian row involves it, i.e. nothing within the collision margin)
+     and its vertical acceleration is not -g.
+     THRESHOLD: 10x the free-fall acceleration residual |a_z + g| measured in the
+     SAME physics with the object dropped untouched. Integration error is
+     subtracted rather than assumed away. Reference rate: 0.
+     RESIDUAL RISK: an empty contact set is the collision pipeline's claim, not
+     ground truth. VOID under triangle-pair overflow (see below).
+
+  A3 ENERGY FROM THE INTEGRATOR.
+     MEASURED: share of reward-bearing steps where 0.5 m|v|^2 + m g z ROSE during
+     contact-free flight. Note this form is exactly conserved for a torque-free
+     rigid body regardless of rotation, so rotational energy is correctly absent
+     rather than missing.
+     THRESHOLD: 10x the free-fall energy drift per control step, same physics.
+     Reference rate: 0.
+
+  A4 EJECTION.
+     MEASURED: share of reward-bearing steps where |v_object| exceeds
+     |v_TCP| + |w_object| * r. A body carried by a gripper cannot outrun it.
+     THRESHOLD: 10x the measured noise floor of that same comparison, taken on
+     the resting segment where both are at rest. Reference rate: 0.
+     RESIDUAL RISK: a policy that legitimately tosses and re-catches the mug
+     trips this. Video review is the control, which is why every cell renders one.
+
+  A5 REWARD-WHILE-INVALID — the headline.
+     exploit_fraction  = share of reward-bearing steps flagged by ANY of A1-A4.
+     reward_from_invalid = share of POSITIVE income collected at those steps —
+     how much of the score is bought with physics that is not real.
+
+  A6 All of the above recomputed on the top-decile-return episodes, because a
+     policy that clips through the mug while FAILING is not exploiting anything
+     and pooling all episodes hides the difference.
+
+THREE HONESTY PROPERTIES BUILT INTO THE INSTRUMENT:
+  * A signature with no baseline reports UNCALIBRATED and is EXCLUDED from the
+    verdict. It never falls back to a constant.
+  * exploit_fraction is the union of the LIVE signatures, so it is a LOWER bound
+    on invalidity. A zero means "none of these four", never "the physics was
+    valid". An exploit living entirely in the friction cone is invisible to all
+    four at once; that is stated in the module, not hidden.
+  * If the triangle-pair buffer overflowed, EVERY signature reports VOID: a
+    truncated contact set makes an empty contact set no evidence of no contact
+    and a shallow overlap no evidence of no overlap.
+
+SAMPLE HYGIENE, and it is not cosmetic: the env resets a finished world INSIDE
+step(), so on a `done` step the object pose read afterwards is the NEW episode's
+while the contact set is the OLD episode's and the reward belongs to the old one.
+The step after a reset is equally unusable for anything built on a time
+difference. Both are excluded from every mask and from the reward-gate
+population — 2 of every ~150 steps, and the exclusion can only REMOVE flags.
+
+VERIFICATION (Hephaestus). 61 CPU-only tests pass; none asserts a recomputed
+value or a frozen output. The suite is built on analytic trajectories whose
+correct verdict follows from physics rather than from the code:
+  * exact ballistic flight (z = z0 - gt^2/2, v = -gt, so the finite difference of
+    v is exact) must be flagged by NOTHING;
+  * a hover at constant z with an EMPTY contact set must be flagged everywhere;
+  * THE DISCRIMINATING PAIR: the identical hover, and the identical energy
+    injection, WITH a contact present must be flagged by nothing — an instrument
+    that ignored the contact gate would satisfy every structural check and flag
+    every legitimate grasp in the campaign;
+  * large POSITIVE gaps must never read as overlap (kills the sign error);
+  * metamorphic: doubling the resting reference halves the ratio; deeper overlap
+    never lowers the flag count; the exploit fraction is invariant to permuting
+    and to duplicating environments and to a constant reward offset;
+  * differential: episode segmentation is checked against an independent
+    per-env accumulator loop over 5 seeded random cases, atol 1e-9.
+The residual-risk list is written into the test file: the largest uncaught class
+is the probe reading the WRONG ARRAY or mislabelling which body is the object,
+which no trace-level test can see. Two mitigations are in the probe — the object
+body index is resolved by label AND by stride and disagreement is recorded, and
+the baseline's resting overlap and free-fall residual are physically
+interpretable numbers that would be absurd if the array were wrong.
+
+A BUG THIS PASS FOUND IN ITS OWN FIRST DRAFT, worth recording because it is
+inherited from the shipped aggregator: `separated = |delta| > widest within-arm
+range` DIVIDES BY ZERO VARIANCE. Two replicates that happen to agree closely give
+a range near zero, and then ANY between-arm difference "separates" — a 0.02%
+retention difference certified as a collapse in the first test run. The verdict
+now requires the delta to clear BOTH the measured spread AND a declared
+effect-size floor: 0.05 on retention (five points of retained score; the smallest
+difference this campaign has ever resolved on anything) and 0.01 on exploit
+fraction (one paying step in a hundred). These are declared judgements, labelled
+as such, in one place.
+
+### DELIVERABLE 2 — THE MATCHED-N PROTOCOL, ONE COMMAND
+
+    cd ~/Documents/code/IsaacLabRubato/experiments/trossen-sap-scale
+    nohup bash matched_n.sh <N> 42,7 7 run >> matched_n.out 2>&1 &
+
+The default action is `plan`, which touches NO GPU, precisely so a fat-fingered
+invocation cannot disturb a live run. `matched_n.sh <N>` alone plans and prices.
+
+It runs, in order, aborting the whole protocol at the first failure:
+  1. PARITY PREFLIGHT on BOTH arms, live, before a single GPU hour is spent:
+     tolerances, capacities, contact law, determinism, containment, dumped off
+     the CONSTRUCTED objects and diffed. Any difference outside the intended
+     (solver class, substep count, adaptive tol) aborts.
+  2. FIXED ARM at exactly N iterations, one run per seed, at 1024 envs with the
+     adaptive run's seed, config and a 50-iteration video cadence.
+  3. ADAPTIVE FILL for seeds the long run does not already cover.
+  4. THE 2x2 CROSS-PLAY: per-physics baselines first, then every policy under
+     every physics — 256 envs, 600 steps, eval seed 1234 held FIXED across all
+     cells so the comparison is paired — writing a per-step trace, a mean
+     episodic return and a video per cell.
+  5. THE ARTIFACT ANALYSIS, printing the 2x2, the signatures, the verdict and
+     the video-review guide.
+
+N IS SNAPPED to the nearest k*50 + 1 at or below the requested value, and the
+checkpoint tolerance is then ZERO. THE REASON MATTERS: rsl_rl saves every
+save_interval = 50 iterations AND once at the end, so a run stopped at N ends on
+model_{N-1}.pt while the long adaptive run passing through N only carries
+model_{k*50}.pt. Those indices coincide exactly when N-1 is a multiple of 50.
+Without the snap the two arms' policies differ by up to 49 iterations of
+training, which is a mismatch in the one variable the whole experiment holds
+fixed. Snapping costs at most 49 iterations of a horizon in the thousands.
+
+A CONSEQUENCE WORTH STATING PLAINLY: the adaptive arm does NOT have to be killed.
+Its policy at iteration N is already a checkpoint of the run in flight
+(model_100.pt existed at iteration ~131 this pass, confirming the 50-iteration
+cadence). Killing the run is a separate decision about whether the remaining
+~3900 iterations are worth 17 more hours; it is not a prerequisite for this
+experiment. If Marco wants the plateau policy AND the full run, he can have both.
+
+WALL, as a function of N (MEASURED s/iter: fixed 8.067, adaptive 18.207, pass 31
+n=3 at 1024 envs, exclusive device; cell cost PROJECTED from pass 31's 88 s
+numeric cross-eval plus rendering):
+
+    total_h(N, S, F) = [S*N*8.067 + F*N*18.207 + (4S + 2)*120] / 3600
+      S = training seeds per arm, F = adaptive seeds NOT already covered
+
+              S=1,F=0        S=2,F=1        S=3,F=2
+    N =  501     1.3 h          5.1 h          8.9 h
+    N = 1001     2.4 h          9.9 h         17.3 h
+    N = 1151     2.8 h         11.3 h         19.8 h
+    N = 2001     4.7 h         19.4 h         34.2 h
+    N = 4001     9.2 h         38.5 h         67.8 h
+
+    `.venv/bin/python tools/sweep.py cost <N> --seeds <S>` prints this for any N.
+
+### DELIVERABLE 3 — REPLICATION, PRICED, AND WHAT A NULL MEANS
+
+HOW MANY SEEDS THE CLAIM NEEDS: TWO PER ARM, MINIMUM, AND THE PROTOCOL'S DEFAULT
+IS TWO. The aggregator returns UNRESOLVED below that and says why, and the
+verdict function does the same regardless of how extreme the numbers are — there
+is a test that asserts exactly this on a planted 40x asymmetry at n=1. The reason
+is pass 30's own accidental control: a same-seed adaptive restart diverged 2.4x
+in mean reward by iteration 9. One seed on this stack is not evidence.
+
+THE PRICE OF HONESTY, at N ~ 1151: n=1 costs 2.8 h and CANNOT produce a verdict.
+n=2 costs 11.3 h and can. The 8.5 h difference is almost entirely the second
+ADAPTIVE seed (5.8 h), because the first one is free from the run in flight.
+n=3 costs 19.8 h. TWO is the recommendation: three seeds doubles the bill to
+tighten a spread the two-seed run will already have measured, and the campaign's
+week-long planning envelope (pass 33) does not have room for it before the
+question is answered once.
+
+WHAT A NULL LOOKS LIKE, AND WHAT IT MEANS. The instrument reports four distinct
+outcomes and three of them are not the headline:
+
+  NULL — no condition separated. Both policies transfer and neither shows
+    elevated invalid-configuration rates. MEANING: at this horizon and this
+    contact law, fixed-step integration produced no exploitable artifact that
+    the policy found. That is a real, publishable finding about THIS scene: it
+    says the fixed arm's cost is wall-time and divergence rate, not a corrupted
+    objective. It does NOT generalize to stiffer contact — the campaign has
+    already measured that the production fixed arm has 0.0000 of its contacts on
+    the dt-dependent `rn_hard` branch where the CENIC mechanism lives, so a null
+    here is a null about a COMPLIANT scene.
+
+  ASYMMETRIC TRANSFER WITHOUT AN IDENTIFIED ARTIFACT — the fixed policy does
+    transfer worse, but the signatures do not separate. MEANING: the two
+    timesteppers produce different dynamics and the fixed policy is brittle to
+    the difference. Real, weaker, and honest.
+
+  NO TRANSFER ASYMMETRY — signatures separate, transfer does not. MEANING: the
+    fixed arm penetrates more, and the policy is not being paid for it.
+
+  ARTIFACT EXPLOITATION SUPPORTED — all three conditions.
+
+  UNRESOLVED — fewer than two replicates anywhere in the matrix.
+
+WHY THE PASS-30 NULL DOES NOT PRE-EMPT THIS. Pass 30 ran the cross-play at 300
+iterations and both policies transferred without degrading. At 300 iterations
+neither had learned much — pass 30's own videos show a crude tip-and-hoist on
+both arms — so there was nothing for an exploit to be made of. That is a null at
+a horizon too short to matter, not a refutation. This protocol runs at the
+horizon where the adaptive arm's reward has stopped improving, the earliest point
+at which "the policy had time to find the exploit" is true.
+
+### DELIVERABLE 4 — VIDEO
+
+Every cross-play cell renders its own clip, to its OWN directory with its OWN
+filename prefix. That is a fix by construction for a pass-30 failure: `play`
+writes into the CHECKPOINT's run directory, so the two cross cells overwrote the
+two same-arm ones and pass 30 had to re-run them. This probe sets
+VideoRecorderCfg(output_dir=..., output_filename_prefix=<cell>) explicitly, so a
+collision is impossible. The clip is the SAME rollout the numbers come from, not
+a separate matched run, so a number can be checked against the frame it came
+from. `sweep.py artifact` prints the review guide with the report; in short:
+
+  fixed on FIXED     the cell the exploit should live in — a finger visibly
+                     INSIDE the mug rather than pinching it, the mug rising with
+                     no visible squeeze, buzzing while "held", or a lift that
+                     starts the instant the gripper arrives rather than after the
+                     jaws close. High exploit_fraction over a clip showing an
+                     ordinary clean grasp means the signatures are measuring
+                     something else; say so instead of quoting them.
+  fixed on ADAPTIVE  the collapse — same approach and closure, then the mug stays
+                     on the table or squirts out. If instead the ARM behaves
+                     differently from the start, the transfer failure is upstream
+                     of contact and the artifact reading is not supported.
+  adaptive on ADAPTIVE  the control: what a policy at this horizon looks like.
+  adaptive on FIXED  the mirror. If this collapses too, the asymmetry is not
+                     asymmetric and the 2x2 is reporting a dynamics difference.
+
+### PROVENANCE (all p34_ prefix; no p13-p33 artifact overwritten)
+
+  code      IsaacLabRubato tools/rubato_sweep/{artifact,artifact_probe,
+            crossplay}.py, cli.py (crossplay/artifact/cost subcommands),
+            tests/test_artifact.py (61 tests, all pass), README.md,
+            experiments/trossen-sap-scale/matched_n.sh, .gitignore
+  smoke     p34_pipeline_smoke.py — writes the exact files the probe would write
+            and runs the real aggregator over them; the planted exploit signature
+            is read as ARTIFACT EXPLOITATION SUPPORTED and the planted symmetric
+            case as NULL. Output in p34_smoke/ and p34_smoke_null/.
+  GPU       zero processes started; nvidia-smi polled read-only throughout and
+            never showed anything but the live training run.
+
+### OPEN, AND EXPLICITLY NOT CLOSED BY THIS PASS
+
+  * N IS NOT KNOWN. The plateau detector was still "warming" at iteration 131 of
+    4000 (it needs 200 iterations of history). Everything above is parameterized
+    on N and nothing presumes its value.
+  * artifact_probe.py HAS NEVER RUN. Its solver access path is lifted from
+    p32_pen_core.py and p31_eval_probe.py, but the per-env reduction, the body
+    resolution, the wall-thickness read and the baseline measurements are new
+    code executed zero times. Read baseline_fixed.json BEFORE trusting anything
+    downstream: a resting overlap of 0, or a free-fall residual anywhere near g,
+    means the probe is reading the wrong thing.
+  * THE WALL-THICKNESS BASELINE MAY NOT RESOLVE. It reads mesh vertices off
+    model.shape_source, which is defensive but unproven on this asset. If it
+    returns None the absolute penetration signature reports UNCALIBRATED and the
+    relative one carries A1 alone.
+  * NO FORCE CHANNEL EXISTS UNDER SAP, so grasp plausibility is inferred from
+    geometry and motion only. If a force-based signature is ever wanted, SAP's
+    per-contact impulses live in contact_solve.contact_gamma (vec3 per (env,
+    slot), tangential x/y and normal z) and are reachable — that is a probe
+    someone could write, not something this pass measured.
+  * THE VIDEO COST AT 256 ENVS IS UNMEASURED. Pass 30 rendered at 32. If it is
+    too heavy, lower num_envs for the WHOLE cross-play rather than rendering a
+    separate differently-sized rollout: the video has to be the run the numbers
+    came from.
