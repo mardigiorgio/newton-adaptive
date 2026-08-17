@@ -3967,6 +3967,23 @@ goal.
 - Phantom body fix: follower_left_ee_gripper_link active=false overlay
   (one line in stationary_ai_task.usda, mirrors right twin) — kernel-width
   savings 7/22 coords per world + closes latent-risk surface
+- THE FOUR-ENGINE COMPARISON'S TASK-SIDE GATE (pass 35, B1-B4): the PhysX
+  preset already exists (trossen_spatula_lift_env_cfg.py:172-178) and has
+  never run once on this machine. Two task edits unblock it — make the two
+  Newton-pinned contact sensors and the Newton visualizer preset fields so
+  they are absent under the PhysX alternative — plus a material/contact-offset
+  authoring pass so the PhysX arm does not silently run on the engine default
+  friction (mu 0.5) against the Newton arms' 1.0. Until then the campaign runs
+  p35_threeway_screen.yaml, which needs no edit anywhere.
+- "AND RUN IRL" IS NOT TRUE OF THIS SCENE (pass 35, M1-M8, in that priority
+  order): zero domain randomization of any kind, `enable_corruption=True` with
+  every `noise=None` so it is a decoy, object pose observed as simulator ground
+  truth with no perception path, mu 1.0 undifferentiated everywhere, and a
+  contact/drive stiffness pair (1250 / 1000 N/m) that puts the finger 44% of
+  the remaining commanded stroke inside the mug. M1 (randomization) and M2
+  (perception) are prerequisites for transfer, not improvements. None of them
+  blocks the four-engine comparison, which needs the MDP identical across arms
+  rather than realistic.
 - Any push to GitHub (auth broken; needs gh auth login first)
 
 ## DECISION SUMMARY — EVERYTHING STILL WAITING ON MARCO
@@ -5827,3 +5844,707 @@ from. `sweep.py artifact` prints the review guide with the report; in short:
     too heavy, lower num_envs for the WHOLE cross-play rather than rendering a
     separate differently-sized rollout: the video has to be the run the numbers
     came from.
+
+## PASS 35 — THE FOUR-ENGINE COMPARISON: DESIGNED, PRICED, AND MADE RUNNABLE;
+## THE "RUNS IRL" REQUIREMENT AUDITED AND FAILED
+## 2026-08-16. SOFTWARE + SOURCE AUDIT ONLY: ZERO GPU PROCESSES STARTED. The
+## 4000-iteration main run (main-sap-adaptive-1024x4000-s42, W&B 8g1xi178) was in
+## flight throughout; nvidia-smi was polled read-only and never showed a process
+## this pass started. newton-adaptive, sap_warp and IsaacLab are BYTE-UNTOUCHED;
+## every line written this pass is in IsaacLabRubato's harness, alongside pass
+## 34's in-flight cross-play instrument, with no file shared between them.
+## Marco's request: "a physx, mujoco fixed, sap fixed, sap adaptive comparison on
+## a example that will train and run IRL will be very informative".
+##
+## Every number this entry inherits from an earlier pass was re-derived from the
+## artifact, not from the prose. Two inherited numbers moved; both are corrected
+## below and both make the current record WORSE, not better.
+
+### TASK 1 — PhysX VIABILITY. VERDICT: **THE PRESET ALREADY EXISTS AND IS
+### DOCUMENTED AS UNUSABLE; FOUR HARD BLOCKERS STAND BETWEEN IT AND A RUN.**
+
+WHAT IS ALREADY THERE, quoted from source (trossen_spatula_lift_env_cfg.py:
+128-178). The task DOES carry a physics `PresetCfg` with four alternatives:
+`default` and `newton_mjwarp` (NewtonCfg, num_substeps=2), `newton_mjwarp_
+adaptive` (num_substeps=1), and
+
+    physx: PhysxCfg = PhysxCfg(
+        bounce_threshold_velocity=0.01,
+        friction_correlation_distance=0.00625,
+        gpu_max_rigid_patch_count=2**20,
+        gpu_total_aggregate_pairs_capacity=2**23,
+        gpu_found_lost_aggregate_pairs_capacity=2**26,
+    )
+
+selected by the hydra token `physics=physx`. The class docstring states its own
+status in as many words: "PhysX remains reachable via ``physics=physx`` as a
+debugging escape hatch only."
+
+IT HAS NEVER RUN. Not once, in any repo on this machine, at any time. Evidence,
+three independent lines: `grep -li physx` over the 174 training logs in
+`experiments/rubato-ppo-sweep/joblogs/` (~218 MB) returns ZERO files; every
+config on disk in all four sweep drivers hard-codes `physics=newton_mjwarp`;
+and the `--solver` flag — the only backend selector the harness emitted before
+this pass — is Newton-only by construction (`PHYSICS_SOLVER_CHOICES` =
+{mujoco, mujoco-adaptive, sap, sap-adaptive}, physics_presets.py:22-27), with
+`train_rsl_rl.py:52-67` raising if the resolved physics has no `MJWarpSolverCfg`.
+So there is no PhysX per-iteration cost anywhere in the campaign, and there is
+no PhysX behaviour to reason from.
+
+DEVIATION FROM THE MAINTAINED PATTERN. Every core task that supports both
+backends types the field as `isaacsim_physx: PhysxCfg` plus
+`physx: PhysxAutoCfg(isaacsim_physx=..., ovphysx=...)` — core/lift:483-510,
+core/reach:39-41, core/cabinet, core/cartpole, core/velocity, core/handover,
+core/reorient. This task types the field `PhysxCfg` directly, so
+`physics=isaacsim_physx` raises `Unknown preset` (hydra.py:307) and the OvPhysX
+path is unreachable. Renaming to the maintained triple is bookkeeping, but it is
+Marco's file.
+
+THE FOUR HARD BLOCKERS, ordered by how early they fire:
+
+ B1 THE CONTACT SENSORS ARE PINNED TO NEWTON. Both are
+    `isaaclab_newton.sensors.ContactSensorCfg` (env_cfg:214-229), whose own
+    docstring says "Use this class directly only to force the Newton
+    implementation regardless of the active backend". Its `_initialize_impl`
+    calls `NewtonManager.add_contact_sensor(...)` unconditionally and wraps any
+    exception in `RuntimeError` (contact_sensor.py:289-304). Under PhysX the
+    Newton manager is not the active backend. VERIFIED IN SOURCE this pass;
+    that it raises rather than degrades is an INFERENCE from those lines.
+    FIX (Marco's, one of two): (a) delete both sensors under the PhysX preset —
+    legitimate, because NOTHING reads them (below); or (b) switch both to
+    `isaaclab.sensors.ContactSensorCfg`, the backend-dispatching class, and
+    accept that `filter_shape_prim_expr` is silently ignored under PhysX
+    (contact_sensor_cfg.py:98,107). (a) is correct today; (b) is required the
+    moment a contact term is added.
+ B2 `--solver` BECOMES ILLEGAL. Every launch script in the task directory
+    passes it. FIX (in-grant, LANDED THIS PASS): `Arm.solver` is now optional in
+    the harness; a PhysX arm declares `solver: null` and names its engine with
+    `extra_args: ["physics=physx"]` alone. A config with `solver: null` and no
+    `extra_args` is now refused, because that combination silently runs the
+    task's DEFAULT preset under another arm's name.
+ B3 `--viz newton` + PhysX. The Newton visualizer calls `NewtonManager.
+    get_model()/get_state()/get_contacts()` (newton_visualizer.py:616-628,
+    735-747) and `_validate_runtime` (sim_launcher.py:407-444) has NO guard for
+    this combination. FIX (in-grant, LANDED): `viz` is per-arm in the p35
+    configs, not global; the PhysX arm carries no `--viz`. The task's own
+    `sim.default_visualizer_cfg = NewtonVisualizerCfg(...)` (env_cfg:499-503) is
+    only an eye/lookat hint and is harmless, but it does hardcode a Newton class
+    into `__post_init__` — Marco's, cosmetic.
+ B4 THE RUN LEAVES THE KITLESS STACK. A `PhysxCfg` makes `has_kit_physics` true
+    (sim_launcher.py:379-395, 522-524), so the PhysX arm boots Isaac Sim where
+    all three Newton arms run kitless. Nothing in the harness breaks, but the
+    startup cost, the memory floor and the renderer all change, and none of them
+    has ever been measured here. This is why the PhysX arm's s/iter is UNKNOWN
+    rather than bracketed from the Newton arms.
+
+THE SILENT DIFFERENCES, which are worse than the blockers because they do not
+fail. Each is a field the task already carries that is INERT under Newton and
+LIVE under PhysX, or vice versa:
+
+  * The mug's entire contact recipe evaporates. `mug_inomata_white.usd` carries
+    `mjc:solimp = (0.9, 0.999, 0.002, 0.5, 2.0)` and `mjc:priority = 1` on all
+    12 collision prims, authored deliberately (convert_mug.py:111-118: dmax
+    0.999 "collapsing the pinch embed", priority 1 to "WIN pair mixing"). Those
+    are MuJoCo-namespace custom attributes, consumed only at
+    solver_mujoco.py:930-952. Under PhysX they are inert custom attrs; under
+    BOTH SAP ARMS they are ALSO inert. There is no `UsdPhysics.MaterialAPI`
+    bound anywhere in the mug or the rig. So the object's contact law differs
+    across all three engine families and the difference is not in the task cfg.
+  * `RigidBodyPropertiesCfg(solver_position_iteration_count=16,
+    solver_velocity_iteration_count=1, max_depenetration_velocity=0.5,
+    max_linear_velocity=1000, max_angular_velocity=1000)` on the object
+    (env_cfg:202-209) and `max_depenetration_velocity=5.0` on the robot
+    (assets.py:58-73) come alive under PhysX and are dead under Newton — the
+    task's own comment at :196-198 says so. `max_linear_velocity=1000` clamps
+    BEFORE the `object_speeding` termination's 20 m/s threshold can trip, so a
+    termination the campaign treats as a shared experiment metric
+    (env_cfg:385-390 calls it exactly that) changes meaning on the PhysX arm.
+  * `physics_diverged` is a permanent no-op on PhysX, as it is on both MuJoCo
+    arms (mdp.py:167-174 returns all-False when the mask is None). After pass
+    29 the two SAP arms CAN excise a diverged world from the training
+    distribution and the other two CANNOT. This is the largest MDP asymmetry in
+    the four-way and it is not new — it is D2b, still open.
+  * `_validate_solver_substeps` returns early when the physics has no
+    `solver_cfg` (env_cfg:475-477), so the PhysX arm has no stability check of
+    any kind and inherits `sim.dt = 1/120` unvalidated.
+  * `enabled_self_collisions=False` (assets.py:64-70) is justified in its own
+    comment by MuJoCo convex-hull overlap in the grasp channel. That premise
+    does not hold under PhysX, where the rig meshes carry
+    `physics:approximation="none"`, so the setting becomes unmotivated.
+
+THE RECIPE, concretely, for whoever lands it (all four items are Marco's):
+
+    trossen_spatula_lift_env_cfg.py:172-178  rename physx -> isaacsim_physx and
+        add `physx: PhysxAutoCfg = PhysxAutoCfg(isaacsim_physx=isaacsim_physx)`,
+        matching core/lift:485-510.
+    trossen_spatula_lift_env_cfg.py:214-229  make the two contact sensors a
+        preset field: present under the Newton alternatives, ABSENT under
+        isaacsim_physx. Nothing reads them, so nothing regresses.
+    trossen_spatula_lift_env_cfg.py:499-503  make default_visualizer_cfg a
+        preset field too, or drop it for the PhysX alternative.
+    assets.py + the mug USD  author a `RigidBodyMaterialCfg` and a
+        `CollisionPropertiesCfg(contact_offset=..., rest_offset=...)` for the
+        mug, the finger pads and the table guard, as core/lift:43-46 does.
+        WITHOUT THIS the PhysX arm runs on the engine default material
+        (mu 0.5, restitution 0) while the Newton arms run on mu 1.0 — a
+        2x friction difference on the axis the task's success depends on.
+
+The harness is ready for the arm today; the task is not. Until B1 and B3 land,
+run `p35_threeway_screen.yaml`, which is the same design minus PhysX and runs on
+today's stack with no edit to any of the three repos.
+
+### TASK 2 — THE COMPARISON, AND WHAT IT MAY AND MAY NOT CLAIM
+
+THE CONFOUND STATEMENT, first, because everything else is downstream of it.
+
+**AN ENGINE COMPARISON IS NOT A TIMESTEP COMPARISON.** The four arms differ in
+their CONSTITUTIVE LAW, not in a discretization of one shared law:
+
+    PhysX         impulse/TGS with contact_offset/rest_offset compliance and a
+                  solver-iteration budget; on this asset, the ENGINE DEFAULT
+                  material, because none is authored (mu 0.5).
+    MuJoCo-Warp   solref/solimp. solref comes from ke/kd by
+                  timeconst = 2/kd, dampratio = (kd/2)*sqrt(1/ke)
+                  (newton_manager_cfg.py:84-87) = (0.02, 1.0) at the authored
+                  defaults, i.e. exactly MuJoCo's stock compliance; solimp is
+                  overridden on the mug alone to (0.9, 0.999, 0.002, 0.5, 2.0).
+    SAP           R_n = max(beta^2/4pi^2 * W, 1/(h k (h+tau))) with authored
+                  pair k = 1250 N/m and tau = 0.02 s. IGNORES the mug's
+                  mjc:solimp entirely.
+
+Three different laws, on the same USD. Therefore:
+
+  * Any statement of the form "engine X is better/more accurate than engine Y"
+    is UNAVAILABLE from this design. There is no ground truth and no shared law.
+  * The ONLY pair that isolates the timestep policy is SAP-fixed vs
+    SAP-adaptive — same contact law, same tolerances (equalized pass 29), same
+    capacities, same advance per boundary (8.33333e-3 s on both, measured pass
+    27). And even that pair is NOT clean: `attempt_consistent_r` is ON for the
+    adaptive arm and structurally inert on the fixed arm, and it scales W —
+    hence rn_hard AND the tangential rt — by s ~ 2.1 in every COMMITTED half
+    solve. For a task whose success is a friction-held grasp, a 2x softer
+    tangential regularization on one arm only is a confound, and it has never
+    been separated. THE FIX IS ONE ENV VAR ON AN EVALUATION-ONLY ARM
+    (`NEWTON_SAP_ATTEMPT_CONSISTENT_R=0`), and it is COMPARISON SEMANTICS =
+    MARCO'S. It is not in the p35 configs. Naming it is the honest move; adding
+    it silently would not be.
+
+WHAT IS EQUALIZED, and the preflight now PROVES it rather than asserting it
+(`preflight.by_family: true` with an explicit `contract_keys` list; a
+cross-engine sweep with an empty contract is refused by the config validator):
+
+    task id and registered MDP        one gym id, one env cfg
+    every MDP term                    name, function, weight and mode, per
+                                      manager, for all six managers
+    action space                      7 dims: 6 arm joint-position + 1 binary
+                                      gripper; scale 0.25, clip (-6, 6)
+    observation space                 33 dims, one `policy` group, actor and
+                                      critic identical
+    control contract                  sim.dt 1/120, decimation 4 -> 30 Hz
+                                      control, 5 s = 150-step episodes
+    batch                             1024 envs x 24 steps per iteration
+    policy architecture + PPO cfg     one rsl_rl entry point
+    seeds                             42, 7, 13 on every arm
+    iteration budget                  identical per arm
+    asset                             one USD per body
+
+WHAT CANNOT BE EQUALIZED, listed so the paper says it before a reviewer does:
+contact law (above); solver tolerances (SAP's optimality_rel_tol 1e-8 vs
+MuJoCo's iteration/ls budget 100/15 vs PhysX's position/velocity iteration
+counts 16/1 — these are not commensurable quantities); substep structure (SAP
+fixed 2 per boundary, SAP adaptive a march, MuJoCo 2, PhysX its own); collision
+pipeline and geometry approximation; the contact-force writeback (LIVE on
+MuJoCo, IDENTICALLY ZERO on both SAP arms, unmeasured on PhysX — pass 27 F9);
+and `physics_diverged`, which is live on the two SAP arms and a permanent no-op
+on the other two.
+
+**THEREFORE THE CLAIMS THIS DESIGN IS ALLOWED TO MAKE:**
+
+ C1 COST. Wall to a fixed sample budget, per engine, on one task. Fair, because
+    the budget and the batch are equalized. An ENGINEERING claim, and the
+    strongest one available from the training stage.
+ C2 LEARNABILITY. Whether each engine reaches the task's success predicate at
+    that budget. Bounded, 0-1, and far better behaved than mean reward.
+ C3 TRANSFER. The 4x4 cross-play matrix. This is where the claim lives.
+ C4 ADAPTIVITY. SAP-fixed vs SAP-adaptive alone, ACR-confounded and labelled so.
+ C5 SELF-CONSISTENCY. The refinement column (below) — the one accuracy axis this
+    design legitimately has.
+
+AND THE ONE IT MAY NOT: that any engine is more accurate than any other.
+
+**WHY THE CLAIM GOES ON THE MATRIX AND NOT ON THE TRAINING CURVES.** Measured,
+this task, this card:
+
+    instrument                          spread                    provenance
+    training-curve reward, 3 seeds      within-arm RANGE is 97%   p33_p31_ingest/
+      at 150 iterations                 of the arm's own mean     summary.json
+    one evaluation cell                 SEM 0.28-0.34 on a mean   p31_eval_*.json
+      (256 envs x 600 steps,            of 112-137, i.e. 0.25%
+       1024 completed episodes)
+
+The evaluation instrument is roughly two orders of magnitude more sensitive than
+the training instrument, and Task 4 prices it at about 2-4% of the training
+bill. A design that puts its claim on the learning curves is spending 96% of its
+GPU hours on its weakest measurement. Note precisely what the pooling does and
+does not remove: it removes EPISODE noise, not SEED noise. The seed level offset
+is cancelled instead by pairing — pass 34's `retention()` takes the per-replicate
+ratio R(i,j)/R(i,i) rather than a ratio of means, and that is the statistic to
+report.
+
+**THE MATRIX, AND ITS REUSE OF PASS 34.** 4 policies x 4 physics x 3 training
+seeds, evaluation seed fixed at 1234 so every cell is paired. Nothing new was
+written for the statistics: pass 34's `crossplay_verdict(returns, exploit,
+fixed=..., adaptive=...)` is already parameterized on two arm names, so the 4x4
+is six of its 2x2s, and its three-condition structure is adopted verbatim —
+
+    asymmetry  policy i retains less off its own physics than j does in the
+               mirror direction;
+    mechanism  under ONE physics, i earns more of its reward at invalid
+               configurations than j does;
+    locality   i's invalid-configuration fraction collapses when the physics
+               changes.
+
+Only the conjunction is an artifact-exploitation claim. Asymmetry alone is
+brittleness or distribution shift and must be reported as such — that is pass
+34's wording and it is right.
+
+**THE REFINEMENT COLUMN — the accuracy axis that survives the confound.** Cross-
+engine "which is right" is unanswerable here. Within an engine it is not: replay
+a policy under the SAME contact law at a 4x finer fixed step and ask whether its
+score survives. A score that collapses was bought from that engine's
+discretization error, and no cross-engine ground truth is needed to say so.
+Implemented as two extra physics columns (`sap_fixed_ref`, `mujoco_fixed_ref`,
+num_substeps 2 -> 8, `trainable=False` so they can never be mistaken for a fifth
+policy). Two deliberate choices:
+  * the SAP-ADAPTIVE policy's reference is `sap_fixed_ref`, NOT a tightened
+    estimator tolerance. `tol` is a campaign rail and is the physics being
+    demonstrated; it is not an evaluation knob.
+  * PhysX has NO reference arm. Its refinement schedule (substeps? iteration
+    counts? both?) has never been run here, and inventing one would be a guess
+    wearing a measurement's clothes.
+The statistic is pass-34's `retention()` again, with `own` = the production arm
+and `other` = its reference. No new estimator.
+
+**WHAT THE 4x4 CANNOT DO ON A PhysX COLUMN.** Signature A1 (interpenetration)
+reads the solver's own contact set; that channel exists under Newton and has no
+PhysX equivalent wired up. PhysX cells must set `Trace.pen_channel_live=False`
+so A1 reports UNCALIBRATED. A2 (levitation), A3 (energy gain) and A4 (ejection)
+are purely kinematic and DO port. Three of four signatures survive the four-way.
+Reporting a silent zero instead would be the worst available outcome.
+
+### TASK 3 — "RUNS IRL". VERDICT: **NOT FIT, AND THE DECISIVE DEFECT IS NOT A
+### BUG BUT A DELIBERATE, DOCUMENTED CHOICE.**
+
+THE TASK HAS ZERO DOMAIN RANDOMIZATION. Quoted in full — this is the entire
+`EventCfg` (env_cfg:413-428): `reset_all` (reset_scene_to_default) and
+`reset_object_position` with `pose_range` = {x: (0,0), y: (0,0), z: (0,0)},
+`velocity_range` = {}. Both deterministic; the second is a functional no-op on
+top of the first. No prestartup, no startup, no interval terms. Nothing is
+randomized: not friction, not mass, not inertia, not COM, not actuator gains,
+not armature, not joint friction, not object pose, not object scale, not robot
+init pose, not gravity, not external disturbance, not observation noise. The
+comment says why — "the real-world protocol is a tape-measured FIXED placement
+... Prove pickup first" — and that is a defensible research order. It is also
+the end of the sim-to-real conversation until it is reversed.
+
+AND `enable_corruption = True` IS A DECOY. It is set (env_cfg:326) while every
+`ObsTerm` leaves `noise=None`, whose documented behaviour is "no noise is
+added" (manager_term_cfg.py:174-175). The PLAY variant then disables (:534)
+something that was never on. A reader of this config concludes observation noise
+is configured. It is not. VERIFIED IN SOURCE this pass.
+
+THE POLICY'S THIRD INPUT DOES NOT EXIST ON HARDWARE. `object_position =
+ObsTerm(func=mdp.object_position_in_robot_root_frame)` is `root_pos_w` — the
+simulator's exact mug pose, machine precision, 30 Hz, zero noise, zero latency,
+zero dropout, zero occlusion. There is no camera sensor in the task (the rig USD
+has three D405s; none is instantiated), no pose estimator, no teacher/student
+split — `obs_groups = {"actor": ["policy"], "critic": ["policy"]}`. Deploying
+this policy requires a perception system with ~zero error, which is exactly what
+does not exist. The older Rubato cube task at least put object pose in a
+separate `privileged` group; this task collapsed that split.
+
+THE CONTACT LAW IS NOT A GRASP. This is the sharpest finding and it is DERIVED
+from two numbers both read off source this pass, with no geometry assumed:
+
+    authored per-shape ke        2500 N/m   (NewtonShapeCfg default, VERIFIED;
+                                             no material is bound anywhere)
+    series-combined pair k       1250 N/m   (live probe, passes 25/27/30)
+    gripper carriage drive k     1000 N/m   (ImplicitActuatorCfg, prismatic)
+
+Static equilibrium of a commanded close: the pad and the object share the
+remaining commanded stroke d0 in inverse proportion to their stiffnesses, so the
+embed is
+
+    delta / d0 = k_drive / (k_drive + k_contact) = 1000 / 2250 = **0.444**
+
+**THE FINGER EMBEDS 44% OF THE REMAINING COMMANDED STROKE INTO THE MUG**,
+whatever the geometry. And the only reason it is not worse is that the gripper
+drive was softened 218x below the vendor's own USD authoring: the shipped rig
+authors carriage `stiffness = 217687` N/m, against which the same contact law
+gives delta/d0 = 217687/218937 = **0.994** — the pad passes essentially all the
+way through. Two sim-only softenings are cancelling each other out.
+
+IS 1250 N/m PLAUSIBLE FOR A REAL GRIPPER ON A REAL MUG? No, by 0.6 to 2.7
+decades. DERIVED, assumptions stated: a compliant pad in series with an
+effectively rigid ceramic/plastic wall gives k ~ E*A/t with pad modulus
+E = 1-10 MPa, patch A = 0.5-2 cm^2, thickness t = 3-10 mm, i.e.
+k = 5e3 .. 6.7e5 N/m. The authored 1250 sits below the bottom of that range.
+The assumptions are the pad's modulus, patch area and thickness; ALL THREE ARE
+REPLACEABLE BY A TEN-MINUTE BENCH MEASUREMENT — press the real gripper pad onto
+a kitchen scale through a dial indicator and read force against displacement.
+That single measurement converts the largest sim-to-real unknown in this task
+into a number, and it needs no GPU and no simulator.
+
+AND HERE IS THE CONNECTION THAT MUST NOT BE OVERSOLD. Pass 30 measured this
+scene's near-rigid branch boundary: the clamp takes the majority of contacts at
+k ~ 2.5e4 and 100% by k = 1e6 (p30_reg_fixed_s2_seed42.json). The plausible real
+pad range 5e3..6.7e5 STRADDLES that boundary. So authoring a physically
+defensible stiffness is the same edit that engages the branch where the CENIC
+dt^-2 coupling exists (env_cfg:148/156/167, shape ke). **THIS DOES NOT RESURRECT
+THE ADAPTIVE ADVANTAGE.** Pass 30 already swept 6.9 decades of stiffness and tau
+from 0.02 down to exactly 0, on four fixed substep sizes and the adaptive march,
+two seeds, and found NO stiffness at which the fixed arm breaks while the
+adaptive arm holds — because the clamp caps the effective stiffness of the
+penetration-setting contacts at 2.34x the authored value at the production tau.
+That negative stands and this pass does not touch it. What the stiffness edit
+buys is a scene whose grasp is not a 44%-embed squeeze. Those are two different
+claims and conflating them would be the easiest mistake available here.
+
+THE REST OF THE AUDIT, briefly, each verified in source:
+
+  * FRICTION IS mu = 1.0 EVERYWHERE, undifferentiated: pad-on-glaze,
+    mug-on-tabletop, arm-on-anything (NewtonShapeCfg default, no material
+    bound). Real pad-on-glazed-ceramic is ~0.4-0.8 and mug-on-wood ~0.3-0.5.
+    A grasp that only holds at mu 1.0 has nowhere to go on hardware.
+  * ARM GAINS DISAGREE WITH THEMSELVES BY 3.4x. `assets.py:94-96` says the
+    gains are "verbatim from Trossen's official MuJoCo model" and sets
+    stiffness 200 for joints 0-2; the same vendor's USD authors 664/735/738 for
+    those joints. The softer source is silently selected and the discrepancy is
+    undocumented. A policy trained against kp=200 will not behave the same on a
+    driver running the shipped gains.
+  * THE 400 N GRIPPER EFFORT CAP IS DEAD. At k=1000 N/m a fully-commanded
+    carriage (0.044 m) can generate at most 44 N, so `effort_limit_sim=400.0`
+    can never bind. It reads as a safety limit and is not one.
+  * `enabled_self_collisions=False` (assets.py:70). Trained trajectories may be
+    self-colliding or rail-colliding on the real rig. This is a hardware SAFETY
+    issue, not a fidelity one.
+  * NO PER-STEP ACTION RATE BOUND IN THE MDP. Actions are ABSOLUTE joint
+    positions, target = q_home + 0.25 * clip(a, -6, 6), i.e. +-1.5 rad from home
+    re-commanded from scratch every 33 ms. The only rate bound is Newton's
+    actuator-side clamp (`NewtonCfg.enforce_velocity_limit=True`, default,
+    clamping the commanded target's change to velocity_limit*dt). THAT CLAMP
+    HAS NO EQUIVALENT IN THE REAL DRIVER. Deploying this policy requires
+    re-imposing |dq_target| <= v_limit/30 per tick in the deployment loop, or
+    the first action step commands a 3 rad swing at the hardware.
+  * THE HAND-OFF DOCUMENT IS WRONG. `REAL_SETUP.md` describes the SPATULA (the
+    task loads the mug), quotes 33.0 cm forward (the config is 0.450 m), and
+    promises "+-10 cm lateral / +-7.5 cm forward jitter" that does not exist.
+    The in-code comment at env_cfg:85 is 12 cm stale against its own constant.
+    Whoever tape-measures the real setup will place the mug in the wrong spot.
+  * THE PHANTOM BODY IS CONFIRMED AND THE FIX IS ONE LINE.
+    `/stationary_ai/follower_left_ee_gripper_link`: PhysicsRigidBodyAPI +
+    PhysicsMassAPI, mass 1e-4 kg, diagonalInertia (0,0,0), centerOfMass
+    (-inf,-inf,-inf), NO children (no collider, no visual), and NO joint in the
+    stage's 19-joint inventory references it. It free-falls for the whole run;
+    `reset_scene_to_default` never touches it because it is not a registered
+    asset. It cannot corrupt observations (not in `robot.body_names`), and the
+    -inf COM is filtered rather than propagated (import_usd.py:736-738,
+    2574-2576). The RIGHT twin is already disabled — `stationary_ai_task.usda`
+    lines 723-727, verified verbatim this pass:
+        over "follower_right_ee_gripper_link" ( active = false ) { }
+    The left one has no such block. Adding the mirrored four lines before the
+    closing brace at :728 is the entire fix. Hygiene, 7 of 22 coords per world,
+    zero transfer impact. Marco's file.
+  * THE CONTACT SENSORS AND EIGHT MDP FUNCTIONS ARE DEAD, re-confirmed. Two
+    `NewtonContactSensorCfg` are constructed and stepped every tick; not one
+    MDP term reads them. `pad_handle_contact` additionally targets
+    `follower_left_carriage_.*` rather than the finger pads, so it would likely
+    be mis-targeted if it were ever wired up. Seven further non-contact MDP
+    functions are also unreferenced.
+  * WHAT IS TRANSFER-FRIENDLY AND SHOULD BE KEPT: the 30 Hz control rate; the
+    absolute-joint-position + binary-gripper interface; the vendor joint
+    position limits; action scale 0.25 (halved deliberately after a slow-mo
+    review); and the fact that the policy is CONTACT-BLIND, which matches a
+    sensorless real gripper exactly.
+
+THE PRIORITIZED FIX LIST, split by who owns it.
+
+  IN-GRANT (solver/manager/harness — this pass or the next):
+   G1 LANDED. Multi-engine harness support: optional `--solver`, family-aware
+      preflight with an explicit equalized-axes contract, a backend-agnostic
+      contract probe, and one arm table shared by training, preflight and
+      evaluation. Details below.
+   G2 The 3-line change to pass 34's `artifact_probe.py` so the cross-play probe
+      resolves its physics through `physics_arm.apply_to` instead of writing
+      `solver_cfg.backend = "sap"` by hand. NOT MADE THIS PASS: that file is
+      being written by pass 34 right now and two passes editing one file is how
+      work gets lost. The exact replacement is in the crossplay config header.
+   G3 `Trace.pen_channel_live=False` on PhysX cells so A1 reports UNCALIBRATED
+      rather than a silent zero. Belongs with G2.
+   G4 A convergence/step-count certificate for the MuJoCo and PhysX arms
+      equivalent to the one the fixed SAP arm got in pass 29, so all four arms
+      report whether their solve converged. Currently only the SAP arms do.
+
+  MARCO'S (task / scene / asset — recipes only, nothing implemented):
+   M1 **DOMAIN RANDOMIZATION.** The single decisive item. Minimum set for a
+      transfer attempt, in priority order, with the event mode each needs:
+        friction        `randomize_rigid_body_material` on mug, finger pads and
+                        table, startup or reset. mu_s in [0.4, 1.0], mu_d in
+                        [0.3, 0.9], restitution [0.0, 0.1]. FIRST, because mu
+                        is currently 1.0 everywhere and the grasp depends on it.
+        object mass     `randomize_rigid_body_mass`, reset, +-30% around
+                        0.0181 kg (a real mug is 0.2-0.4 kg — the authored mass
+                        should be checked against the physical object before
+                        randomizing around it).
+        object pose     `reset_root_state_uniform`, reset. The ranges
+                        REAL_SETUP.md already promises: +-10 cm lateral,
+                        +-7.5 cm forward, and yaw. Non-negotiable for a
+                        tape-measured placement with human error.
+        actuator gains  `randomize_actuator_gains`, startup or reset, kp/kd
+                        +-30%. This is what covers the 3.4x vendor-source
+                        disagreement instead of having to resolve it.
+        joint friction/ `randomize_joint_parameters`, startup.
+        armature
+        observation     noise on `joint_pos`, `joint_vel` and above all
+        noise           `object_position` — the last one is the perception
+                        system's error budget and must be sized from the
+                        estimator that will actually be used, not guessed.
+                        `enable_corruption=True` is already set, so this is
+                        purely a matter of giving the terms a `noise=`.
+        latency         action and observation delay. Not expressible as a
+                        stock event term; needs a buffer in the action/obs
+                        pipeline. Flagged, not specified.
+      Per the events skill: friction/mass/gain terms are backend-specific and
+      must be checked against `envs/mdp/events.py` for Newton vs PhysX support
+      before being written into a `PresetCfg`, and every one needs a
+      small-num_envs repeated-reset smoke test per backend before training.
+      Also per that skill: keep a SEPARATE deterministic nominal evaluation, or
+      the cross-play matrix stops being comparable to the pre-DR results.
+   M2 **PERCEPTION.** Either instantiate one of the three D405 cameras and split
+      the MDP into privileged (teacher) and observable (student) groups, or
+      commit to an external pose estimator and randomize its error and latency
+      into `object_position`. Without one of these the policy is not deployable
+      at any level of DR.
+   M3 **CONTACT STIFFNESS AND FRICTION AUTHORING.** Bench-measure the pad, then
+      author `ke` at env_cfg:148/156/167 and a real material. Note this moves
+      the scene into or across the near-rigid branch, which is a physics change
+      the campaign has already characterized (pass 30) and which must not be
+      made mid-campaign without re-running the baseline.
+   M4 GRIPPER DRIVE. Reconcile 1000 N/m against the vendor's 217687 N/m, or
+      document why the sim gripper is a spring. Paired with M3, because the
+      44% embed is the product of the two.
+   M5 SELF-COLLISION. Turn `enabled_self_collisions` back on and solve the
+      convex-hull overlap properly, or accept that trained trajectories are
+      unvalidated for self-collision on hardware.
+   M6 The phantom body one-liner (D13, still open since pass 28).
+   M7 Delete the two dead contact sensors and the fifteen unreferenced MDP
+      functions, or wire them — but wiring one requires the SAP writeback first
+      (F9), or SAP and MuJoCo stop being the same task.
+   M8 Fix `REAL_SETUP.md` and the stale 33.0 cm comment before anyone
+      tape-measures anything.
+
+READINESS VERDICT: the task is a good ENGINE-COMPARISON vehicle today and is not
+a sim-to-real vehicle at all. M1 and M2 are prerequisites, not improvements. The
+four-way comparison does not need them — it needs the MDP to be identical across
+arms, which it is — so the comparison should not wait on them. But the sentence
+"and run IRL" is not true of this scene today and no amount of solver work makes
+it true.
+
+### TASK 4 — THE PRICE
+
+MEASURED s/iter at 1024 envs on this card, this scene. Every row RE-DERIVED
+THIS PASS from the artifact rather than quoted from the ledger:
+
+    arm            s/iter                     window              artifact
+    mujoco_fixed   3.61 (last-10)             40-iteration run,   p28_train_fixed
+                   3.57 (last-20)             STILL RISING        .log
+    sap_fixed      8.067 [7.442, 8.510]       last-50 of 150, n=3 p33_p31_ingest
+    sap_adaptive   18.208 [16.410, 19.170]    last-50 of 150, n=3 p33_p31_ingest
+    physx          NONE. Never run.           --                  --
+
+**CORRECTION TO THE PASS-33 RECORD.** Pass 33 quoted MuJoCo-fixed as
+"3.13-3.52 s/iter". Re-derived from the same file this pass: the whole-run mean
+is 3.132 and the last-10 mean is 3.614, with the series climbing monotonically
+1.80 -> 3.75 across its 40 iterations and not yet flat. So (a) the quoted upper
+bound was low, and (b) the number is not window-matched to the SAP rows, which
+are last-50 tails of runs 3.75x longer. Treat 3.61 as a LOWER BOUND on the
+steady state. This is not a small bookkeeping point: iteration time on this task
+RISES with training because the policy finds more contact-rich states — the live
+4000-iteration run reads 15.19 s/iter over its first 106 iterations and 18.64
+over its last 10 — so EVERY short-run s/iter in this campaign is a lower bound
+on the 4000-iteration mean. The screening stage exists partly to replace all
+four of these with one window-matched measurement.
+
+PHYSX IS UNKNOWN, NOT BRACKETED. Bracketing it from the Newton arms would
+require assuming the two stacks are comparable, and the PhysX arm boots Kit
+while the others run kitless. The screening stage measures it. Everything below
+is quoted twice: once with PhysX omitted (a hard floor) and once with PhysX
+assumed equal to MuJoCo (the optimistic case the screening will confirm or
+refute).
+
+THE FULL DESIGN, 1024 envs, 3 seeds, 4 arms, 4000 iterations
+(= 98.3M env steps per run), computed by the harness itself
+(`sweep.py plan ... --cost-per-iter`):
+
+    arm            3 x 4000 iterations         hours
+    mujoco_fixed   43,320 s                    12.0
+    sap_fixed      96,804 s                    26.9
+    sap_adaptive   218,496 s                   60.7
+    physx          UNKNOWN (12.0 at MuJoCo's rate; 33.3 at 10 s/iter)
+    ------------------------------------------------------------------
+    THREE ARMS ONLY                            99.6 h  = 4.2 days
+    FOUR ARMS, PhysX at MuJoCo's rate         111.6 h  = 4.7 days
+    FOUR ARMS, PhysX 3x slower                132.9 h  = 5.5 days
+
+    + cross-play evaluation (72 cells: 4 policies x 6 physics x 3 seeds,
+      including the two refinement columns, plus 6 baselines and video)
+                                              ~4 h PROJECTED
+      Only the two SAP production columns are measured (88 s and 126-139 s per
+      cell, p31_eval_*); MuJoCo, PhysX and the 4x-substep reference columns are
+      scaled from their training s/iter and are PROJECTIONS.
+
+    GRAND TOTAL, four arms at 4000            ~116-137 h = 4.8-5.7 days
+
+THE STAGED VERSION, and every stage is a human gate:
+
+    STAGE A  p35_threeway_screen.yaml   3 arms x 3 seeds x 200 iters
+             5.0 h MEASURED-BASED. Runs on today's stack with no edit anywhere.
+             BUYS: a window-matched n=3 s/iter for all three Newton arms (which
+             does not exist today), the failure-mode census, memory, capacity
+             overflow, and proof the 4-way harness path works end to end.
+             CANNOT BUY: any reward statement. At 150 iterations the within-arm
+             reward range is 97% of the mean; 200 does not fix that.
+    STAGE A' p35_fourway_screen.yaml    adds PhysX, after Marco's B1/B3 fixes
+             5.6-7.1 h. Its real product is the first PhysX number ever taken
+             on this machine.
+    STAGE B  p35_fourway_full.yaml      3 seeds at the chosen horizon
+             4000 -> 111.6 h | 2000 -> 55.8 h | 1500 -> 41.9 h
+             CHOOSE THE HORIZON FROM DATA, NOT FROM A ROUND NUMBER. The live
+             main run finishes in ~16 h and hands over a 4000-iteration reward
+             curve for free. Pick the smallest horizon at which its slope is
+             inside the seed-spread band. If that is 1500, Stage B costs 38% of
+             the 4000 figure and the claim is unchanged.
+    STAGE C  p35_fourway_crossplay.yaml  ~4 h
+             The matrix, the refinement column and the verdict. 3-4% of the
+             bill, carrying the claim.
+
+    CHEAPEST DEFENSIBLE PATH  A + B(1500) + C  = ~51 h = 2.1 days
+    FULL PATH                 A' + B(4000) + C = ~121 h = 5.1 days
+
+WHAT EACH HORIZON CAN AND CANNOT SHOW, stated once so nobody has to infer it:
+
+    200 iterations   CAN: s/iter, samples/s, memory, contact and triangle-pair
+                     overflow with the first offending iteration, divergence and
+                     speeding termination rates, NaN, whether an arm runs.
+                     CANNOT: sample efficiency, final performance, "trains
+                     better", ANY reward comparison.
+    1500-4000        CAN: whether each engine reaches the success predicate;
+                     the checkpoints the matrix needs; wall to a fixed budget.
+                     CANNOT: a between-arm reward difference from the training
+                     curves alone — the within-arm seed spread has never been
+                     measured at this horizon on this task, and at every horizon
+                     where it HAS been measured it exceeded every between-arm
+                     difference reported. Report the endpoint as success rate
+                     and put the comparison on the matrix.
+
+RESERVATIONS ON THE PRICE, named: all four training rows assume ONE GPU PROCESS
+AT A TIME, which is the campaign rail. Packing two 1024-env runs is projected at
+1.6-1.8x (pass 33, UNMEASURED) but would void every timing in the sweep, and
+the p35 configs declare `timing_sensitive: true`, so the harness refuses it. The
+evaluation total is a projection everywhere except the two SAP columns. And none
+of this can start until the live 4000-iteration run finishes.
+
+### SOFTWARE LANDED (IsaacLabRubato only; the other three repos are untouched)
+
+    tools/rubato_sweep/physics_arm.py     NEW. One arm table, read by training,
+        preflight and evaluation, so an evaluation cannot silently resolve a
+        different engine than the training it is judging. `train_args()` emits
+        the preset and, only for Newton arms, the `--solver` latch;
+        `apply_to()` is its off-hydra twin and enforces the ordering that
+        `apply_physics_preset` requires (it reloads the raw registry config, so
+        anything written before it is discarded). Carries the two reference arms
+        for the refinement column, marked `trainable=False`. Families are
+        CONTACT-LAW families: `sap` and `mujoco` are separate even though both
+        run through the Newton manager.
+    tools/rubato_sweep/contract_probe.py  NEW. Backend-agnostic preflight probe.
+        Dumps the equalized axes — every MDP term with its function, weight and
+        mode; action and observation dimensions; sim.dt, decimation, the derived
+        control rate, episode length; the scene inventory, joints, bodies and
+        object mass — and records per-engine solver detail best-effort WITHOUT
+        comparing it. A missing engine block is `null` with its reason, never a
+        default. UNEXECUTED: written under this pass's no-GPU rail.
+    tools/rubato_sweep/config.py          `Arm.solver` is now optional and
+        `Arm.family` exists; an arm that names no engine at all is refused; a
+        multi-family sweep must set `preflight.by_family` and must supply a
+        non-empty `preflight.contract_keys`.
+    tools/rubato_sweep/preflight.py       `compare_by_family()`: strict diff
+        WITHIN each contact-law family (the D7 fairness check, unweakened),
+        contract-only ACROSS families. A contract key that is absent on one arm
+        is a violation, not agreement.
+    tools/rubato_sweep/configs/p35_*.yaml four configs (threeway_screen,
+        fourway_screen, fourway_full, fourway_crossplay).
+    experiments/trossen-fourway/          the campaign driver and .gitignore.
+    tools/rubato_sweep/tests/test_fourway.py  15 new CPU-only tests; the suite
+        is 76/76 green including pass 33's and pass 34's.
+
+NOT DONE, DELIBERATELY: `artifact_probe.py`, `artifact.py`, `crossplay.py` and
+`cli.py` were being written by pass 34 while this pass ran and were not touched.
+The 3-line change `artifact_probe.py` needs is specified in the crossplay
+config's header rather than applied.
+
+### RESIDUAL RISK — what this pass could not establish
+
+ R1 EVERY GPU PATH ADDED HERE IS UNEXECUTED. `contract_probe.py` has never run.
+    Its Newton access paths are copied from the proven parity probe; its PhysX
+    block was written from source and has never touched a GPU. First launch is
+    a shakedown, and the PhysX arm is expected to fail before the probe reports
+    (blocker B1).
+ R2 THE PhysX BLOCKERS ARE SOURCE INFERENCES. B1 and B3 are read off the code
+    paths, not observed. They are high confidence and they are not measurements.
+ R3 THE 44% EMBED IS A STATIC EQUILIBRIUM. It ignores solver damping, the
+    contact's own dissipation term, and the drive's damping. It is an order-of-
+    magnitude statement about the ratio of two authored stiffnesses, not a
+    prediction of a trajectory. The direction is not in doubt; the digit is.
+ R4 THE REAL-PAD STIFFNESS RANGE RESTS ON THREE ESTIMATED QUANTITIES (pad
+    modulus, patch area, thickness) and on the assumption that the mug wall is
+    rigid in series. The bench measurement in M3 replaces all four.
+ R5 NO HORIZON HAS EVER BEEN SHOWN TO SEPARATE REWARD ON THIS TASK. 150 cannot
+    (measured), 300 cannot (measured). 4000 is untested for seed spread — the
+    live run is one seed. If Stage B's three seeds turn out to spread as widely
+    at 4000 as they do at 150, the training-curve endpoint is unusable at ANY
+    affordable horizon and the matrix is not merely the better instrument but
+    the only one.
+ R6 THE ACR CONFOUND ON THE ONE CLEAN PAIR IS UNSEPARATED and is not in these
+    configs, because separating it is comparison semantics and therefore
+    Marco's. Every SAP-fixed-vs-SAP-adaptive number the four-way produces
+    inherits it.
+ R7 THE MuJoCo ARM'S OBJECT CONTACT LAW IS NOT THE SAP ARMS'. The mug's
+    `mjc:solimp` (dmax 0.999, priority 1) is consumed by MuJoCo and ignored by
+    both SAP arms and by PhysX. This is an ASSET-level difference invisible to
+    the task cfg and therefore invisible to the preflight contract, which
+    compares the task, not the USD. Named here because it will not be caught.
+ R8 THE EVALUATION COST IS A PROJECTION on four of its six physics columns.
+
+### PROVENANCE (all p35_ prefix; no p13-p34 artifact overwritten)
+
+  design/software  IsaacLabRubato tools/rubato_sweep/{physics_arm,
+                   contract_probe}.py, config.py + preflight.py edits,
+                   configs/p35_{threeway_screen,fourway_screen,fourway_full,
+                   fourway_crossplay}.yaml, tests/test_fourway.py,
+                   experiments/trossen-fourway/{fourway.sh,.gitignore}
+  re-derived here  p28_train_fixed.log and mjc_1024x25.log (MuJoCo s/iter,
+                   window by window); train_main_adaptive.log (the live run's
+                   rising iteration time); p31_eval_*.json (the 2x2 returns and
+                   their SEMs); p33_p31_ingest/summary.json (the seed spreads)
+  verified in      trossen_spatula_lift_env_cfg.py:128-178 (the physx preset),
+  source           :214-229 (the sensors), :309-330 (the observations),
+                   :413-428 (the whole EventCfg), :484-496 (the timing);
+                   newton_manager_cfg.py:67-102 (ke/kd/mu defaults and the
+                   solref conversion); contact_sensor_cfg.py:16-26 and
+                   contact_sensor.py:289-304 (the Newton pin);
+                   physics_presets.py:22-27 and train_rsl_rl.py:52-67
+                   (--solver is Newton-only); stationary_ai_task.usda:723-727
+                   (the right twin's active=false)
+  GPU              zero processes started this pass; nvidia-smi polled
+                   read-only only, and it showed one process throughout: the
+                   live 4000-iteration adaptive run.
