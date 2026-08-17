@@ -6722,3 +6722,143 @@ config's header rather than applied.
     NEWTON_SAP_ATTEMPT_CONSISTENT_R is read with no default argument, so it is
     ON for any value except the literal "0". Three different parse conventions
     coexist in the NEWTON_SAP_* family.
+
+## PASS 38 — TRUE CONTACT PARAMETERS FOR THE SAP PATH, DERIVED FROM THE
+## LBM/DRAKE ASSET PROPERTIES
+## 2026-08-16. SOURCE + GEOMETRY + CLOSED FORM ONLY: ZERO GPU PROCESSES
+## STARTED. nvidia-smi was polled read-only at the start and the end and never
+## showed a process this pass started: at the start the queued comparison
+## (PID 2315962, 11509 MiB) held the card; by the end it had finished and
+## pass 37's p37_divergence_probe.py (PID 2333768) had taken it. Neither is
+## ours -- every script this pass ran is pxr/numpy on the CPU.
+## NO TASK, SCENE, ASSET OR SOLVER FILE WAS CHANGED. Files
+## written: tools/sap_contact_parameter_derivation.md,
+## tools/probes/sap_contact_parameter_derivation.py, and this entry.
+## Marco's request: derive the TRUE contact parameters for the SAP path from
+## TRI's validated LBM asset properties, so the scene stops running engine
+## placeholders.
+
+### THE COMBINATION RULES, READ FROM SOURCE (sap_warp/sim/sap_helpers.py)
+
+  _sap_combine_stiffness(k0,k1) = k0*k1/(k0+k1)        SERIES        (:199)
+  _sap_combine_mu(mu0,mu1)      = 2*mu0*mu1/(mu0+mu1)  HARMONIC MEAN (:163)
+  _contact_tau_pair(t0,t1)      = t0 + t1              SUM           (:233)
+
+  The campaign note was right in kind, wrong by a factor of 2 in the place that
+  matters: stiffness HALVES for two equal shapes, friction does NOT. All three
+  rules are identical to Drake's own (discrete_update_manager.cc:940 for the
+  series gradient, contact_properties.cc:153 for the tau sum), verified against
+  Drake master 29a5d2e6.
+
+### THE HEADLINE RESULT: THE AUTHORED ke IS INERT
+
+  At steady state SAP realizes k_eff = min(k_pair, k_cross) with
+  k_cross = 1/(rn_hard*h*(h+tau)), rn_hard = beta^2/(4pi^2)*w_eff. The derived
+  pair stiffnesses (4.0e7 base-table, 3.9e6 handle-pad) exceed k_cross by 3-4
+  orders of magnitude and are CLAMPED. The authored ke only stops being clamped
+  below h ~ 5-20 us; the smallest inner dt this campaign has ever observed is
+  2.24 ms. Authoring the true ke therefore changes NOTHING on its own. The
+  entire achievable gain in realized contact stiffness is ~10x and it comes
+  from shortening tau_d.
+
+### THE DERIVED VALUES
+
+  per shape   /Mug/collisions_base        ke 4.2e7   mu 0.2
+              /Mug/collisions_wall_[0-7]  ke 4.6e7   mu 0.2
+              /Mug/collisions_handle_[0-2] ke 3.9e6  mu 0.2
+              TableGuard, carriages, grippers, links, ground  ke 1e9  mu 0.2
+  global      sap_contact_tau_d 0.01 -> 6.6e-4  (pair 20 ms -> 1.33 ms)
+  drive       left_gripper stiffness 1000 -> 200 N/m
+
+  Stiffness by Drake's own rule k = A_e * g (discrete_update_manager.cc:1025),
+  g = E/H from the convex pressure field (make_convex_field.h), A and H MEASURED
+  facet by facet on assets/usd/mug_inomata_white.usd. Calibrated against the two
+  LBM assets whose compliant tet meshes exist: H = 3.648 mm (spatula) and
+  4.248 mm (plate) by Drake's max-interior-distance definition.
+
+  tau by three independent routes -- H&C damping-term match tau = d*x0 solved
+  self-consistently (0.11 ms), critical damping at the realized stiffness
+  (2.43 ms), and Castro/CENIC (beta/pi)*h (1.33 ms). Range [0.11, 2.43] ms, all
+  clustered at ~1 ms. Marco asked whether the derived value lands near CENIC's
+  prescription: IT DOES, from two directions that never reference CENIC.
+
+  Drake sanctions NO H&C -> tau_d conversion (multibody_plant.h:806 -- kSap uses
+  relaxation_time and IGNORES hunt_crossley_dissipation). Castro 2023's own
+  hand-matched pairs give d/tau_d of 5e5, 1e5, 5e4 -- not a constant. The
+  mapping above is OURS, matched at a stated operating point.
+
+### CROSS-CHECKS THAT THE CHAIN IS RIGHT
+
+  * rn_hard/rn_soft at w=14.917, k=1250, tau=0.02, h=1/120 computes to 0.11152
+    against the pass-25 dump's MEASURED 0.1115.
+  * The mug's own contacts compute to w_eff 94-180 /kg against a near-rigid
+    crossover of 133.8 /kg at h=1/120 -- so the measured 11% near-rigid fraction
+    IS the mug.
+  * Pass-35's measured 44% finger embed reproduces from first principles as
+    k_d/(k_d+k_c) = 1000/2250 = 0.444, which independently proves today's pinch
+    sits on the SOFT branch.
+  * Vendor drive stiffness RE-READ from stationary_ai.usd: 217687 N/m, damping
+    10884, maxForce 400. The task's 1000 is a 217.7x softening, confirming the
+    inherited "218x".
+
+### THE FOUR CONSEQUENCES MARCO ASKED FOR
+
+  (a) BRANCH. Every derived pair lands far on the near-rigid branch. Today only
+      11% do. R_n on that branch is dt-INDEPENDENT, so pushing everything there
+      changes what the adaptive-vs-fixed comparison is measuring.
+  (b) PENETRATION. Resting mug 2.8 um -- ceramic-sane. Under grasp 0.95 mm at
+      the current drive stiffness -- NOT sane, and not fixable by ke.
+  (c) DRIVE STIFFNESS. Should go DOWN, to ~200 N/m, not up: 2% embed, ~2 N grip,
+      4.4x margin over the 0.444 N needed at mu 0.2. The vendor's 217687 is
+      UNUSABLE at this substep -- it would need k_c >= 4.1e6, i.e. h <= 230 us.
+  (d) RISKS. Authoring ke through the SHARED material channel BREAKS the MuJoCo
+      arm: newton_manager_cfg.py:84 converts (ke,kd) to solref as
+      dampratio = (kd/2)sqrt(1/ke), which at ke=4e7 with kd=100 collapses from
+      1.0 to 0.0079. ke must be applied SAP-ONLY. Recommended order: mu first
+      (real, 5x, safe on both arms), then tau_d (SAP-only), then k_drive, then
+      ke last.
+
+### FRICTION IS THE ONE THAT ACTUALLY BITES
+
+  Pair mu 1.0 vs the validated 0.2 is exactly 5x. Pinch force to hold the mug
+  goes 0.089 N -> 0.444 N. And the mug tips rather than slides when mu > r/z =
+  0.726: at 1.0 it ALWAYS tips, at 0.2 it ALWAYS slides. That is the "sticky"
+  signature on the video, in one line of statics.
+
+### PROVENANCE (all p38_ prefix; no p13-p37 artifact overwritten)
+
+  documents  tools/sap_contact_parameter_derivation.md
+  probe      tools/probes/sap_contact_parameter_derivation.py (committed,
+             re-runnable, closed form, no Warp/USD/GPU import)
+  scratchpad p38_geometry.py, p38_geometry2.py (hull facet areas),
+             p38_depth.py (LBM tet-mesh foundation depths),
+             p38_drive.py (vendor drive attrs + per-facet H)
+  code read  sap_warp/sim/{sap_helpers,contact_solve,contact_jacobian,
+             solver_sap,loader/scene,resources/collision_model}.py;
+             newton-adaptive/newton/_src/{utils/import_usd,usd/schemas,
+             geometry/contact_reduction}.py; IsaacLab
+             {newton_manager_cfg,mjwarp_manager,mjwarp_manager_cfg}.py and
+             the trossen_spatula_lift task + assets
+  Drake      master 29a5d2e6, read via web; every claim carries a file:line
+  GPU        zero processes started this pass; nvidia-smi polled read-only only
+
+### OPEN, AND EXPLICITLY NOT CLOSED BY THIS PASS
+
+  * N, the contacts emitted per shape pair, is UNMEASURED (needs GPU). It scales
+    the authored ke by up to 8x. Immaterial while clamped.
+  * The mug's compliant tet mesh named in its SDF (mug_inomata_white_low_
+    16faces.vtk) is ABSENT from the LBM bank, so the mug's H is inferred from
+    the task's convex hulls, not from TRI's own volume mesh.
+  * E = 1e8 Pa is TRI's compliant SURROGATE: ~700x below real ceramic and 10x
+    above Drake's own default. "Validated" = TRI shipped it, not that it is the
+    material's modulus.
+  * Whether NewtonShapeCfg.gap = 0.01 shifts phi0 was checked by code path
+    (phi0 uses shape_margin = 0.0, not gap) and NOT by probe. If that reading is
+    wrong, every contact activates 1 cm early and the whole of section 3 moves.
+  * No validated mu exists for the gripper pads or the table. 0.2 is chosen to
+    reproduce the object's value under the harmonic mean, not measured.
+  * sap_warp's own hydroelastic path is INERT: entry_k_eff is allocated but
+    never written, and collision/pipeline.py:318 says the merge is in progress.
+    So this pass pushes a hydroelastic number into a point-contact channel by
+    hand -- exactly what Drake documents as a user aid and never applies itself.
+  * NOTHING HERE HAS BEEN RUN. The first real evidence is a rest probe.
