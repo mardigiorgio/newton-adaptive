@@ -6,6 +6,16 @@ process on the card was the live 4000-iteration training run, PID 2271848).
 **No code was changed this pass.** The only files written are this document and
 the ledger entry.
 
+**Amended by pass 37, 2026-08-16/17.** Pass 36 closed Section 5 with the
+caveat that none of its physics-neutrality claims had been re-measured. Pass
+37 measured them and **rewrote Section 5 end to end**: the "proof class
+actually on record" column is gone, replaced by the test actually run, the
+result, and the evidence class earned. Section 12.1 records the scope
+corrections that verification turned up. Sections 1-4 and 6-11 are pass-36
+text, unamended. The source verified by pass 37 is byte-identical to the
+source pass 36 audited (`git diff --stat 80d13a9a..d16db463` touches only
+`tools/*.md`).
+
 Audience: the methods section of a paper. Everything below is either (a) quoted
 from the published paper, (b) read out of source at a named file and line, or
 (c) derived in closed form from (a) and (b). Claims that are none of those are
@@ -709,27 +719,463 @@ and is listed here only for completeness of the comparison.
 
 ## 5. CATEGORY C — NOT IN THE PAPER, CLAIMED PHYSICS-NEUTRAL
 
-All of these are ours, all in `sap_warp`, all default **ON** unless noted. The
-"proof class" column states what is *actually on record*, per CLAUDE.md's rule
-that a comment is not evidence.
+**Rewritten by pass 37 (2026-08-16/17): the "proof class actually on record"
+column has been replaced with measured evidence.** Pass 36 closed this
+section with the correct caveat that none of the C-class bitwise claims had
+been re-measured. They have been. Every statement below was produced on the
+bytes at `newton-adaptive d16db463` / `sap_warp afd5dc6`; `git diff --stat
+80d13a9a..HEAD` touches only `tools/*.md`, so **the source verified here is
+byte-identical to the source Section 4 audits** — the audit and its
+verification are not describing different trees.
 
-| # | Change | Commit | Site | Default | Proof class actually on record |
+All of these items are ours, all live in `sap_warp`, and all default **ON**
+unless noted.
+
+### 5.0 Evidence classes, and why they must not be conflated
+
+| Class | Meaning | What it licenses |
+|---|---|---|
+| **BITWISE-VERIFIED** | A fresh run at this HEAD, under `NEWTON_SAP_DETERMINISTIC=1`, produced byte-identical committed trajectories AND byte-identical controller carry state with the switch ON and OFF, against a reference recomputed in the same invocation and guarded by a reference-vs-reference-repeat oracle. | "This optimization does not change the physics." |
+| **SOURCE-EXHAUSTIVE** | No run-level A/B exists at this HEAD because the alternative path was **deleted, not retained**. The claim rests on a mechanical, exhaustive reading of the current bytes — a diff, not a judgement. | "This optimization cannot change the physics, by construction." The residual risk is compiler-level and is named. |
+| **BOUNDED** | Not bitwise, and never will be: the change reorders floating-point reductions. The effect is measured on a real contact-violent trajectory against reference scales measured in the same session. | "This perturbs trajectories by no more than X", with X stated. |
+| **PHYSICS-VISIBLE** | Not neutral, not claimed neutral. | Nothing. A design decision with stated semantics. |
+| **UNVERIFIED** | Stated, not established. | Nothing. |
+### 5.1 The verification table
+
+Every C and D item, the test actually run this pass, the result, and the
+evidence class earned. Chain and censuses: `p37_progress.txt`; per-gate logs
+`p37_g1_mirror.log` .. `p37_g8_prodpair.log`.
+
+| # | Change | Commit | Default | Test actually run this pass | Result | Class earned |
+|---|---|---|---|---|---|---|
+| C1 | Per-world `dt` threading (scalar -> `dt[env]`) | `37663f5` | n/a | (a) mirror-pair env-privacy probe, det=1, per-world `dt` spread enforced by a vacuity guard; (b) exhaustive classification of every `dt`-touching line in the landing diff | **PASS.** 8 mirror pairs x 8 boundaries x 10 recorded fields, bitwise identical, at three tolerances (1e-7/1e-8/1e-9) with all six vacuity guards armed (10-12 distinct per-world `dt` values, rejections exercised). Every `dt`-touching changed line is one of three purely-indexing forms. | **PASS.** 8 mirror pairs x 8 boundaries x 10 recorded fields, bitwise identical, at three tolerances (1e-7/1e-8/1e-9) with all six vacuity guards armed (10-12 distinct per-world `dt` values, rejections exercised). Every `dt`-touching changed line is one of three purely-indexing forms.C |
+| C2 | Env-list compaction (`NEWTON_SAP_SOLVE_COMPACT`, `_LS_COMPACT`) | `79e43bd`, `5a6cbf4` | ON | flag-equivalence cells `solve-compact`, `solve-compact-graph`, `ls-compact`, `ls-solve-compact`, `boundary-solve-compact`, `boundary-ls-compact`, judged bitwise against a same-family reference; plus the mirror-pair probe | **PASS.** 6 flag-equivalence cells bitwise; and in the aggregate run the eight scheduling flags together are bitwise (see 5.5). | **PASS.** 6 flag-equivalence cells bitwise; and in the aggregate run the eight scheduling flags together are bitwise (see 5.5).C |
+| C3 | Blocked-Cholesky narrowing | `fe98f46` | unconditional | (a) flag-equivalence `march-compact` family (the only runtime toggle of the launch width); (b) mechanical diff of both listed kernels against their retained non-listed twins | **PASS.** `march-compact`, `-graph`, `-conditional` bitwise against `boundary`, both branch bodies executed. Diff of both listed kernels vs their retained twins: **zero arithmetic lines differ**. | **PASS.** `march-compact`, `-graph`, `-conditional` bitwise against `boundary`, both branch bodies executed. Diff of both listed kernels vs their retained twins: **zero arithmetic lines differ**.C |
+| C4 | Live-`k` GEMM truncation (`NEWTON_SAP_GEMM_RESHAPE`) | `27dcada` | ON | flag-equivalence cells `gemm-reshape`, `boundary-gemm-reshape`, `gemm-full-stack`; plus a closed-form identity of the pack's and GEMM's k-tile bounds on current bytes | **PASS.** 3 cells bitwise, engagement counter 5.5e8 tile-skips in the aggregate run. Pack bound and GEMM bound are the same expression, so no truncated tile is ever read. | **PASS.** 3 cells bitwise, engagement counter 5.5e8 tile-skips in the aggregate run. Pack bound and GEMM bound are the same expression, so no truncated tile is ever read.C |
+| C5 | Per-contact pack + `j_flat` hoist (`NEWTON_SAP_PACK_PERCONTACT`) | `1ff0ea0` | ON | (a) flag-equivalence cells `pack-percontact`, `boundary-pack-percontact`, `pack-full-stack`; (b) the `j_flat` hoist's J-invariance-within-a-solve premise re-measured by byte-comparing `J`, `j_flat` and the live contact count across Newton trips inside every solve | **PASS.** 3 cells bitwise (2.94e6 pack execs engaged). J-invariance re-measured: **101 trip-pairs over 38 multi-trip solves, 152 trips, zero mismatches** in `J`, `j_flat` or the live contact count. | **PASS.** 3 cells bitwise (2.94e6 pack execs engaged). J-invariance re-measured: **101 trip-pairs over 38 multi-trip solves, 152 trips, zero mismatches** in `J`, `j_flat` or the live contact count.C |
+| C6 | Shared assembly for half-1 (`NEWTON_SAP_SHARED_ASSEMBLY`) | `b1e48a3` | ON | flag-equivalence cells `shared-assembly`, `boundary-shared`, `shared-full-stack`; plus a both-ends check of the caller contract on current bytes | **PASS.** 3 cells bitwise, 2996 reuse executions in the aggregate run. Caller contract holds at both ends: the skipped region uses no `dt`, and half-1 receives the full solve's own state/contacts/control/mask objects. | **PASS.** 3 cells bitwise, 2996 reuse executions in the aggregate run. Caller contract holds at both ends: the skipped region uses no `dt`, and half-1 receives the full solve's own state/contacts/control/mask objects.C |
+| C7 | Narrow-v3 (`NEWTON_SAP_NARROW_V3`, two sites sharing the name) | `aac9694` | ON | flag-equivalence `narrowv3` family (`narrowv3-ref`, `-ref-repeat`, `narrowv3`, `-graph`, `-conditional`) judged bitwise against a same-stack pinned-off reference | **PASS.** `narrowv3`, `-graph`, `-conditional` bitwise against a same-stack pinned-off reference; 20-27 narrowed launch sites emitted. | **PASS.** `narrowv3`, `-graph`, `-conditional` bitwise against a same-stack pinned-off reference; 20-27 narrowed launch sites emitted.C |
+| C8 | Run-ahead ADOPT/ANCHOR split (`NEWTON_SAP_RUNAHEAD`) | `2a119d2`, `e41cc070` | **OFF** | dedicated bitwise oracle probe, plus the flag-equivalence `runahead` family | **PASS with a correction.** The oracle is bitwise for ON-repeat and for batch-vs-solo isolation (8 worlds x 2 window edges). **ON-vs-OFF is NOT bitwise**: positions agree exactly (max |dq| 0.000e+00) but velocities differ by max |dqd| 3.7e-09 (f32 clock-rebase rounding of landing slivers). | **PASS with a correction.** The oracle is bitwise for ON-repeat and for batch-vs-solo isolation (8 worlds x 2 window edges). **ON-vs-OFF is NOT bitwise**: positions agree exactly (max |dq| 0.000e+00) but velocities differ by max |dqd| 3.7e-09 (f32 clock-rebase rounding of landing slivers).C |
+| C9 | Host-sync-free masked runtime-state reset | `afd5dc6` | n/a | exhaustive read of what the unmasked reset clears vs what the step path consumes, plus a call-site census | **PASS, and out of scope for the adaptive arm.** The only step-path-consumed field the unmasked reset clears is `_contact_solve_v_guess_active`, which the masked variant clears with an identical value write; the other ten are write-only host bookkeeping never read. Its sole call site is fixed-arm only. | **PASS, and out of scope for the adaptive arm.** The only step-path-consumed field the unmasked reset clears is `_contact_solve_v_guess_active`, which the masked variant clears with an identical value write; the other ten are write-only host bookkeeping never read. Its sole call site is fixed-arm only.C |
+| D1 | Fused update eval (`NEWTON_SAP_FUSED_UPDATE`) | `3bff5c1` | **ON** | bounded: fusions-OFF vs shipped on the Trossen rig, det=1, against three reference scales measured in the same session | Aggregate run, 512 worlds x 150 steps: divergence onset step 13, max `joint_q` Linf **4.75e-2** over the horizon. Ensemble identical to the shipped arm (accepted-error median and p90 ratios 1.000, substeps ratio 1.001). | **BOUNDED** |
+| D2 | Fused armijo ladder (`NEWTON_SAP_FUSED_LS`) | `f49b20b` | **ON** | same run as D1 (the three fusions are toggled together; they are not separable at the trajectory level) | as D1 (measured jointly) | **BOUNDED** |
+| D3 | Folded alpha-max (`NEWTON_SAP_FUSED_ALPHAMAX`) | `a79539a` | **ON** | same run as D1 | as D1 (measured jointly) | **BOUNDED** |
+
+**Why D1-D3 are tested together and not separately.** `_fused_alphamax` is
+gated on `_fused_ls` (`contact_solve.py:5452-5453`), so the two cannot be
+varied independently, and all three change the same class of quantity (a
+reduction total feeding a convergence or accept decision). A per-flag
+trajectory bound would therefore report three correlated numbers from one
+mechanism. What the run does establish is the bound on **all three at once**,
+which is the quantity a reader needs: it is the difference between the
+shipped fast path and the fusion-free path.
+
+**C8 correction.** Pass 36 recorded C8's evidence as a "bitwise oracle
+probe". That is right about what the probe certifies bitwise — the ON-repeat
+determinism and the batch-vs-solo world isolation — but wrong about ON-vs-OFF,
+which the probe itself reports as *not* bitwise: committed positions agree
+exactly, committed velocities differ by up to 3.7e-9 from f32 clock-rebase
+rounding of landing slivers. C8 is a BOUNDED item, not a bitwise one. It is
+default OFF, so nothing in the reportable configuration depends on this.
+
+**A second isolation certificate worth quoting.** The same run-ahead probe
+establishes, bitwise, that **a world's committed rows in a 8-world batch equal
+its rows from a solo run** at every window edge. That is an independent
+batch-vs-solo confirmation of the env-privacy premise the whole C-class rests
+on, obtained on a different rig from the mirror-pair probe.
+
+**Why the D1-D3 fusions cannot change the contact law, only the route to it.**
+Three of the eight contact-`R` construction sites were added by these
+fusions. A structural digest of all eight sites on current bytes pairs each
+added site with an upstream twin of identical arithmetic structure:
+`contact_solve.py:948` (upstream) with `:2760` (`3bff5c1`, D1), and
+`sap_helpers.py:2400`/`:2587` (upstream, f64/f32) with `:2475`/`:2660`
+(`a79539a`, D3). Likewise the fused ladder calls the *same* `sap_armijo_ok`
+accept helper the launch chain calls (`contact_solve.py:3928-3947, 4261-4280`
+vs `:4435-4436, 4495-4496, 4515, 4545`). The constitutive law, the accept
+rule, the ladder values and the tolerances are the chain's; what differs is
+the order in which floating-point contributions are summed.
+### 5.2 Item detail — what was actually established, and how
+
+**C1 — per-world `dt` threading.** The claim has two halves and they earn
+different classes.
+
+*Threading* (every world reads its own `dt`; nothing leaks across the env
+axis) is measured by `tools/probes/sap_neutrality_mirror_probe.py`. The scene
+is built as MIRROR PAIRS: world `i` and world `N-1-i` get byte-identical
+initial conditions but occupy different env indices with different
+neighbours. Physics is env-local, so the pair must agree bitwise. A
+wrongly indexed `dt` read hands world `i` one neighbour's step and world `N-1-i`
+a *different* neighbour's, so the mirror breaks; likewise any cross-env leak
+in the list-indexed kernels. The probe's vacuity guards require live
+contacts, a certified rejection, per-world `dt` spread WITHIN a boundary, and
+distinct per-world substep counts — without `dt` spread the threading claim
+is untested and the probe fails rather than passing vacuously.
+
+*Uniform reduction* (a scalar `dt` reproduces the deleted scalar-kernel path)
+has **no run-level A/B at this HEAD**: `37663f5` converted the kernels in
+place; the scalar signatures were deleted, not retained. What is established
+is mechanical and exhaustive. `git show 37663f5 -U0 -- sim/` classifies every
+`dt`-touching changed line, and each is one of exactly three forms:
+`dt: scalar` -> `dt: wp.array(dtype=scalar)` in a signature, `scalar(dt)` ->
+`scalar(dt[env])`, or `dt` -> `dt[env]`. No arithmetic expression, operand
+order or dtype changed, and `env` is the same index every other per-env array
+in the same kernel uses (`pd_limit[env, i]`, `contact_tau_d[env, c]`). The
+fill is value-preserving at the dtype the kernel reads:
+`contact_solve._dt_world` is allocated at `self.solve_dtype`
+(`contact_solve.py:5236`) and the scalar path is `fill_(float(dt))`
+(`:9111`), so `scalar(dt[env])` is the same rounding of the same Python
+double that `scalar(dt)` was — there is no intermediate cast to round twice.
+`solver_sap._dt_world` and `free_motion._dt_world` are `float64`, matching
+their kernels' `wp.float64` scalar parameters.
+
+Residual risk, named: a `dt` broadcast identical for every world (every
+kernel reading `dt[0]`) is mirror-symmetric and the probe would not catch it;
+the source classification above is what excludes it.
+
+**C2 — env-list compaction.** The audit described this as "~25 kernels
+converted to `(env_idx, env_n)` list indexing", which understates how strong
+the neutrality argument is. ON and OFF **run the same kernel binaries**: with
+the switch off, the consumers read a *static identity list at full width*
+(`_identity_env_idx` / `_full_env_n`, `contact_solve.py:5512-5531`); with it
+on, they read the device-built active list. The only difference between the
+arms is which envs are visited and in what order. The bitwise claim therefore
+reduces exactly to env-privacy of the kernel bodies plus the deadness of
+de-listed envs' skipped writes — which is what the mirror-pair probe and the
+flag-equivalence arms test.
+
+**C3 — blocked-Cholesky narrowing.** This item has **no escape hatch at
+HEAD**: `factorize_masked_listed` / `solve_masked_listed` are called
+unconditionally (`contact_solve.py:7633, 7644`); the only thing that varies
+is `self._env_grid`, which march compaction narrows. The pre-`fe98f46` masked
+twins are therefore *unreachable at runtime*, and no ON/OFF A/B of the
+conversion itself exists. Two things are established instead. First, a
+mechanical diff of each listed kernel against its retained non-listed twin
+(both twins are still in `blocked_cholesky.py`) shows the complete set of
+changed code lines is: the rename, two added list parameters
+(`env_idx`, `env_n`), and a four-line prologue replacing
+`env, tid = wp.tid()` with `i_env, tid = wp.tid(); if i_env >= env_n[0]:
+return; env = env_idx[i_env]`. **Zero arithmetic lines differ.** Second, the
+flag-equivalence probe's march-compact arms exercise the listed kernels at
+two different grid widths and judge them bitwise — which is the available
+test of "grid width does not change results".
+
+**C4 — live-`k` GEMM truncation.** Established in closed form on the current
+bytes, and the two bounds are the same expression. The bounded pack skips
+k-tiles with `k_tile >= tiles_live`, `tiles_live = (count_live*3 + tile_k -
+1)//tile_k` (`contact_solve.py:1659-1662`). The bounded GEMM walks
+`k0 < rows_stop`, `rows_stop = tiles_live * tile_k` clamped to
+`padded_contact_rows` (`:1729-1731`), i.e. exactly k-tiles
+`0 .. tiles_live-1` — precisely the tiles the pack wrote. There is no stale
+read. Against the full walk, the extra tiles the full GEMM visits hold only
+pack-written zeros (the per-element guard `c < count` yields `0` for both
+operands), and `acc + J^T·0 = acc` exactly in IEEE arithmetic, in the same
+ascending accumulation order. Residual risk, named: the sign of a zero can
+differ in principle; the flag-equivalence `gemm-reshape` arms are what
+exclude it empirically.
+
+**C5 — per-contact pack + `j_flat` hoist.** Two halves again.
+
+*The pack* keeps the `gj` expression verbatim. The per-row form is
+`g[r,0]*contact_jac[env,c,0,d] + g[r,1]*contact_jac[env,c,1,d] +
+g[r,2]*contact_jac[env,c,2,d]` (`:1686-1690`); the per-contact form stages
+the three loads in registers and evaluates
+`g[r,0]*jv0 + g[r,1]*jv1 + g[r,2]*jv2` (`:1839-1841`) — same operands, same
+values, same left-to-right association. Coverage matches too: for a live
+contact `k0c+2 = 3c+2 <= 3*count_live - 1 < rows_live_stop`, so the
+three-row write can never cross the live boundary, and padding dofs
+(`d >= dof_per_env`) take the zero branch in both forms exactly as the
+per-row guard does. Residual risk, named: register staging could in principle
+let the compiler contract multiply-adds differently; that is what the
+`pack-percontact` probe arms measure rather than assume.
+
+*The `j_flat` hoist* rests on a precondition the audit correctly flagged as
+ASSERTED: that `J` (and therefore `j_flat`, a pure guarded repack of `J`) and
+the live contact count are fixed within a solve. That precondition is
+re-measured this pass by `p17_j_invariant_probe.py`, which byte-compares the
+device buffers across Newton trips inside each solve on a friction march with
+mode switching, and fails as vacuous if no solve runs two or more trips.
+
+**C6 — shared assembly for half-1.** This is the one C-class item whose
+correctness is a *caller contract*, and the caller is ours, so the contract
+is verified at both ends on current bytes. Callee: everything the reuse path
+skips is dt-independent — `contact_jacobian.compute` forwards `dt` only to
+`free_motion.compute` and then returns early at `if reuse_assembly:`
+(`contact_jacobian.py:2635`), and `grep` over the entire skipped region finds
+no use of `dt`. Caller: `solver_sap_adaptive.py:2352-2362` calls half-1 with
+the *same objects* the full solve received — `self._state_cur`,
+`self._sap_control`, `self._sap_contacts`, `world_active=wa` — the only
+differing argument being `self._dt_half` and the warm-start guess, neither of
+which is an assembly input. Only half-1 qualifies; half-2 anchors at the
+midpoint state and keeps its own assembly.
+
+**C9 — host-sync-free masked runtime-state reset.** Two findings, one of them
+a scope correction the audit should carry.
+
+*Equivalence.* The unmasked `reset_runtime_state` clears eleven fields
+(`solver_sap.py:1038-1051`); the masked variant clears one,
+`_contact_solve_v_guess_active`. That is sufficient because it is the **only
+one of the eleven that anything in the step path consumes**: it is passed
+into the solve at `:1532`, while `sim_time`, `frame_id`, `last_*` and
+`_has_contact_solve_v_guess` are written at `:1498, 1568-1569, 1575,
+1579-1580` and **never read** anywhere in `solver_sap.py` or
+`contact_solve.py`. The race is benign by construction — every firing thread
+writes the same value `0` to the same slot `0`.
+
+*Scope correction.* `reset_runtime_state_masked` has exactly one call site,
+`mjwarp_manager.py:910`, and it sits inside `if cls._sap and not
+cls._adaptive`. **C9 is on the fixed-step SAP path only; it never executes in
+the SAP-adaptive arm**, so it cannot affect any adaptive result, reportable
+or otherwise.
+### 5.3 What "OFF" actually is, per item
+
+An ON/OFF bitwise test only means what the OFF arm is. These are not the same
+kind of switch, and the audit previously did not distinguish them. Established
+by reading each landing commit's diff and each flag's use site on current
+bytes.
+
+| # | What the OFF arm runs | Kernel identity across the arms |
+|---|---|---|
+| C2 | a **static identity list at full width** (`_identity_env_idx` / `_full_env_n`, `contact_solve.py:5512-5531`) | **SAME kernels**; only the visited env set and its order differ |
+| C3 | nothing — the listed twins are called unconditionally (`:7633, 7644`); only `self._env_grid` varies, via march compaction | **SAME kernels**, two launch widths. The pre-`fe98f46` masked twins are retained in `blocked_cholesky.py` but unreachable at runtime |
+| C4 | the legacy padded pack + full GEMM, **byte-untouched**: `27dcada` is `215 insertions / 0 deletions` — a pure addition of a second, bounded pair | different kernels; the legacy pair was not edited at all |
+| C5 | the per-row bounded pack | different kernels, legacy retained and reached by a flag branch |
+| C6 | the assembly launches are emitted rather than skipped | **SAME kernels**; one arm simply emits more launches |
+| C7 | a **static identity list at full width** (`:6162`, `upd_idx, upd_n, upd_grid = self._identity_env_idx, self._full_env_n, self.num_envs`) | **SAME kernels**; the conversion was in place, exactly as C2 |
+| C8 | the per-boundary contact stream (the default) | different path, opt-in, default OFF |
+| C9 | nothing — there is no OFF, and the call site is fixed-arm only | n/a on the adaptive path |
+| D1, D2, D3 | the retained launch chain, reached by a flag branch | different kernels, legacy retained |
+
+Two consequences worth stating explicitly:
+
+* For **C2 and C7 the ON/OFF bitwise claim is not a claim about two
+  implementations of the same math** — it is a claim that a kernel's output
+  for a given env does not depend on which *other* envs share its launch, nor
+  on its position in the list. That is a strictly weaker and more checkable
+  proposition, and it is what the mirror-pair probe attacks directly.
+* For **C4 the OFF arm is upstream-equivalent code that the landing commit
+  never touched**, which makes it the strongest OFF arm in the set.
+### 5.4 The contribution table (speedups cited from the ledger, not re-measured)
+
+Every speedup below is quoted from the wallclock ledger entry that landed the
+item, at the pass and rig stated. **Pass 37 re-measured neutrality, not
+speed**; no timing number here was produced this pass.
+
+| # | Contribution | What it does | Measured speedup (ledger, pass cited) | Neutrality evidence class |
+|---|---|---|---|---|
+| C2 | Env-list compaction (`NEWTON_SAP_SOLVE_COMPACT`, `NEWTON_SAP_LS_COMPACT`) | ON and OFF run the SAME kernels; only the `(env_idx, env_n)` list differs — a device-built active list vs a static identity list at full width (`contact_solve.py:5512-5531`) | converged-env compaction **3.7x** (ledger "Landed and certified"); LS-compact alone **+0.8%** whole-run @1024x8, and disabling it costs **14.1% whole-run / 19.6% late** because march-compact hard-requires it (pass 5) | **BITWISE-VERIFIED** |
+| C3 | Blocked-Cholesky narrowing | listed twins of the masked factorize/solve launch at the env-grid budget instead of the full batch | late-window per-substep **1.106 (10.6%)**, rising with tail depth to **1.233** at it7 (pass 1) | **BITWISE-VERIFIED** + SOURCE-EXHAUSTIVE |
+| C4 | Live-`k` contact-Hessian GEMM truncation (`NEWTON_SAP_GEMM_RESHAPE`) | bounded pack skips k-tiles past the env's live contact rows; bounded GEMM stops its ascending k-walk at the same bound | **the campaign's largest single win**: microbench **x1.96**; det=1 A/B whole-run **x1.611**, late-window **x1.547**; production vs the pass-7 baseline it0 **-48.8%** … it7 **-39.9%** (pass 8) | **BITWISE-VERIFIED** |
+| C5 | Per-contact read-once GEMM pack + `j_flat` hoist (`NEWTON_SAP_PACK_PERCONTACT`) | one `(contact, dof)` work item loads the contact's three Jacobian rows and its G block once for all three `gj` rows; the trip-invariant `j_flat` half moves to one launch per solve | landed jointly with C-D3: combined A/B ms/substep **3.119 vs 4.229 = -26.3%** whole-run, **-26.6%** late (pass 17) | **BITWISE-VERIFIED** |
+| C6 | Shared assembly for half-1 (`NEWTON_SAP_SHARED_ASSEMBLY`) | the first half-step reuses the full step's dt-independent assembly (rigid ID, tau, mass matrix + factorization, body/contact Jacobians, Delassus weights) — CENIC V-A's own prescription | **speed-neutral within noise** (late-window per-substep OFF/ON 0.979); kept as pure work-deletion with larger potential on assembly-heavy scenes (pass 3) | **BITWISE-VERIFIED** |
+| C7 | Narrow-v3 list-indexed trip-cadence launches (`NEWTON_SAP_NARROW_V3`) | fused-update, the serial LS-direction chain and the per-attempt contact scatter run through the world-active list at the env-grid budget | per-substep whole-run **-5.1%**, late-3 **-3.9%**; deep slab **4.4293 -> 3.7557 ms (-15.2%)** (pass 21) | **BITWISE-VERIFIED** |
+| C8 | Run-ahead ADOPT/ANCHOR contact split (`NEWTON_SAP_RUNAHEAD`, **default OFF**) | worlds crossing a boundary inside the action window keep marching instead of parking | demand-normalized **-4% to 0** per accepted substep at the plateau (pass 23) — which is why it landed default OFF | **BOUNDED** (positions bitwise, |dqd| <= 3.7e-9); default OFF |
+| C9 | Host-sync-free masked runtime-state reset | replaces a per-boundary host read of the reset mask (a full device sync) with a one-kernel device-side test | not separately A/B'd; deletes one full device synchronization per reset boundary | **SOURCE-EXHAUSTIVE**; inert on the adaptive path |
+| D1 | Fused post-commit update eval (`NEWTON_SAP_FUSED_UPDATE`) | one tiled kernel replaces the whole committed-point chain (projection, G block, `J^T gamma`, model terms, gradient, all three convergence norms) | ms/substep ON **2.948 vs 3.258 = -9.5%** whole-run, **-9.3%** late-3 (pass 18) | **BOUNDED** (jointly 4.75e-2, ~27x below run-to-run nondeterminism) |
+| D2 | Fused armijo ladder (`NEWTON_SAP_FUSED_LS`) | one tiled kernel walks each env's alpha ladder in place; trials advance along the ray `vc0 + alpha*dvc` | **the campaign's second-largest single win**: slab GPU **7.81 vs 13.7 ms/slab = -43%** (pass 15) | **BOUNDED** (as D1) |
+| D3 | Alpha-max rung folded into the ladder (`NEWTON_SAP_FUSED_ALPHAMAX`) | rung 0's cost *and* derivative computed in-kernel by the analytic ray form, deleting the per-trip trial launch chain | jointly with C5: **-26.3%** whole-run, **-26.6%** late (pass 17) | **BOUNDED** (as D1) |
+
+**Campaign aggregate (ledger, pass 31):** ~78 s/iter pre-campaign (det ON) ->
+35.35 s/iter at pass 14 -> a plateau of **12.9-15.1 s/iter @1024 envs** (best
+estimate 13-14). Same-config draws move +-8% because substep demand is
+draw-dependent, so the plateau is a band, not a point.
+
+### Two contributions that are NOT speed, and NOT neutral
+
+These belong in the document as designed features with stated semantics. They
+are physics-visible by nature and must not be folded into the neutral set.
+
+| # | Contribution | What it is for | Why it is physics-visible |
+|---|---|---|---|
+| D5 | **Attempt-consistent regularization (ACR)** | On the near-rigid branch our regularization depends on the step size, so `ICF(x; h)` and `ICF(x; h/2)` would discretize *different contact models* and their difference would not be a truncation error. ACR evaluates the contact constitutive law at the ATTEMPT step for all three solves, which is what makes the Richardson pair a pure integration-error estimate. | It rescales the Delassus estimate by `s = D(D+tau)/(h(h+tau))` — exactly `1` for the full solve, `2.05-2.35` for the halves over our step range. Against no-ACR at `h`, the soft branch (~89% of contacts) gets `rt/rn` larger by `s`: friction regularization ~2.1-2.35x softer. See B3. |
+| D8 | **Per-world failure containment** | A world whose inner solve fails is not committed, does not kill the batch, and does not perturb any other world; the consumer reads `solver.diverged` and terminates that world. This is what makes a batched implementation viable at all — the alternative is one world's failure aborting 1023 healthy ones. | It changes failure SEMANTICS: `NEWTON_SAP_CONTAINMENT=0` restores strict converge-or-throw. On a batch where every solve converges the two are bitwise identical; where one does not, they are different runs by design. |
+### 5.5 The aggregate test, and the three reference scales
+
+Per-flag equivalence is necessary but not sufficient: what a reader needs is
+the difference between **the shipped fast path and a fully legacy path**, on a
+real contact-violent trajectory long enough for divergence to develop. That
+is the aggregate run.
+
+**Rig.** `IsaacContrib-Lift-Spatula-Trossen-v0`, driven by a pre-generated
+random action sequence in `[-2, 2]` — the flail regime. Two configurations
+were run, and the difference between them is itself a result:
+**256 worlds x 60 control steps** (2 s), where every arm came out bitwise
+identical, and **512 worlds x 150 control steps** (5 s), which is where the
+fusion arms separate. All headline numbers below are the 512 x 150 run; the
+256 x 60 run is reported in the horizon caveat. The task's early terminations
+are disabled in the probe process only (the cfg object, not the task file), so
+no episode restarts confound the comparison; worlds that fail are still
+observed through the solver's own `diverged` latch, and comparisons are
+per-env masked from any reset onward. The metric is the `L^inf` and RMS
+difference of the committed generalized coordinates `joint_q` — the same
+coordinate vector the solver's accuracy metric uses, with `S = I`, so it
+shares `tol`'s units (see the note on kind, below).
+
+**Arms.** `ref` (shipped defaults, det=1); `ref-repeat` (identical — the
+oracle); `nofuse` (D1+D2+D3 OFF); `refmode` (every optimization at its
+legacy/OFF state: the three fusions plus `SOLVE_COMPACT`, `LS_COMPACT`,
+`GEMM_RESHAPE`, `PACK_PERCONTACT`, `NARROW_V3`, `SHARED_ASSEMBLY`,
+`MARCH_COMPACT`, `TAIL_COMPACT`); `seedB` (different action seed);
+`prod-a`/`prod-b` (two runs of the SHIPPED configuration with
+`NEWTON_SAP_DETERMINISTIC` at its `"0"` source default). Graph capture and the
+whole-march conditional tier stay at their defaults in every arm: they are
+launch-mechanism switches whose bitwise invariance is certified in the same
+session by the flag-equivalence probe, and disabling them multiplies wall time
+without changing arithmetic.
+
+**The three reference scales, all measured in the same session:**
+
+| | Scale | Value |
+|---|---|---|
+| (a) | The method's accepted local-error budget — `tol`, and the accepted error actually realized | `tol = 1e-3`; realized: **median 3.54e-5, p90 8.65e-5, max 9.997e-4** — zero violations, and *identical between the arms* |
+| (b) | Run-to-run spread of the SHIPPED configuration (`NEWTON_SAP_DETERMINISTIC` at its `"0"` default) — the irreproducibility already present in every reported run | onset step 12; Linf **1.88e-1** at step 37, **1.30** at 75, **1.20** at 112 |
+| (c) | Seed-to-seed spread | onset step 0; Linf **2.90** at step 37, **7.74** at 75, **1.23e1** at 112 |
+
+**Result — and it separates the stack cleanly in two.**
+
+| Comparison | What it isolates | Onset | Linf @37 | @75 | @112 |
 |---|---|---|---|---|---|
-| C1 | Per-world `dt` threading (scalar -> `dt[env]`) | `37663f5` | ~10 kernels in `contact_solve.py`, `free_motion.py`, 4 integrators in `solver_sap.py` | n/a | **ASSERTED** (source comment): uniform `dt` fills `_dt_world` uniformly, so `dt[env]` reproduces `scalar(dt)`. Structurally credible, never measured. |
-| C2 | Env-list compaction (`NEWTON_SAP_SOLVE_COMPACT`, `NEWTON_SAP_LS_COMPACT`) | `79e43bd`, `5a6cbf4` | ~25 kernels converted to `(env_idx, env_n)` list indexing | ON | Flag-equivalence probe `tools/probes/sap_flag_equivalence_probe.py` (scheduling-only oracle). Per-env work is env-private by construction. |
-| C3 | Blocked-Cholesky narrowing (`*_masked_listed`) | `fe98f46` | `sap_warp/sim/blocked_cholesky.py` (+201 lines), used at `_solve_newton_direction` | ON when narrowed | Kernel bodies copied **verbatim** from the masked twins; env axis only. Structural. |
-| C4 | Live-`k` contact-Hessian GEMM truncation (`NEWTON_SAP_GEMM_RESHAPE`) | `27dcada` | `contact_solve.py` bounded pack + GEMM factories | ON | DERIVED: truncated k-tiles contain only zero rows; surviving tiles accumulate in the same ascending `k` order. Engagement counter `gemm_reshape_skips()`. |
-| C5 | Per-contact read-once GEMM pack + `j_flat` hoist (`NEWTON_SAP_PACK_PERCONTACT`) | `1ff0ea0` | `contact_solve.py`, `_CONTACT_HESSIAN_PACK_TILE_C = 32` | ON (AND `_gemm_reshape`) | Per-element `gj` expression preserved verbatim on the same operand loads. The `j_flat` hoist additionally rests on J-invariance within a solve — **ASSERTED**, probe-cited, not re-verified here. |
-| C6 | Shared assembly reuse for half-1 | `b1e48a3` | `contact_jacobian.py`, `free_motion.py`, `solver_sap.py` | opt-in, driven ON by the adaptive solver | Skips launches that would rewrite byte-identical buffers. Correct **iff** the caller's contract (state/contacts/control/mask unchanged) holds — and the caller is ours. Also matches CENIC V-A (see A12). |
-| C7 | Narrow-v3 list-indexed trip-cadence launches (two distinct flags share the name `NEWTON_SAP_NARROW_V3`) | `aac9694` | `contact_jacobian.py:1925`, `contact_solve.py:5502` | ON | Flag-equivalence probe family (`52005367` certified). |
-| C8 | Run-ahead ADOPT/ANCHOR contact split | `2a119d2` (sap_warp), `e41cc070` (newton) | `contact_jacobian.py` +789 lines, 5 new kernels | **OFF** | Bitwise oracle probe `tools/probes/sap_runahead_oracle_probe.py`. Anchor arithmetic is a verbatim copy of the direct scatter's. |
-| C9 | Host-sync-free masked runtime-state reset | `afd5dc6` | `solver_sap.py:1053` | n/a | Same outcome as the host-read path for the warm-start gate; benign same-value write race. |
+| `ref-repeat` vs `ref` | ORACLE (det=1 reproducibility) | never | 0 | 0 | 0 |
+| **`nofuse` vs `refmode`** | **the EIGHT scheduling optimizations, in aggregate** | **never** | **0** | **0** | **0** |
+| `nofuse` vs `ref` | the three fp-reduction-order fusions | step 13 | 8.23e-3 | 4.46e-2 | 4.46e-2 |
+| `refmode` vs `ref` | all eleven flags | step 13 | 8.23e-3 | 4.46e-2 | 4.46e-2 |
+| `prod-b` vs `prod-a` | scale (b): the shipped config against itself | step 12 | 1.88e-1 | 1.30 | 1.20 |
+| `seedB` vs `ref` | scale (c) | step 0 | 2.90 | 7.74 | 1.23e1 |
 
-**Honest caveat that belongs in the paper's supplementary, not buried here:**
-none of the C-class bitwise claims were re-measured in this pass. This audit
-verified the *structure* of C4 and the R-construction identity under C-class
-fusions; the rest rests on the flag-equivalence and oracle probes listed, which
-were run in earlier passes.
+Three things follow, and the engagement counters make none of them vacuous
+(shipped arm: 2.34e6 fused-ladder envs, 2.94e6 alpha-max envs, 4.88e6
+fused-update envs, 2.94e6 pack execs, 5.51e8 GEMM tile-skips, 20 narrowed
+sites, 2996 assembly reuses; `refmode`: **every one of those exactly zero**;
+`nofuse`: the three fusion counters zero, the rest fully engaged):
+
+1. **`nofuse` and `refmode` are bitwise identical to each other.** Turning off
+   all eight scheduling optimizations on top of the fusions changes **not one
+   byte** of the committed trajectory over 512 worlds x 150 control steps.
+   The eight are bitwise-neutral in aggregate, not merely cell by cell on a
+   sphere rig.
+2. **All divergence from the shipped fast path is the three fusions**, and it
+   is bounded at max Linf **4.75e-2** over the horizon.
+3. **That bound is ~27x smaller than the shipped configuration's own
+   run-to-run irreproducibility.** Curve against curve over the 137 steps
+   where both are live: the fusion divergence is a **median 0.037x** of the
+   non-determinism curve (p90 0.205x), and the ratio of the two maxima is
+   **0.0365** (4.75e-2 vs 1.30). The fusions perturb trajectories by far less
+   than the non-determinism already present in every reported run.
+
+   **With one honest exception, which is transient and small in absolute
+   terms.** The two perturbations seed one step apart (non-determinism first
+   registers at step 12 at 4.0e-9; the fusions at step 13 at 6.0e-7), and for
+   **12 of those 137 steps — the window from step 13 to about step 20 — the
+   fusion divergence is LARGER than the non-determinism**, peaking at a ratio
+   of 12708x at step 17. That ratio is a small-denominator artifact: the
+   absolute magnitudes there are 2.1e-5 against 1.5e-8, i.e. the fusion
+   divergence during its worst relative excursion is still **~50x below `tol`**
+   (2.1e-5 rad = 0.0012 deg = 21 um). From step ~25 onward, once both have
+   saturated, the fusion curve sits an order of magnitude or more below the
+   non-determinism curve for the rest of the horizon. The claim to make is
+   therefore the saturated-regime one, stated with its transient, not a blanket
+   "always smaller".
+
+**A horizon caveat that must travel with the bitwise claims.** At the smaller
+256-world x 60-step configuration *every* arm — fusions included — was bitwise
+identical. The separation at step 13 only appears at 512 worlds x 150 steps.
+Bitwise equality is therefore a property of the horizon it was measured on,
+and the fusion arms' equality at the shorter horizon must not be quoted as a
+general result. The eight scheduling flags were bitwise at **both** horizons.
+
+**On comparing any of this to `tol`.** The Linf/tol ratios above are scale
+markers, not tolerance violations: `tol` bounds the local error of one
+accepted step, whereas Linf here is a trajectory difference accumulated over
+up to 150 control steps in a chaotic contact regime. The commensurable
+per-step statement is the ensemble one, and it is unambiguous: the accepted
+local-error distributions of `ref`, `nofuse` and `refmode` agree to every
+printed digit (median 3.5387e-5 vs 3.5386e-5, p90 identical, substeps ratio
+1.001), while `prod-a` — the same shipped code with determinism at its
+default — differs from `ref` by 1.55x in substep demand.
+
+**A caution about the headline number.** In a contact-violent regime any
+perturbation, down to one ulp, grows and saturates; the endpoint `L^inf` of
+two arms therefore says little on its own. Three things are reported instead:
+the divergence ONSET, the early GROWTH curve against the run-to-run
+nondeterminism curve, and the ENSEMBLE statistics (the distribution of the
+controller's own accepted error and accepted step over all world-boundary
+samples). Two arms whose ensembles agree are running the same physics even
+when no individual world's trajectory matches — and it is the ensemble, not
+the pointwise trajectory, that any accuracy or work-precision plot reports.
+
+**Recommendation on a reference mode: NOT NEEDED for the optimizations, and
+REQUIRED for reproducibility — but the two are different knobs, and the
+evidence points at the second one.**
+
+* For the **eight scheduling optimizations there is nothing to choose**: the
+  fast path *is* the reference path, bitwise, in aggregate, at both horizons
+  tested. Producing accuracy numbers with them off would buy nothing and cost
+  the entire speedup.
+* For the **three fusions**, a reference mode exists and is one environment
+  variable each. But the case for using it is weak on this evidence: their
+  effect is ~27x below the irreproducibility the shipped configuration already
+  has, and the accepted-error ensembles are identical. Making accuracy claims
+  on the fusion-free path while the same runs remain non-reproducible
+  run-to-run would be precision theatre.
+* **The knob that actually matters is `NEWTON_SAP_DETERMINISTIC`.** It is OFF
+  by default, and it — not any optimization — is what makes reported runs
+  irreproducible, by a margin of 1.2 rad/m over 5 seconds. Any result a
+  reviewer might try to reproduce should be produced with `=1`.
+
+So: **report accuracy and work-precision results with determinism ON and the
+optimization stack at its shipped defaults.** State that the eight scheduling
+optimizations are bitwise-verified, that the three fusions are bounded at
+4.75e-2 against a 1.20 run-to-run scale, and keep `refmode` documented as an
+available bitwise-exact fallback rather than the production path for results.
+### 5.6 The complement — what is NOT covered by the neutrality claim
+
+The neutrality claim's scope must be unambiguous, so the complement is
+enumerated rather than implied. **Nothing below is claimed physics-neutral,
+and no result in this section applies to any of it.** These are either design
+decisions with stated semantics (the D-class items) or genuine divergences
+from the published method (the B-class items, Section 4).
+
+**Physics-visible and ON in the reportable run:**
+
+| # | Item | Why it is not neutral |
+|---|---|---|
+| D5 | Attempt-consistent regularization (ACR) | Freezes the contact constitutive law at the attempt step. Against no-ACR at `h`, the soft branch — ~89% of contacts — gets `rt/rn` larger by `s = 2(D+tau)/(D/2+tau) = 2.05-2.35` over our step range. This is a **correctness contribution** (it is what makes the Richardson pair a pure truncation-error estimate when the regularization is dt-dependent), not an optimization, and it has no counterpart in the paper. See B3. |
+| D6 | Line-search default `monotone_decay` -> `armijo_decay` | A different line search plus three coupled tolerances. The paper specifies exact line search. See B6. |
+| D8 | Per-world failure containment | Changes failure *semantics*. On a batch where every solve converges it is bitwise identical to strict converge-or-throw; where one does not, the two are different runs by design. This is what makes a batched implementation viable at all. |
+| D9 | Determinism mode **OFF** | The shipped default. Reported runs are not bitwise reproducible run-to-run; the size of that irreproducibility is measured in 5.4 and is itself one of the reference scales. |
+| D10 | `approx32` contact preset | f32 Jacobians and f32 contact linear solve, against the solver's own `drake` fp64 default and the paper's fp64 C++ reference. |
+
+**Physics-visible but OFF or unreachable in the reportable run:** D4
+(`monotone_decay` accept-rule rewrite — unflagged, but not the default
+variant), D7 (cubic-Hermite seed — implemented, dead on the default line
+search), D11 (`static_substep`), D12 (run-ahead single march).
+
+**Divergences from the published method (Section 4), none of them
+neutrality questions:** B1 (SAP rather than CENIC's Lagged ICF — inherited
+from upstream), B2 (fixed material `tau_d`, which flattens the stiffness
+exponent from `-1.76` to `-1.17`), B4 (`S = I` and a live `rtol`), B5 (one
+collision query per boundary rather than two per step), B7 (CENIC VI-B
+removed), B8/B8b (three controller exits Algorithm 1 does not have; effective
+`k_Init = 1.0`), B9 (inner-solve cap-out treated as a rejection), B10 (no
+trapezoid variant).
+
+**The one-sentence scope statement for the methods text:**
+
+> The GPU scheduling optimizations — env-list compaction, launch-grid
+> narrowing, blocked-Cholesky narrowing, live-row GEMM truncation,
+> per-contact packing and assembly reuse — are verified bitwise-neutral, both
+> individually and in aggregate: with all eight disabled, 512 parallel worlds
+> integrated over 150 control steps of contact-rich motion reproduce the
+> optimized trajectories byte for byte, while the solver's own engagement
+> counters confirm the optimized kernels ran in one arm and not the other. The
+> three kernel fusions are algebraically exact but reorder floating-point
+> reductions; they are therefore bounded rather than bitwise, and the bound —
+> a maximum coordinate deviation of 4.8e-2 over that horizon — is roughly 27
+> times smaller than the run-to-run irreproducibility the same configuration
+> already exhibits with its default non-deterministic reductions. The
+> attempt-consistent regularization, the failure containment, the line-search
+> default and the contact preset are physics-visible design decisions stated
+> as such.
 
 ---
 
@@ -1111,11 +1557,24 @@ throughout unless the row says otherwise.
 * Code: `sap_warp` @ `afd5dc6` and `newton-adaptive` @ `80d13a9a`, both clean
   working trees at the time of the audit.
 * Every closed-form number in Sections 3.1, B2 and B3 is reproducible from the
-  formulas printed alongside it; no new script was committed this pass, by
-  design (the rails for this pass forbade code changes).
-* **Not verified this pass (explicit list):**
-  1. Any C-class bitwise claim — these rest on earlier flag-equivalence and
-     oracle probe runs, not on this pass.
+  formulas printed alongside it; no new script was committed by pass 36, by
+  design (the rails for that pass forbade code changes).
+* **Pass-37 provenance (Section 5).** Two re-runnable probes were committed:
+  `tools/probes/sap_neutrality_mirror_probe.py` (env-privacy and per-world
+  `dt` threading) and `tools/probes/sap_neutrality_divergence_probe.py`
+  (aggregate divergence, engagement counters and the three reference scales).
+  The pass also re-ran, unmodified, `sap_flag_equivalence_probe.py` (42
+  bitwise cells, 30 vacuity guards), `sap_runahead_oracle_probe.py`, and the
+  pass-17 J-invariance probe. Chain, gate order and an `nvidia-smi` census at
+  every run boundary: `p37_progress.txt`; logs `p37_g1_mirror.log` ..
+  `p37_g8_prodpair.log`; per-arm trajectories `p37_stress/p37_*.npz`. The GPU
+  was held one process at a time and was verified idle before every run.
+* **Not verified in the pass-36 audit (explicit list). Item 1 was closed by
+  pass 37; see Section 5. The rest remain open.**
+  1. ~~Any C-class bitwise claim~~ — **CLOSED by pass 37**, which re-measured
+     them on the bytes at `d16db463`/`afd5dc6` and rewrote Section 5 with the
+     evidence class each item earned. Anything pass 37 could not establish is
+     marked UNVERIFIED there rather than assumed.
   2. The floor-acceptance rate, the floor-latch rate, and the `_debt_guard` fire
      count in the reportable run (B8 a/b/c).
   3. The share of rejections attributable to inner-solve cap-out rather than to
@@ -1134,3 +1593,26 @@ throughout unless the row says otherwise.
   (derivation here gives ~21 N/m at `beta = 1`); and the flat "`s ~ 2.34`" for
   ACR (derivation here gives `s = 2(D+tau)/(D/2+tau)`, i.e. 2.05-2.35 over the
   campaign's step range, with 2.345 only at `D = dt_outer`).
+
+### 12.1 Scope corrections found by pass 37 while verifying Section 5
+
+Three statements in the pass-36 text were too generous about scope. None
+changes a conclusion; all three change what a claim covers.
+
+1. **C9 never executes on the adaptive path.**
+   `reset_runtime_state_masked` has exactly one call site,
+   `mjwarp_manager.py:910`, inside `if cls._sap and not cls._adaptive`. It is
+   a **fixed-step SAP** optimization. It cannot affect any SAP-adaptive
+   result, reportable or otherwise, and it should not be listed among the
+   optimizations the adaptive arm carries.
+2. **C3 has no escape hatch at all.** The listed Cholesky twins are called
+   unconditionally (`contact_solve.py:7633, 7644`); only the launch *width*
+   varies, via march compaction. The pass-36 "Default: ON when narrowed" is
+   therefore not a flag state — the pre-`fe98f46` masked twins are retained in
+   `blocked_cholesky.py` but unreachable at runtime.
+3. **C2 and C7 are not two implementations of the same math.** Both were
+   converted *in place*: ON and OFF run the same kernel binaries, differing
+   only in whether the consumers read the device-built active list or a static
+   identity list at full width. Their bitwise claim is the strictly weaker and
+   more checkable proposition that a kernel's output for an env does not
+   depend on which other envs share its launch. See 5.3.

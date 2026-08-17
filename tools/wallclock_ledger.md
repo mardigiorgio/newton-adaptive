@@ -6862,3 +6862,200 @@ config's header rather than applied.
     So this pass pushes a hydroelastic number into a point-contact channel by
     hand -- exactly what Drake documents as a user aid and never applies itself.
   * NOTHING HERE HAS BEEN RUN. The first real evidence is a rest probe.
+
+## PASS 37 — THE NEUTRALITY CLAIM, MEASURED: EIGHT OPTIMIZATIONS ARE
+## BITWISE, THREE ARE BOUNDED, AND THE THING THAT ACTUALLY BREAKS
+## REPRODUCIBILITY IS THE DETERMINISM DEFAULT
+## 2026-08-16/17. VERIFICATION ONLY: no solver physics, contact law,
+## tolerance, estimator, beta, task or scene byte was touched (git diff over
+## newton/ is empty; sap_warp is untouched at afd5dc6). Committed: the audit
+## rewrite, this entry, and two re-runnable probes.
+## Stack: newton-adaptive d16db463 (march-counter-log), sap_warp afd5dc6.
+## VERIFIED FIRST: `git diff --stat 80d13a9a..HEAD` touches only tools/*.md,
+## so every measurement below lands on exactly the bytes pass 36 audited.
+## Marco: "we need to be rock solid that all the changes are mostly physics
+## neutral."
+## GPU: the pass was gated behind the comparison sequence. That comparison was
+## killed mid-run by Marco, so the "COMPARISON DONE" sentinel could never
+## appear; the gate was replaced with an idle-card check re-tested before every
+## run, one process at a time, with an nvidia-smi census at every boundary
+## (p37_progress.txt). Total GPU time ~25 min.
+
+### WHY THIS PASS EXISTS
+
+Pass 36 closed with the correct caveat: "none of the C-class bitwise claims
+were re-measured in this pass." Every neutrality statement rested on earlier
+probe runs, source comments, or structural argument -- folklore under this
+repo's rules. This pass measured them.
+
+### THE HEADLINE, IN ONE TABLE
+
+512 worlds x 150 control steps (5 s) of the Trossen flail regime, det=1, same
+pre-generated action sequence, committed joint_q Linf:
+
+  ref-repeat vs ref (ORACLE)                never diverges          0
+  nofuse vs refmode (THE EIGHT SCHEDULING   never diverges          0
+      OPTIMIZATIONS, IN AGGREGATE)
+  nofuse vs ref  (the three fusions)        onset step 13     4.46e-2 @112
+  refmode vs ref (all eleven flags)         onset step 13     4.46e-2 @112
+  prod-b vs prod-a (SHIPPED config vs       onset step 12        1.20 @112
+      ITSELF, det at its "0" default)
+  seedB vs ref (seed-to-seed)               onset step  0     1.23e+1 @112
+
+THREE CONCLUSIONS:
+  1. THE EIGHT SCHEDULING OPTIMIZATIONS ARE BITWISE-NEUTRAL IN AGGREGATE.
+     nofuse and refmode are byte-identical to each other while refmode has
+     every engagement counter at ZERO and nofuse has them fully engaged
+     (2.94e6 pack execs, 5.51e8 GEMM tile-skips, 27 narrowed sites, 2998
+     assembly reuses). This is far stronger than the per-cell sphere-rig
+     result: it is the whole stack, on the real rig, at scale.
+  2. ALL divergence from the shipped fast path is the three fp-reduction-order
+     fusions, bounded at max Linf 4.75e-2 over the horizon.
+  3. THAT BOUND IS ~27x SMALLER THAN THE SHIPPED CONFIGURATION'S OWN
+     RUN-TO-RUN IRREPRODUCIBILITY. Curve vs curve over the 137 live steps:
+     median ratio 0.037, p90 0.205, ratio of maxima 0.0365 (4.75e-2 vs 1.30).
+     The fusions are not what makes reported runs unreproducible --
+     NEWTON_SAP_DETERMINISTIC=0 is.
+     THE ONE HONEST EXCEPTION, NOT SOFTENED: the two perturbations seed one
+     step apart (nondet first registers step 12 at 4.0e-9, fusions step 13 at
+     6.0e-7) and for 12 of those 137 steps -- roughly steps 13-20 -- the
+     FUSION divergence is LARGER than the nondeterminism, peaking at a ratio
+     of 12708x at step 17. That is a small-denominator artifact: the absolute
+     magnitudes there are 2.1e-5 vs 1.5e-8, so the fusions' worst relative
+     excursion is still ~50x BELOW tol (2.1e-5 rad = 0.0012 deg = 21 um).
+     From step ~25, once both saturate, the fusion curve stays an order of
+     magnitude or more below. Claim the saturated-regime number WITH the
+     transient; do not claim "always smaller".
+
+ANTI-VACUITY IS THE WHOLE BALLGAME HERE. "ON and OFF are bitwise identical" is
+worthless if the OFF arm silently ran the same code. Every arm reports the
+solver's own device engagement counters; the claim is only admitted where the
+ON arm's counters are large and the OFF arm's are exactly zero. Shipped arm:
+2.34e6 fused-ladder envs, 2.94e6 alpha-max envs, 4.88e6 fused-update envs,
+2.94e6 pack execs, 5.51e8 GEMM skips, 20 narrowed sites, 2996 assembly
+reuses. refmode: every one of those zero.
+
+### A HORIZON CAVEAT THAT MUST TRAVEL WITH THE BITWISE CLAIMS
+
+At 256 worlds x 60 steps EVERY arm was bitwise identical -- fusions included.
+The fusion separation appears only at 512 x 150. Bitwise equality is a
+property of the horizon it was measured on. The eight scheduling flags were
+bitwise at BOTH horizons; the fusions only at the shorter one. Do not quote
+the short-horizon fusion result as general.
+
+### PER-ITEM RESULTS (audit Section 5 now carries these in full)
+
+  C1 per-world dt threading   BITWISE-VERIFIED (threading) + SOURCE-EXHAUSTIVE
+     (uniform reduction). New mirror-pair probe: worlds i and N-1-i get
+     identical ICs at different env indices with different neighbours; 8 pairs
+     x 8 boundaries x 10 fields bitwise at tol 1e-7/1e-8/1e-9, all six vacuity
+     guards armed (10-12 distinct per-world dt values, rejections exercised).
+     The uniform-dt half has NO run-level A/B at HEAD -- 37663f5 deleted the
+     scalar kernels rather than retaining them -- so it is a mechanical
+     classification of every dt-touching changed line (three purely-indexing
+     forms, zero arithmetic change) plus a value-preserving fill at the
+     kernel's own dtype. Named residual risk: a uniform dt[0] broadcast is
+     mirror-symmetric and the probe would not catch it.
+  C2, C4, C5, C6, C7          BITWISE-VERIFIED (flag-equivalence, 42 cells, 30
+     vacuity guards, fresh at HEAD) AND in the aggregate run above.
+  C3 blocked-Cholesky         BITWISE-VERIFIED for launch width +
+     SOURCE-EXHAUSTIVE for the conversion. NO ESCAPE HATCH EXISTS: the listed
+     twins are called unconditionally; only the grid width varies. Diff of
+     both listed kernels vs their retained twins: the ONLY changed code lines
+     are the rename, two list parameters and a four-line tid->list prologue.
+     ZERO arithmetic lines differ.
+  C5 j_flat hoist premise     RE-MEASURED: 101 trip-pairs over 38 multi-trip
+     solves, 152 trips, zero mismatches in J, j_flat or the live count.
+  C8 run-ahead                CORRECTED TO BOUNDED. Pass 36 called this a
+     "bitwise oracle probe"; the probe is bitwise for ON-repeat and for
+     batch-vs-solo isolation, but reports ON-vs-OFF as NOT bitwise --
+     positions exact, velocities to 3.7e-9 (f32 clock-rebase of landing
+     slivers). Default OFF, so nothing reportable depends on it.
+  C9 masked reset             SOURCE-EXHAUSTIVE, AND OUT OF SCOPE. The only
+     step-path-consumed field the unmasked reset clears is
+     _contact_solve_v_guess_active, which the masked variant clears with an
+     identical value write; the other ten are write-only host bookkeeping
+     never read anywhere. AND its sole call site (mjwarp_manager.py:910) sits
+     inside `if cls._sap and not cls._adaptive` -- C9 NEVER EXECUTES ON THE
+     ADAPTIVE PATH and should not be listed among the adaptive arm's changes.
+  D1, D2, D3                  BOUNDED, jointly (they are not separable:
+     _fused_alphamax is gated on _fused_ls). Also re-derived on current bytes:
+     the three contact-R sites these fusions added are structurally identical
+     to upstream twins (948<->2760, 2400<->2475, 2587<->2660), and the fused
+     ladder calls the SAME sap_armijo_ok accept helper the chain calls. The
+     constitutive law and accept rule are the chain's; only the summation
+     order differs.
+
+### WHAT "OFF" MEANS IS NOT THE SAME SWITCH TWICE (new, and load-bearing)
+
+  C2 and C7 were converted IN PLACE: ON and OFF run the SAME kernel binaries,
+  differing only in whether consumers read the device-built active list or a
+  static identity list at full width. Their bitwise claim is the strictly
+  weaker and more checkable proposition that a kernel's output for an env does
+  not depend on which other envs share its launch -- which is exactly what the
+  mirror-pair probe and the run-ahead probe's batch-vs-solo certificate
+  attack. C4's OFF arm is the strongest in the set: 27dcada is 215/0, a pure
+  addition, so the legacy pair was never edited. C5 and D1-D3 retain their
+  legacy kernels behind a dispatch branch.
+
+### RECOMMENDATION: NO REFERENCE MODE FOR THE OPTIMIZATIONS; TURN DETERMINISM
+### ON FOR ANYTHING THAT MUST REPRODUCE
+
+  For the eight scheduling optimizations there is nothing to choose -- the
+  fast path IS the reference path, bitwise, at both horizons. For the three
+  fusions a reference mode exists (one env var each) but the case is weak:
+  their effect is ~27x below the irreproducibility the shipped configuration
+  already has, and the accepted-error ensembles are IDENTICAL (median
+  3.5387e-5 vs 3.5386e-5, p90 identical, substeps 1.001). Producing accuracy
+  numbers on the fusion-free path while the same runs stay non-reproducible
+  would be precision theatre. The knob that matters is
+  NEWTON_SAP_DETERMINISTIC, OFF by default, worth 1.2 rad/m of divergence over
+  5 s. SHIP: report accuracy/work-precision with determinism ON and the
+  optimization stack at its shipped defaults; keep refmode documented as an
+  available bitwise-exact fallback, not the production path.
+
+### A CATEGORY ERROR THE BRIEF ASKED FOR AND THIS PASS DECLINED
+
+  Comparing an ACCUMULATED trajectory divergence to tol=1e-3 is not
+  apples-to-apples: tol bounds ONE accepted step's local error. The
+  commensurable per-step comparison is the accepted-error ENSEMBLE, and that
+  is what is reported (identical to every printed digit across arms; zero
+  violations, max 9.997e-4 against tol 1e-3). The Linf/tol ratios in the audit
+  are labelled scale markers, not violations.
+
+### PROVENANCE (all p37_ prefix; no p13-p36 artifact overwritten)
+
+  probes committed  tools/probes/sap_neutrality_mirror_probe.py,
+                    tools/probes/sap_neutrality_divergence_probe.py
+  probes re-run     sap_flag_equivalence_probe.py (42 PASS cells, 30 guards),
+                    sap_runahead_oracle_probe.py, p17_j_invariant_probe.py
+  chain + censuses  p37_progress.txt
+  logs              p37_g1_mirror.log, p37_g2_flag_equiv.log,
+                    p37_g3_runahead.log, p37_g4_j_invariant.log,
+                    p37_g5_divergence.log, p37_g5b_engagement.log,
+                    p37_g6_stress.log, p37_g7_scales.log, p37_g8_prodpair.log
+  trajectories      p37_stress/p37_{ref,ref-repeat,nofuse,refmode,seedB,
+                    prod-a,prod-b}.npz + p37_divergence_results.json
+  document          tools/sap_cenic_provenance_audit.md Section 5 (rewritten
+                    end to end) and Section 12.1 (scope corrections)
+
+### OPEN, AND EXPLICITLY NOT CLOSED BY THIS PASS
+
+  * The uniform-dt half of C1 (scalar path reproduction) is SOURCE-EXHAUSTIVE,
+    not measured; the scalar kernels no longer exist to A/B against. A run
+    against sap_warp at c0c861c through sap_warp's own API would close it and
+    was not attempted.
+  * The fusion bound is one task, one action distribution, two horizons, one
+    device. A contact regime with deeper per-env reductions can separate them
+    earlier and further; the bound does not generalize.
+  * Compiler-level residual risks are named but not excluded: signed-zero in
+    the truncated GEMM tiles, and multiply-add contraction differing between
+    the per-row and per-contact pack forms. Both are covered empirically by
+    the probe arms, not by proof.
+  * D4 (the unflagged monotone_decay accept-rule rewrite) still has NO
+    evidence of any kind. It is off the default path, which is why it survives
+    unmeasured.
+  * Everything pass 36 left open outside Section 5 remains open: floor
+    acceptance / floor latch / _debt_guard rates, the cap-out share of
+    rejections, and whether sap_warp applies the paper's D = diag(M)^-1/2
+    scaling to the gradient norm.
