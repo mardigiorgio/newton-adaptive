@@ -104,7 +104,7 @@ def main():
         print("[2] boundary-landing behavior (RETAINED after A/B: see header)")
         # A: accepted landing sliver rewrites ideal_dt relative to the clamped remainder
         #    (5x grow cap anchored to the sliver). Retained: acts as a free dt-limiter
-        #    on non-binding worlds at batch scale (measured faster than the Drake fix).
+        #    on non-binding worlds at batch scale.
         acc, com, ideal = run_controller(e=1e-8, dt=1e-4, ideal0=4e-3, device=dev)
         check(
             "accepted landing re-anchors ideal_dt to 5x remainder",

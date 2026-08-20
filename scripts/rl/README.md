@@ -33,9 +33,8 @@ untouched.
   needed). `v1_work_precision.py` is the fast hypothesis loop.
 - **`archive/adaptive_isaac/`** — SUPERSEDED scaffold for the Newton → Sim → Lab glue; the
   integration was implemented natively in the IsaacLab fork instead (see the archive README banner).
-- **`anymal_study/`** — a **completed** reference study. Its `STUDY_LOG.md` records the key negative
-  result: the sim-to-real *transfer* framing is dead; the surviving value is **data fidelity for
-  stiff / non-convex-SDF tunneling contact**.
+- **`anymal_study/`** — a **completed** reference study. Its written conclusions were deleted as
+  unverifiable; the scripts remain. Re-measure before relying on anything it appeared to show.
 
 (The Trossen teacher/student workstream was removed 2026-07-02: it predated and did not use the
 IsaacLabRubato (then isaac-rubato) study setup.)

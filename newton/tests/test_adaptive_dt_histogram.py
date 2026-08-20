@@ -324,9 +324,9 @@ def test_saturation_depth_nonzero_when_floor_is_hit():
     """Public-API coverage for the non-zero saturation_depth branch of
     dt_histogram_stats(): a very tight tol (1e-8) rejects nearly every attempt even
     during smooth free fall, and dt_inner_min close to dt_inner_init leaves almost no
-    room to shrink into before the controller clamps to the floor. Verified empirically
-    (see task-3-report.md) -- floor_samples > 0 within the very first boundary, with
-    ideal_dt shrinking well below dt_inner_min once clamped. saturation_depth must
+    room to shrink into before the controller clamps to the floor, so floor_samples
+    must exceed 0 within the very first boundary and ideal_dt must shrink below
+    dt_inner_min once clamped. saturation_depth must
     report that true minimum ideal_dt, not 0.0 (which means "floor never hit")."""
     if _skip_without_gpu("test_saturation_depth_nonzero_when_floor_is_hit"):
         return

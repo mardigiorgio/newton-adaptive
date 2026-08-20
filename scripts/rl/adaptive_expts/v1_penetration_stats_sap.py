@@ -48,8 +48,9 @@ FIXED_DTS = (2e-3, 1e-3, 5e-4)
 def _build():
     t = newton.ModelBuilder()
     # margin=0: in Newton's native pipeline (which SAP consumes), ShapeConfig.margin
-    # is an OUTWARD SURFACE OFFSET (bodies rest margin-above-surface by design;
-    # measured: 9.99 mm hover for 5+5 mm margins). Detection reach comes from the
+    # is an OUTWARD SURFACE OFFSET: bodies rest margin-above-surface by design,
+    # so a pair of 5 mm margins holds the bodies ~10 mm apart. Detection reach
+    # comes from the
     # separate `gap` (builder.rigid_gap default 0.1 m). NOTE: mjw ZEROES authored
     # margins instead -- the two backends define margin incompatibly.
     cfg = newton.ModelBuilder.ShapeConfig(ke=KE, kd=0.0, kf=0.0, mu=0.0, margin=0.0)

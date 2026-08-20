@@ -100,8 +100,8 @@ K_RIGID = 1.0e9
 # Contacts the pipeline emits per shape pair. NOT measured this pass (GPU).
 N_PER_PAIR = 4
 
-# Pass-25 near-rigid dump (scratchpad p25_nearrigid.json). Used ONLY to check
-# the formulas below reproduce a measurement; never as an input to a result.
+# Reference dump from a near-rigid pass. Used ONLY to check the formulas below
+# reproduce a measurement; never as an input to a result.
 W_EFF_MEDIAN_MEASURED = 14.917052269
 RN_RATIO_MEDIAN_MEASURED = 0.1115
 FRAC_NEAR_RIGID_MEASURED = 0.1109

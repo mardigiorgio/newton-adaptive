@@ -958,7 +958,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._march_log_path = os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG") or None
         self._march_log_file = None
         self._march_log_boundary = 0
-        self._march_log_hist_every = int(os.environ.get("NEWTON_ADAPTIVE_MARCH_LOG_EVERY", "48"))
+        self._march_log_hist_every = 48
         self._reject_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Opt-in truncation guard (see _debt_guard). Off until validated.
@@ -1008,14 +1008,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # preserved; landed worlds (dt = 0) keep their previous values, which
         # nothing commits.
         self._coupled_solref_targets: list = []
-        if os.environ.get("NEWTON_ADAPTIVE_CONTACT_COUPLING", "0") == "1":
-            for attr in ("geom_solref", "pair_solref"):
-                arr = getattr(self.mjw_model, attr, None)
-                if arr is None or arr.shape[1] == 0:
-                    continue
-                host = arr.numpy()
-                mask = wp.array((host[..., 0] > 0.0), dtype=wp.bool, device=device)
-                self._coupled_solref_targets.append((arr, mask))
 
         # ---- tail-compaction scratch (see _build_active_worlds) ----
         if self._tail_compact:
