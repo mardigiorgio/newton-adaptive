@@ -301,14 +301,11 @@ _DRAKE_MIN_SHRINK = wp.constant(wp.float32(0.1))
 _DRAKE_MAX_GROW = wp.constant(wp.float32(5.0))
 _DRAKE_HYSTERESIS_HIGH = wp.constant(wp.float32(1.2))
 _DRAKE_HYSTERESIS_LOW = wp.constant(wp.float32(0.9))
-# Ceiling memory: a rejection at step h records dt_ceiling = 0.9*h; growth is
-# clamped to the ceiling, which relaxes per accepted step (default 1.1x,
-# override NEWTON_ADAPTIVE_CEILING_RELAX). Handles error landscapes with a knee
-# (contact regimes) where order-2 growth sizing otherwise oscillates
-# accept-grow-reject around the acceptance boundary; the relax rate sets how
-# often a world in sustained contact re-probes its knee.
-_CEILING_MARGIN = wp.constant(wp.float32(0.9))
-_CEILING_RELAX = wp.constant(wp.float32(float(os.environ.get("NEWTON_ADAPTIVE_CEILING_RELAX", "1.1"))))
+# Divergence sanity depth (ICF-parity): a non-finite state yields a
+# non-finite error at ANY step size, so shrinking cannot recover it; a world
+# this deep with non-finite error is dead without burning the exhaustion
+# budget. Matches SolverICFAdaptive._SANITY_SHRINK.
+_SANITY_SHRINK = wp.constant(wp.float32(1.0e-3))
 
 
 @wp.kernel
@@ -322,10 +319,9 @@ def _calc_adjusted_step(
     tol: float,
     dt_min: float,
     dt_max: float,
+    dt_seed: float,
     divergence_threshold: float,
-    dt_ceiling: wp.array[wp.float32],
     limited: wp.array[wp.int32],
-    consec_rej: wp.array[wp.int32],
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
 ):
@@ -356,35 +352,24 @@ def _calc_adjusted_step(
         commit[world] = True
         return
 
-    # At the floor we cannot subdivide any further.
-    if step <= dt_min * wp.float32(1.001):
-        if e > tol:
-            accepted[world] = True
-            ideal_dt[world] = dt_min
-            consec_rej[world] = 0
-            # NaN guard: never commit a non-finite state at the floor -- hold
-            # the last-good (finite) state, freeze this world to its frame
-            # boundary, and latch `diverged` so env-side terminations can
-            # reset it. Only genuine non-finiteness (or the error kernel's
-            # divergence sentinel) triggers this: a large-but-finite error is
-            # a legitimately hard step, not a blow-up.
-            if wp.isnan(e) or wp.isinf(e) or e >= divergence_threshold:
-                commit[world] = False
-                diverged[world] = True
-                sim_time[world] = next_time[world]
-                return
-            # Finite but can't meet tol at the floor: accept progress and commit.
-            commit[world] = True
-            return
-        # e <= tol at the floor: fall through to the normal accept path.
+    at_floor = dt_min > wp.float32(0.0) and step <= dt_min * wp.float32(1.001)
 
-    # Above the floor and diverged: reject and shrink hard for a smaller retry.
+    # Non-finite at the floor, or floorlessly at the sanity depth: latch.
+    # Never commit a non-finite state; hold the last good one, snap the
+    # clock, and let the env-side termination reset the world (ICF-parity).
+    if is_diverged and (at_floor or step <= dt_seed * _SANITY_SHRINK):
+        accepted[world] = False
+        commit[world] = False
+        diverged[world] = True
+        sim_time[world] = next_time[world]
+        ideal_dt[world] = dt_seed
+        return
+
+    # Above the sanity depth and diverged: reject and shrink hard.
     if is_diverged:
         accepted[world] = False
         commit[world] = False
-        dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
         ideal_dt[world] = _DRAKE_MIN_SHRINK * step
-        consec_rej[world] = consec_rej[world] + 1
         return
 
     new_step = _DRAKE_SAFETY * step * wp.sqrt(tol / wp.max(e, wp.float32(1.0e-30)))
@@ -398,10 +383,15 @@ def _calc_adjusted_step(
     new_step = wp.clamp(new_step, _DRAKE_MIN_SHRINK * step, _DRAKE_MAX_GROW * step)
 
     acc = e <= tol or new_step >= step
+    if at_floor:
+        # The floor cannot be subdivided: commit and suspend the accuracy
+        # guarantee for this step. new_step is still sized by the rule so
+        # the world lifts off the floor once the difficulty passes
+        # (ICF-parity: pinning ideal_dt to the floor is the collapse trap).
+        acc = True
     accepted[world] = acc
     commit[world] = acc
     if acc:
-        consec_rej[world] = 0
         # Sliver exemption: an accepted step that was artificially shortened
         # by the boundary clamp says nothing about the error-limited step
         # size, so keep the carried ideal_dt instead of collapsing it to ~the
@@ -409,11 +399,6 @@ def _calc_adjusted_step(
         # ceiling information.
         if limited[world] == 1:
             return
-        dt_ceiling[world] = wp.min(dt_ceiling[world] * _CEILING_RELAX, dt_max)
-    else:
-        dt_ceiling[world] = wp.min(dt_ceiling[world], _CEILING_MARGIN * step)
-        consec_rej[world] = consec_rej[world] + 1
-    new_step = wp.min(new_step, dt_ceiling[world])
     ideal_dt[world] = new_step
 
 
@@ -441,34 +426,26 @@ def _count_rejects(accepted: wp.array[wp.bool], rejects: wp.array[wp.int32]):
 
 
 @wp.kernel
-def _debt_guard(
+def _latch_exhausted(
     sim_time: wp.array[wp.float32],
     next_time: wp.array[wp.float32],
-    dt_outer: float,
     dt_init: float,
-    ceiling_init: float,
     ideal_dt: wp.array[wp.float32],
-    dt_ceiling: wp.array[wp.float32],
-    consec_rej: wp.array[wp.int32],
-    guard_hits: wp.array[wp.int32],
+    diverged: wp.array[wp.bool],
 ):
-    """Bound the damage of a truncated boundary.
+    """March exhaustion latches the world (ICF-parity).
 
-    A world that cannot land within max_substeps would otherwise carry
-    unbounded time debt and a collapsed controller into every later
-    boundary: the debt compounds and recovery never outruns it. Cap the
-    carried debt at one boundary and reissue a fresh controller so the
-    next boundary attacks the shortfall at full growth.
+    A world still short of its boundary after max_substeps latches
+    ``diverged``, freezes its last committed state (nothing further commits)
+    and snaps its clock to the boundary; the env-side termination consumes
+    the latch and resets the world. No time debt is carried and no fresh
+    controller is issued: exhaustion is a divergence event, not a pardon.
     """
     i = wp.tid()
     if sim_time[i] < next_time[i]:
-        floor_t = next_time[i] - dt_outer
-        if sim_time[i] < floor_t:
-            sim_time[i] = floor_t
+        diverged[i] = True
+        sim_time[i] = next_time[i]
         ideal_dt[i] = dt_init
-        dt_ceiling[i] = ceiling_init
-        consec_rej[i] = 0
-        wp.atomic_add(guard_hits, 0, 1)
 
 
 @wp.kernel
@@ -482,8 +459,6 @@ def _reset_worlds(
     next_time: wp.array[wp.float32],
     diverged: wp.array[wp.bool],
     accepted: wp.array[wp.bool],
-    dt_ceiling: wp.array[wp.float32],
-    ceiling_init: float,
 ):
     """Restore the step-doubling controller's persistent per-world state to
     construction defaults for worlds flagged in ``mask``; leave others untouched.
@@ -500,7 +475,6 @@ def _reset_worlds(
         next_time[i] = wp.float32(0.0)
         diverged[i] = False
         accepted[i] = False
-        dt_ceiling[i] = ceiling_init
 
 
 @wp.kernel
@@ -936,12 +910,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # per-world boundary-limited flag + consecutive-rejection counter, and the two
         # opt-in fix switches (baked into the captured graph at construction).
         self._limited = wp.zeros(world_count, dtype=wp.int32, device=device)
-        self._consec_rej = wp.zeros(world_count, dtype=wp.int32, device=device)
-        # Ceiling memory (always on): per-world upper
-        # bound on growth, recorded at rejections, relaxed on accepts. Init above any
-        # reachable dt so it never binds until a rejection writes it.
-        _ceiling_init = self._dt_max if self._dt_max != float("inf") else 1.0e6
-        self._dt_ceiling = wp.full(world_count, wp.float32(_ceiling_init), dtype=wp.float32, device=device)
         # Non-finite (or catastrophic) state at the dt floor: NEVER commit it. Hold
         # the last valid state for this ONE frame and latch ``diverged``; the env
         # consumes the latch as a termination and resets the world the same step.
@@ -961,13 +929,13 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._march_log_hist_every = 48
         self._reject_count_buf = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Opt-in truncation guard (see _debt_guard). Off until validated.
         self._dt_init = float(dt_inner_init)
         self._guard_hits = wp.zeros(1, dtype=wp.int32, device=device)
         # Opt-in mixed-tolerance normalization: accept test becomes
         # |d| <= atol + rtol*|q| with atol = tol. Zero disables (bit-identical
         # legacy path).
-        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "2e-6") or 0.0)
+        # ICF-parity default: the paper's absolute error test (rtol 0).
+        self._err_rtol = float(os.environ.get("NEWTON_ADAPTIVE_RTOL", "0") or 0.0)
         self._err_rtol_over_atol = self._err_rtol / self._tol if self._err_rtol > 0.0 else 0.0
 
         # dt-occupancy histogram (opt-in). Allocated here, never inside the captured
@@ -1508,10 +1476,9 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._tol,
                 self._dt_min,
                 self._dt_max if self._dt_max != float("inf") else 1.0e6,
+                self._dt_inner_init,
                 self._divergence_threshold,
-                self._dt_ceiling,
                 self._limited,
-                self._consec_rej,
                 self._sim_time,
                 self._next_time,
             ],
@@ -1667,21 +1634,18 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                     device=device,
                 )
 
-            # Bound truncation damage BEFORE the next boundary consumes the
-            # carried state; device-only work, legal graphs on or off.
+            # Exhaustion latch (ICF-parity): unfinished worlds latch
+            # diverged, freeze, and snap to the boundary; device-only work,
+            # legal graphs on or off.
             wp.launch(
-                _debt_guard,
+                _latch_exhausted,
                 dim=n,
                 inputs=[
                     self._sim_time,
                     self._next_time,
-                    dt_outer,
                     self._dt_init,
-                    self._dt_max if self._dt_max != float("inf") else 1.0e6,
                     self._ideal_dt,
-                    self._dt_ceiling,
-                    self._consec_rej,
-                    self._guard_hits,
+                    self._diverged,
                 ],
                 device=device,
             )
@@ -1949,8 +1913,6 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 self._next_time,
                 self._diverged,
                 self._accepted,
-                self._dt_ceiling,
-                self._dt_max if self._dt_max != float("inf") else 1.0e6,
             ],
             device=self.model.device,
         )

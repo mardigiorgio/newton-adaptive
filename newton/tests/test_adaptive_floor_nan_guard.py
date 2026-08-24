@@ -1,48 +1,38 @@
 """Contract tests for the adaptive step controller (`_calc_adjusted_step`).
 
-Current contract at the ``dt_min`` floor, where the step can no longer be subdivided.
-A world there with ``e > tol`` always ACCEPTS (advancing ``sim_time`` avoids a
-boundary-loop hang) and pins ``ideal_dt`` to ``dt_min``; what differs is whether the
-state is committed:
+ICF-parity contract (mirrors SolverICFAdaptive._adapt_dt):
 
-  * ``nan_guard == 1`` (default) -- a non-finite error, or one at/above the divergence
-    sentinel, refuses the commit, latches ``diverged`` for the env to consume as a
-    termination, and freezes the world at its boundary (``sim_time = next_time``).
-    A large-but-FINITE error does not trigger it: that is a legitimately hard step, not
-    a blow-up, and the constraint solve already runs at MuJoCo's default 1e-8 residual
-    tolerance rather than leaning on a heuristic bound.
-  * ``nan_guard == 0`` -- the legacy path: commit anyway, never latch.
+  * Divergence latch: a non-finite/sentinel error latches ``diverged`` when the
+    step is at the ``dt_min`` floor OR has shrunk to the floorless sanity depth
+    (1e-3 of the boundary seed). The latch refuses the commit, snaps the clock
+    to the boundary, and reseeds ``ideal_dt``; the env-side termination
+    consumes it. Above both depths, a diverged attempt REJECTS and retries
+    smaller -- containment, not escalation.
+  * Floor accept: a FINITE error at the floor accepts and commits (the floor
+    cannot be subdivided; the accuracy guarantee is suspended for that step),
+    and ``ideal_dt`` stays rule-sized rather than pinned to the floor, so the
+    world lifts off once the difficulty passes.
+  * Elementary Drake law otherwise: safety 0.9, sqrt sizing, deadband
+    (0.9, 1.2), clamp [0.1, 5.0]x.
 
-Above the floor, a diverged (sentinel-error) world REJECTS and retries smaller -- the
-NaN containment path (the error kernel flags NaN per component).
-
-``force_accept`` is the quantile-stop escape hatch: it makes an otherwise-rejected step
-accept unconditionally, so a world abandoned by the boundary loop still lands on its
-boundary. It must never force a non-finite state through.
-
-This is a pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
+Pure-kernel contract test: warp on CPU, no GPU / MuJoCo needed.
 """
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.mujoco.solver_mujoco_adaptive import (
-    _calc_adjusted_step,
-    _forced_scan_kernel,
-    _restore_bad_rows_kernel,
-)
+from newton._src.solvers.mujoco.solver_mujoco_adaptive import _calc_adjusted_step
 
 wp.init()
 
 DEV = "cpu"
 TOL = 1.0e-3
-DT_MIN = 1.0e-6
+DT_SEED = 1.0e-2
 DIVERGENCE = 1.0e9  # threshold; the error kernel emits 1e10 for NaN/inf states
-SENTINEL = 1.0e10  # what _inf_norm_state_error_kernel writes for a diverged world
+SENTINEL = 1.0e10
 
 
-def _run(err_vals, dt_vals, nan_guard=1, force_accept=0, order_aware=0, sliver_fix=0):
-    """Launch the controller kernel over one synthetic batch at solver defaults."""
+def _run(err_vals, dt_vals, dt_min=1.0e-6, dt_seed=DT_SEED):
     n = len(err_vals)
     err = wp.array(np.asarray(err_vals, dtype=np.float32), dtype=wp.float32, device=DEV)
     dt = wp.array(np.asarray(dt_vals, dtype=np.float32), dtype=wp.float32, device=DEV)
@@ -51,11 +41,8 @@ def _run(err_vals, dt_vals, nan_guard=1, force_accept=0, order_aware=0, sliver_f
     commit = wp.zeros(n, dtype=wp.bool, device=DEV)
     diverged = wp.zeros(n, dtype=wp.bool, device=DEV)
     limited = wp.zeros(n, dtype=wp.int32, device=DEV)
-    consec_rej = wp.zeros(n, dtype=wp.int32, device=DEV)
     sim_time = wp.zeros(n, dtype=wp.float32, device=DEV)
-    # next_time > sim_time: these worlds have NOT reached their boundary.
     next_time = wp.full(n, 1.0, dtype=wp.float32, device=DEV)
-    force = wp.full(1, int(force_accept), dtype=wp.int32, device=DEV)
     wp.launch(
         _calc_adjusted_step,
         dim=n,
@@ -67,126 +54,76 @@ def _run(err_vals, dt_vals, nan_guard=1, force_accept=0, order_aware=0, sliver_f
             commit,
             diverged,
             TOL,
-            DT_MIN,
+            dt_min,
+            1.0e6,
+            dt_seed,
             DIVERGENCE,
             limited,
-            consec_rej,
-            order_aware,
-            sliver_fix,
-            nan_guard,
             sim_time,
             next_time,
-            force,
         ],
         device=DEV,
     )
-    return accepted.numpy(), commit.numpy(), diverged.numpy(), ideal.numpy()
+    return (
+        accepted.numpy(),
+        commit.numpy(),
+        diverged.numpy(),
+        ideal.numpy(),
+        sim_time.numpy(),
+        next_time.numpy(),
+    )
 
 
-def test_floor_diverged_latches_under_nan_guard():
-    """At the floor with a sentinel error and the NaN guard on (default): accept for
-    progress, but REFUSE the commit and latch ``diverged`` so the env can reset it."""
-    accepted, commit, diverged, ideal = _run([SENTINEL], [DT_MIN], nan_guard=1)
-    assert bool(accepted[0]) is True, "must advance to avoid a boundary-loop hang"
-    assert bool(commit[0]) is False, "a non-finite floor state must never be committed"
-    assert bool(diverged[0]) is True, "the NaN guard must latch for env-side termination"
-    assert abs(float(ideal[0]) - DT_MIN) < 1e-12, "floor step pins ideal_dt to dt_min"
+def test_floor_diverged_latches_and_snaps():
+    acc, com, div, ideal, st, nt = _run([SENTINEL], [1.0e-6])
+    assert bool(div[0]) is True, "non-finite at the floor must latch"
+    assert bool(com[0]) is False, "a non-finite state must never be committed"
+    assert float(st[0]) == float(nt[0]), "latch snaps the clock to the boundary"
+    assert abs(float(ideal[0]) - DT_SEED) < 1e-8, "latch reseeds ideal_dt"
 
 
-def test_floor_diverged_commits_without_nan_guard():
-    """The legacy path (NEWTON_ADAPTIVE_NAN_GUARD=0): commit anyway, never latch."""
-    accepted, commit, diverged, _ = _run([SENTINEL], [DT_MIN], nan_guard=0)
-    assert bool(accepted[0]) is True
-    assert bool(commit[0]) is True, "with the guard off, floor worlds commit like any over-tol world"
-    assert bool(diverged[0]) is False, "the latch is written only by the guard path"
+def test_floorless_sanity_depth_latches():
+    """dt_min = 0 (floorless): the sanity depth (1e-3 of the seed) still latches."""
+    acc, com, div, ideal, st, nt = _run([SENTINEL], [0.5e-5], dt_min=0.0)
+    assert bool(div[0]) is True, "sentinel at 1e-3 of the seed must latch floorlessly"
+    assert bool(com[0]) is False
+    assert float(st[0]) == float(nt[0])
 
 
-def test_floor_large_finite_error_still_commits():
-    """A large but FINITE error at the floor is a hard step, not a divergence: it must
-    still commit. Only non-finiteness (or the divergence sentinel) trips the guard."""
-    accepted, commit, diverged, _ = _run([1.0e4 * TOL], [DT_MIN], nan_guard=1)
-    assert bool(accepted[0]) is True
-    assert bool(commit[0]) is True, "a finite floor step must make committed progress"
-    assert bool(diverged[0]) is False, "finite error is not a blow-up; do not latch"
+def test_above_sanity_depth_diverged_rejects():
+    acc, com, div, ideal, _, _ = _run([SENTINEL], [10.0 * DT_SEED], dt_min=0.0)
+    assert bool(acc[0]) is False, "diverged above the sanity depth rejects and retries"
+    assert bool(com[0]) is False
+    assert bool(div[0]) is False, "containment: no latch while shrinking can still help"
+    assert abs(float(ideal[0]) - 1.0 * DT_SEED) < 1e-8, "hard shrink is 0.1x"
 
 
 def test_floor_finite_over_tol_commits_progress():
-    """A merely over-tolerance finite error at the floor still commits real progress."""
-    accepted, commit, diverged, _ = _run([10.0 * TOL], [DT_MIN], nan_guard=1)
-    assert bool(accepted[0]) is True
-    assert bool(commit[0]) is True, "finite floor step must still make committed progress"
-    assert bool(diverged[0]) is False, "a finite error never latches the guard"
+    acc, com, div, ideal, _, _ = _run([10.0 * TOL], [1.0e-6])
+    assert bool(acc[0]) is True, "the floor cannot be subdivided: accept"
+    assert bool(com[0]) is True, "finite floor step must make committed progress"
+    assert bool(div[0]) is False
+    assert float(ideal[0]) < 1.0e-6, "ideal_dt stays rule-sized, not pinned to the floor"
 
 
-def test_normal_within_tol_commits():
-    """A normal within-tolerance step accepts and commits."""
-    accepted, commit, diverged, _ = _run([0.5 * TOL], [10.0 * DT_MIN])
-    assert bool(accepted[0]) is True
-    assert bool(commit[0]) is True
-    assert bool(diverged[0]) is False
+def test_normal_within_tol_commits_and_grows():
+    acc, com, div, ideal, _, _ = _run([0.01 * TOL], [10.0 * DT_SEED])
+    assert bool(acc[0]) is True and bool(com[0]) is True and bool(div[0]) is False
+    assert float(ideal[0]) > 10.0 * DT_SEED, "well under tol must grow the step"
 
 
-def test_above_floor_diverged_rejects_and_retries():
-    """Above the floor, a diverged step is rejected (retry smaller) -- not given up, not committed."""
-    accepted, commit, diverged, ideal = _run([SENTINEL], [10.0 * DT_MIN])
-    assert bool(accepted[0]) is False, "should reject and retry with a smaller dt"
-    assert bool(commit[0]) is False
-    assert bool(diverged[0]) is False, "not at the floor yet -> not given up"
-    assert ideal[0] < 10.0 * DT_MIN, "should shrink the step for the retry"
+def test_finite_over_tol_above_floor_rejects_and_shrinks():
+    acc, com, div, ideal, _, _ = _run([100.0 * TOL], [10.0 * DT_SEED])
+    assert bool(acc[0]) is False and bool(com[0]) is False and bool(div[0]) is False
+    assert float(ideal[0]) < 10.0 * DT_SEED, "over-tol reject must shrink"
 
 
-def test_force_accept_turns_a_rejection_into_an_accept():
-    """The quantile stop abandons a world mid-flight; force_accept lands it anyway."""
-    rej_a, _, _, _ = _run([100.0 * TOL], [10.0 * DT_MIN], force_accept=0)
-    assert bool(rej_a[0]) is False, "baseline: this step is rejected"
-    acc_a, acc_c, acc_d, _ = _run([100.0 * TOL], [10.0 * DT_MIN], force_accept=1)
-    assert bool(acc_a[0]) is True, "force_accept must accept the step"
-    assert bool(acc_c[0]) is True, "and commit it, so the world advances"
-    assert bool(acc_d[0]) is False, "a finite forced step is not a divergence"
-
-
-def test_force_accept_never_commits_a_non_finite_state():
-    """force_accept must not launder a diverged world into the committed state."""
-    _, commit, _, _ = _run([SENTINEL], [10.0 * DT_MIN], force_accept=1)
-    assert bool(commit[0]) is False, "a non-finite step must never be force-committed"
-
-
-def test_forced_completion_containment_restores_and_latches():
-    """The production forced-completion path: a world whose forced eval went non-finite
-    must be restored to its pre-forced snapshot and latched diverged; clean worlds must
-    keep their forced state untouched. (The force_accept kernel tests above cover the
-    controller branch; THIS is the path the quantile stop actually takes.)"""
-    n, nq, nv = 4, 3, 2
-    rng = np.random.default_rng(0)
-    saved_q = rng.standard_normal((n, nq)).astype(np.float32)
-    saved_v = rng.standard_normal((n, nv)).astype(np.float32)
-    forced_q = saved_q + 0.5
-    forced_v = saved_v + 0.5
-    forced_q[2, 1] = np.nan  # world 2: forced eval blew up in qpos
-    forced_v[3, 0] = np.inf  # world 3: blew up in qvel
-
-    qpos = wp.array(forced_q, dtype=wp.float32)
-    qvel = wp.array(forced_v, dtype=wp.float32)
-    qpos_saved = wp.array(saved_q, dtype=wp.float32)
-    qvel_saved = wp.array(saved_v, dtype=wp.float32)
-    diverged = wp.zeros(n, dtype=wp.bool)
-    bad = wp.zeros(n, dtype=wp.int32)
-
-    wp.launch(_forced_scan_kernel, dim=n, inputs=[qpos, qvel, nq, nv, diverged, bad])
-    for sv, out, width in ((qpos_saved, qpos, nq), (qvel_saved, qvel, nv)):
-        wp.launch(_restore_bad_rows_kernel, dim=(n, width), inputs=[sv, bad], outputs=[out])
-    wp.synchronize()
-
-    q, v = qpos.numpy(), qvel.numpy()
-    d, b = diverged.numpy(), bad.numpy()
-    assert list(b) == [0, 0, 1, 1], f"bad mask wrong: {list(b)}"
-    assert list(d) == [False, False, True, True], f"diverged latch wrong: {list(d)}"
-    # poisoned worlds: fully restored (both fields, even if only one was non-finite)
-    assert np.allclose(q[2], saved_q[2]) and np.allclose(v[2], saved_v[2])
-    assert np.allclose(q[3], saved_q[3]) and np.allclose(v[3], saved_v[3])
-    # clean worlds: forced state kept, snapshot NOT leaked back
-    assert np.allclose(q[:2], forced_q[:2]) and np.allclose(v[:2], forced_v[:2])
-    assert np.isfinite(q).all() and np.isfinite(v).all()
+def test_deadband_holds_step():
+    """new_step inside (0.9, 1.2)x holds dt exactly (hysteresis)."""
+    # e = 0.7*tol -> 0.9*sqrt(1/0.7) = 1.076x -> inside the deadband.
+    acc, com, div, ideal, _, _ = _run([0.7 * TOL], [10.0 * DT_SEED])
+    assert bool(acc[0]) is True
+    assert abs(float(ideal[0]) - 10.0 * DT_SEED) < 1e-7, "deadband must hold the step"
 
 
 if __name__ == "__main__":
