@@ -1021,6 +1021,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         self._refresh_state = self.model.state() if self._contact_refresh_enabled else None
         self._refresh_contacts = None
         self._refresh_contacts_key = None
+        # Mid-march narrow-phase pipeline (CENIC 2-queries-per-attempt
+        # cadence): attached by the host that owns collision. With it,
+        # every attempt re-queries geometry at x^n and x^(n+1/2); without
+        # it, the dist/pos re-anchor below is the fallback.
+        self._collision_pipeline = None
 
         # ---- solver-internal CUDA-graph capture ----
         # Default tier: one REGULAR graph per iteration body (keyed by effective dt_max),
@@ -1230,8 +1235,7 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
         # through contact (energy-pumping resting objects). The mid-double refresh
         # restores the estimator's contact sensitivity; MuJoCo-native contacts get
         # the same effect from re-detection inside every eval.
-        if self._contact_refresh_enabled and self._refresh_contacts is not None:
-            self._refresh_injected_contacts()
+        self._refresh_or_requery()
         self._mjw_eval(self._dt_half)
 
     def _estimate_error(self) -> None:
@@ -1308,15 +1312,19 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
     # =====================================================================
     # Per-frame iteration bodies (the captured/replayed substep bodies)
     # =====================================================================
-    def _refresh_injected_contacts(self) -> None:
-        """Re-anchor injected Newton contacts to the CURRENT marching state.
+    def attach_collision_pipeline(self, pipeline) -> None:
+        """Enable mid-march geometry re-query (CENIC, 2 queries per attempt).
 
-        mjw qpos/qvel -> Newton joint coords -> FK body poses -> conversion-kernel
-        FAST path (recomputes contact ``dist``/``pos`` only; frame, solref, friction
-        and the compacted layout stay from the boundary full pass). Flat kernel
-        launches on buffers preallocated in ``__init__`` — records cleanly inside
-        the captured iteration graph.
+        The pipeline's collide is launch-only under Newton, so the re-queries
+        record into the captured iteration graph exactly like every other
+        stage. Requires use_newton_contacts=True (the queries rewrite the
+        injected contact set). Detach by attaching None.
         """
+        self._collision_pipeline = pipeline
+
+    def _sync_refresh_state(self):
+        """mjw qpos/qvel -> Newton joint coords -> FK body poses, into the
+        preallocated refresh state. Flat kernel launches; capture-safe."""
         model = self.model
         st = self._refresh_state
         mjw = self.mjw_data
@@ -1380,7 +1388,37 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
             outputs=[st.body_q, st.body_qd],
             device=model.device,
         )
-        self._convert_contacts_to_mjwarp(model, st, self._refresh_contacts)
+        return st
+
+    def _refresh_injected_contacts(self) -> None:
+        """Re-anchor injected Newton contacts to the CURRENT marching state
+        via the conversion kernel's FAST path (dist/pos only; frame, solref,
+        friction and the compacted layout stay from the boundary full pass).
+        Fallback cadence when no collision pipeline is attached."""
+        st = self._sync_refresh_state()
+        self._convert_contacts_to_mjwarp(self.model, st, self._refresh_contacts)
+
+    def _requery_injected_contacts(self) -> None:
+        """CENIC cadence: full narrow-phase query at the CURRENT marching
+        state, then full conversion of the fresh contact set.
+
+        The fast-path cache is invalidated first (device ops only) because
+        the query may produce a different contact set, so cached cid
+        mappings would alias stale slots. Runs at x^n (iteration start) and
+        at x^(n+1/2) (between the half evals), mirroring SolverICFAdaptive.
+        """
+        st = self._sync_refresh_state()
+        self._collision_pipeline.collide(st, self._refresh_contacts)
+        self._invalidate_contact_fast_path()
+        self._convert_contacts_to_mjwarp(self.model, st, self._refresh_contacts)
+
+    def _refresh_or_requery(self) -> None:
+        if self._refresh_contacts is None:
+            return
+        if self._collision_pipeline is not None:
+            self._requery_injected_contacts()
+        elif self._contact_refresh_enabled:
+            self._refresh_injected_contacts()
 
     def _run_iteration_body(self, effective_dt_max: float) -> None:
         """ONE ragged adaptive iteration: histogram sample (if enabled) -> clamp -> step-double
@@ -1454,11 +1492,11 @@ class SolverMuJoCoAdaptive(SolverMuJoCo):
                 device=dev,
             )
 
-        # Re-anchor injected contacts to the current committed state BEFORE the
-        # trials: they must not push against boundary-stale penetration (energy
-        # injection at footfall — the "flying robots" failure).
-        if self._contact_refresh_enabled and self._refresh_contacts is not None:
-            self._refresh_injected_contacts()
+        # Geometry at x^n (CENIC cadence) when a pipeline is attached, else
+        # re-anchor injected contacts to the current committed state: they
+        # must not push against boundary-stale penetration (energy injection
+        # at footfall — the "flying robots" failure).
+        self._refresh_or_requery()
 
         # --- adaptive core: step double, estimate error, run the controller ---
         self._step_double()
