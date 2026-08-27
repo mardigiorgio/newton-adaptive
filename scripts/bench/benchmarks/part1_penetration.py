@@ -15,6 +15,10 @@ solver's own contact report can.
 Accuracy knobs: fixed arms sweep substeps-per-boundary (dt ladder);
 adaptive arms sweep tolerance.
 
+Each configuration runs in its own SUBPROCESS: sequential in-process
+solver builds corrupt GPU state (observed CUDA 700 here and in the
+convergence bench; the existing accuracy bench isolates the same way).
+
 Standalone:
     uv run python -m scripts.bench.benchmarks.part1_penetration --n 64 --steps 200
 Emits CSV rows (arm, knob, wall_ms_per_boundary, pen_mean_m, pen_max_m,
@@ -25,7 +29,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -115,13 +122,36 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
     p.add_argument("--out", type=str, default="scripts/bench/results/part1_penetration.csv")
+    p.add_argument("--single", nargs=2, metavar=("ARM", "KNOB"), default=None)
     args = p.parse_args()
+
+    if args.single is not None:
+        arm_name, knob_s = args.single
+        knob = int(knob_s) if arm_name in ("mujoco", "icf") else float(knob_s)
+        row = _run(arm_name, knob, args.n, args.steps, args.warmup, args.seed)
+        print("ROW " + json.dumps(row), flush=True)
+        return 0
 
     rows = []
     for arm_name in args.arms:
         knobs = FIXED_SUBS if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
         for knob in knobs:
-            row = _run(arm_name, knob, args.n, args.steps, args.warmup, args.seed)
+            r = subprocess.run(
+                [
+                    sys.executable, "-m", "scripts.bench.benchmarks.part1_penetration",
+                    "--single", arm_name, str(knob),
+                    "--n", str(args.n), "--steps", str(args.steps),
+                    "--warmup", str(args.warmup), "--seed", str(args.seed),
+                ],
+                capture_output=True, text=True,
+            )
+            row = None
+            for line in r.stdout.splitlines():
+                if line.startswith("ROW "):
+                    row = json.loads(line[4:])
+            if row is None:
+                print(f"CONFIG FAILED {arm_name} knob={knob}:\n{r.stderr[-600:]}", flush=True)
+                continue
             rows.append(row)
             print(row, flush=True)
 
