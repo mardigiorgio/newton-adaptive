@@ -144,10 +144,8 @@ Wall time per simulated second, δt_max = 10 ms, timeouts at 100 s/sim-s.
 | hard, 1024 | ICF error control | 28.7 | 53.2 | timeout | timeout | timeout | timeout |
 | hard, 1024 | MuJoCo error control | 0.71 | 4.71 | 2.92 | 6.78 | 11.3 | 27.8 |
 
-Fixed-step reference levels (N = 1 / N = 1024, s per simulated second): soft —
-ICF 0.067 / 7.2 at 10 ms, 0.55 / 36 at 1 ms; MuJoCo 0.052 / 0.35 at 10 ms,
-0.37 / 1.5 at 1 ms. Hard — ICF 0.23 / 7.2 at 10 ms, 0.80 / 36 at 1 ms; MuJoCo
-0.11 / 0.35 at 10 ms, 0.35 / 1.5 at 1 ms (read the exact values from the CSVs).
+Fixed-step reference levels at δt = 10, 5, 2, 1 ms for N = 1 and 1024 are
+generated into `tables/part1_table1.md` ("Fixed-step reference levels").
 
 What the figure supports:
 * On soft clutter, ICF error control is cheaper than MuJoCo error control at

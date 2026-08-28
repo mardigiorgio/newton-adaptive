@@ -95,6 +95,24 @@ def table1() -> tuple[str, str]:
     return head + "\n".join(md) + "\n", tex_doc
 
 
+def fixed_levels_table() -> str:
+    """Fixed-step reference levels (wall s per simulated s) at N = 1 and 1024."""
+    out = ["\n# Fixed-step reference levels — wall time [s] per simulated second\n",
+           "| scene | arm | N | δt = 10 ms | 5 ms | 2 ms | 1 ms |", "|---|---|---|---|---|---|---|"]
+    for scene in ("soft-clutter", "hard-clutter"):
+        for n in (1, 1024):
+            rows = _rows(f"part1_workprecision_{scene}_n{n}.csv")
+            if not rows:
+                continue
+            for arm, name in (("icf", "ICF fixed"), ("mujoco", "MuJoCo fixed")):
+                vals = []
+                for d in (1e-2, 5e-3, 2e-3, 1e-3):
+                    r = next((r for r in rows if r["arm"] == arm and r["dt_s"] == d), None)
+                    vals.append("—" if r is None or r["status"] != "ok" else f"{r['wall_s_per_sim_s']:.3g}")
+                out.append(f"| {scene} | {name} | {n} | " + " | ".join(vals) + " |")
+    return "\n".join(out) + "\n"
+
+
 def ball_table() -> str:
     rows = _rows("part1_ball_energy.csv")
     if not rows:
@@ -111,6 +129,7 @@ def ball_table() -> str:
 
 if __name__ == "__main__":
     md, tex = table1()
+    md += fixed_levels_table()
     md += ball_table()
     with open(os.path.join(OUT, "part1_table1.md"), "w") as f:
         f.write(md)

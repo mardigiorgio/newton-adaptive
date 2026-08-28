@@ -32,6 +32,19 @@
 | MuJoCo real-time rate | 948% | 579% | 619% | 283% |
 | MuJoCo artifacts | Yes (pen 13.2 mm, eject 0.0%) | Yes (pen 6.6 mm, eject 0.0%) | Yes (pen 5.2 mm, eject 0.0%) | Yes (pen 4.9 mm, eject 0.0%) |
 
+# Fixed-step reference levels — wall time [s] per simulated second
+
+| scene | arm | N | δt = 10 ms | 5 ms | 2 ms | 1 ms |
+|---|---|---|---|---|---|---|
+| soft-clutter | ICF fixed | 1 | 0.067 | 0.124 | 0.287 | 0.551 |
+| soft-clutter | MuJoCo fixed | 1 | 0.0522 | 0.0914 | 0.208 | 0.368 |
+| soft-clutter | ICF fixed | 1024 | 2.41 | 4.24 | 8.77 | 15 |
+| soft-clutter | MuJoCo fixed | 1024 | 0.152 | 0.255 | 0.605 | 1.15 |
+| hard-clutter | ICF fixed | 1 | 0.231 | 0.292 | 0.452 | 0.8 |
+| hard-clutter | MuJoCo fixed | 1 | 0.105 | 0.173 | 0.161 | 0.353 |
+| hard-clutter | ICF fixed | 1024 | 7.26 | 10.1 | 19.9 | 35.7 |
+| hard-clutter | MuJoCo fixed | 1024 | 0.3 | 0.494 | 0.688 | 1.49 |
+
 # Bouncing ball (Fig. 8 scene): energy change after 10 s and rebounds (paper: 11)
 
 | arm | δt or ε_acc | energy change [%] | bounces | status |
