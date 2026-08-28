@@ -103,7 +103,8 @@ def workprecision() -> None:
                             fontsize=5.5, color=STYLE[arm]["color"], va="bottom", ha="left")
             ax.set_xscale("log")
             ax.set_yscale("log")
-            ax.invert_xaxis()
+            if not ax.xaxis_inverted():  # shared x: invert exactly once (the paper tightens accuracy to the right)
+                ax.invert_xaxis()
             top = max([r["wall_s_per_sim_s"] for r in ok if r["wall_s_per_sim_s"] != ""] + [1.0]) * 4.0
             ax.set_ylim(top=top)
             for r in bad:
