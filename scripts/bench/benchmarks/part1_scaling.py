@@ -77,6 +77,7 @@ def main() -> int:
     p.add_argument("--tol", type=float, default=1e-3)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
     p.add_argument("--out", type=str, default=None)
+    p.add_argument("--trials", type=int, default=3, help="independent subprocess runs; median of per-run medians, band = min..max")
     p.add_argument("--single", nargs=2, metavar=("ARM", "N"), default=None)
     args = p.parse_args()
     out = args.out or f"scripts/bench/results/part1_scaling_{args.scene}.csv"
@@ -90,22 +91,38 @@ def main() -> int:
     rows = []
     for arm_name in args.arms:
         for n in args.ns:
-            r = subprocess.run(
-                [
-                    sys.executable, "-m", "scripts.bench.benchmarks.part1_scaling",
-                    "--scene", args.scene, "--single", arm_name, str(n),
-                    "--steps", str(args.steps), "--warmup", str(args.warmup),
-                    "--seed", str(args.seed), "--n-sub", str(args.n_sub), "--tol", str(args.tol),
-                ],
-                capture_output=True, text=True,
-            )
-            row = None
-            for line in r.stdout.splitlines():
-                if line.startswith("ROW "):
-                    row = json.loads(line[4:])
-            if row is None:
-                print(f"CONFIG FAILED {arm_name} n={n}:\n{r.stderr[-600:]}", flush=True)
+            trials = []
+            for _ in range(args.trials):
+                r = subprocess.run(
+                    [
+                        sys.executable, "-m", "scripts.bench.benchmarks.part1_scaling",
+                        "--scene", args.scene, "--single", arm_name, str(n),
+                        "--steps", str(args.steps), "--warmup", str(args.warmup),
+                        "--seed", str(args.seed), "--n-sub", str(args.n_sub), "--tol", str(args.tol),
+                    ],
+                    capture_output=True, text=True,
+                )
+                got = None
+                for line in r.stdout.splitlines():
+                    if line.startswith("ROW "):
+                        got = json.loads(line[4:])
+                if got is None:
+                    print(f"CONFIG FAILED {arm_name} n={n}:\n{r.stderr[-600:]}", flush=True)
+                    break
+                trials.append(got)
+            if not trials:
                 continue
+            # the timed window spans the chaotic impact phase, so independent
+            # runs scatter: report the median of per-run medians and the
+            # spread of those medians across runs
+            meds = sorted(t["wall_ms_median"] for t in trials)
+            row = dict(trials[0])
+            row["wall_ms_median"] = float(np.median(meds))
+            row["wall_ms_p90"] = float(max(t["wall_ms_p90"] for t in trials))
+            row["wall_ms_trial_min"] = meds[0]
+            row["wall_ms_trial_max"] = meds[-1]
+            row["trials"] = len(trials)
+            row["exhausted_frac"] = max(t["exhausted_frac"] for t in trials)
             rows.append(row)
             print(row, flush=True)
 

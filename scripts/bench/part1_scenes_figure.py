@@ -93,9 +93,7 @@ def _draw_state(ax, model, state, scene):
 
 def main() -> None:
     fig = plt.figure(figsize=(9.6, 5.6), constrained_layout=True)
-    specs = [("soft-clutter", "(a) Soft clutter: 20 spheres, k = 10³ N/m, v_s = 1 cm/s"),
-             ("hard-clutter", "(b) Hard clutter: 10 spheres + 10 cubes, k = 10⁵ N/m, v_s = 0.1 mm/s"),
-             ("ball", "(c) Bouncing ball: 0.1 kg, k = 10³ N/m, zero dissipation, 1 m drop")]
+    specs = [("soft-clutter", "(a) Soft clutter"), ("hard-clutter", "(b) Hard clutter"), ("ball", "(c) Bouncing ball")]
     for col, (scene, title) in enumerate(specs):
         model = build_model(1, scene=scene)
         arm = make_arm(model, "icf-adaptive", scene=scene, tol=1e-3, max_substeps=4096)
@@ -109,7 +107,9 @@ def main() -> None:
         ax = fig.add_subplot(2, 3, col + 4, projection="3d")
         _draw_state(ax, model, s0, scene)
         ax.set_title(f"t = {t_end:g} s (ICF error control, ε = 10⁻³)", fontsize=7.5)
-    fig.suptitle("Part-1 test scenes (from the CENIC paper, Sec. VII / Fig. 6 and Fig. 8); assumed sizes: r = h = 2.5 cm, bin 30 cm, ball r = 5 cm", fontsize=8)
+    fig.suptitle("Part-1 test scenes (CENIC Sec. VII, Figs. 6 and 8).  (a) 20 spheres, k = 10³ N/m, v_s = 1 cm/s.  "
+                 "(b) 10 spheres + 10 cubes, k = 10⁵ N/m, v_s = 0.1 mm/s.  (c) 0.1 kg ball, k = 10³ N/m, zero dissipation, 1 m drop.\n"
+                 "Assumed (not stated in the paper): r = h = 2.5 cm, water density, 30 cm bin, ball r = 5 cm.", fontsize=7.5)
     os.makedirs(FIG, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(os.path.join(FIG, f"scenes.{ext}"), dpi=200, bbox_inches="tight")

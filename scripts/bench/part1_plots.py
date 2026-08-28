@@ -245,7 +245,12 @@ def penetration() -> None:
             ax.set_xscale("log")
             if col != "out_of_bin_frac":
                 ax.set_yscale("log")
-                ax.set_ylim(floor / 3, 0.2)
+                ymax = max([r[col] for r in rows] + [0.05])
+                ax.set_ylim(floor / 3, ymax * 4.0)
+                if ymax > 0.1:
+                    ax.axhline(0.025, color="gray", lw=0.6, ls="--")
+                    ax.text(0.01, 0.025, "object radius: deeper = tunnelled", fontsize=6, color="gray", va="bottom",
+                            transform=ax.get_yaxis_transform())
                 ax.axhline(floor, color="gray", lw=0.6, ls=":")
                 ax.text(0.01, 0.06, "open markers: exactly 0 (drawn at axis floor)", transform=ax.transAxes,
                         ha="left", va="bottom", fontsize=6.5, color="gray")
@@ -265,19 +270,23 @@ def scaling() -> None:
             continue
         fig, ax = plt.subplots(figsize=(5.4, 3.9), constrained_layout=True)
         for arm in STYLE:
-            pts = sorted((r["n_worlds"], r["wall_ms_median"], r["wall_ms_p90"], _knob_label(r)) for r in rows if r["arm"] == arm)
+            has_trials = rows and rows[0].get("wall_ms_trial_min", "") != ""
+            lo_key, hi_key = ("wall_ms_trial_min", "wall_ms_trial_max") if has_trials else ("wall_ms_median", "wall_ms_p90")
+            pts = sorted((r["n_worlds"], r["wall_ms_median"], r[lo_key], r[hi_key], _knob_label(r)) for r in rows if r["arm"] == arm)
             if not pts:
                 continue
             xs = [p[0] for p in pts]
             st = dict(STYLE[arm])
-            st["label"] = f"{st['label']}, {pts[0][3]}"
+            st["label"] = f"{st['label']}, {pts[0][4]}"
             ax.plot(xs, [p[1] for p in pts], **st)
-            ax.fill_between(xs, [p[1] for p in pts], [p[2] for p in pts], color=STYLE[arm]["color"], alpha=0.12, lw=0)
+            ax.fill_between(xs, [p[2] for p in pts], [p[3] for p in pts], color=STYLE[arm]["color"], alpha=0.15, lw=0)
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
         ax.set_xlabel("parallel worlds")
-        ax.set_ylabel("wall per 10 ms boundary [ms]  (median → p90)")
-        ax.set_title(f"wall time vs world count — {SCENE_NOTE[scene]}", fontsize=8)
+        trials = int(rows[0].get("trials", 1) or 1)
+        band = f"band: spread of {trials} independent runs" if trials > 1 else "band: median → p90"
+        ax.set_ylabel("wall per 10 ms boundary [ms]  (median)")
+        ax.set_title(f"wall time vs world count — {SCENE_NOTE[scene]}\n{band}; timed window t = 0.2–1.2 s (impact phase)", fontsize=7.5)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
         _save(fig, f"scaling_{scene}")
