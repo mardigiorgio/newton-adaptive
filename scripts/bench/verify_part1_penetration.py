@@ -37,9 +37,13 @@ import numpy as np
 import warp as wp
 
 
-from scripts.bench.benchmarks.part1_penetration import _CORNERS, _penetrations, _quat_rotate
+from scripts.bench.benchmarks.part1_penetration import _UNIT_CORNERS, _Geometry, _quat_rotate
 from scripts.bench.four_arms import build_model, make_arm
-from scripts.scenes.contact_objects import BOX_HALF, SPHERE_RADIUS
+from scripts.scenes.cenic_scenes import CLUTTER_CUBE_HALF, CLUTTER_SPHERE_R
+
+SCENE = "hard-clutter"
+_CORNERS = _UNIT_CORNERS * CLUTTER_CUBE_HALF
+SPHERE_RADIUS, BOX_HALF = CLUTTER_SPHERE_R, CLUTTER_CUBE_HALF
 
 FAIL = []
 
@@ -51,10 +55,13 @@ def check(cond: bool, msg: str) -> None:
 
 
 def verify_structure(n: int = 3) -> None:
-    print(f"[1-4] model structure, n={n}")
-    model = build_model(n)
+    print(f"[1-4] model structure, scene={SCENE}, n={n}")
+    model = build_model(n, scene=SCENE)
     per_world = model.body_count // n
-    check(model.body_count == 18 * n, f"body_count {model.body_count} == 18*{n}")
+    check(model.body_count == 20 * n, f"body_count {model.body_count} == 20*{n}")
+    geom = _Geometry(model)
+    check(int(geom.is_sphere.sum()) == 10 * n and int(geom.is_box.sum()) == 10 * n,
+          f"model-driven geometry: {int(geom.is_sphere.sum())} spheres, {int(geom.is_box.sum())} boxes")
     st = model.shape_type.numpy()
     sb = model.shape_body.numpy()
     sc = model.shape_scale.numpy()
@@ -71,7 +78,7 @@ def verify_structure(n: int = 3) -> None:
     radius_ok, half_ok, offset_ok = True, True, True
     for b, shapes in body_geo.items():
         local = b % per_world
-        want = "GEO_SPHERE" if local < 9 else "GEO_BOX"
+        want = "GEO_SPHERE" if local % 2 == 0 else "GEO_BOX"  # hard clutter alternates
         got = names[shapes[0]]
         if len(shapes) != 1 or got != want:
             layout_ok = False
@@ -83,7 +90,7 @@ def verify_structure(n: int = 3) -> None:
         xf = sx[shapes[0]]
         if np.abs(xf[:3]).max() > 1e-7 or np.abs(xf[3:] - np.array([0, 0, 0, 1])).max() > 1e-7:
             offset_ok = False
-    check(layout_ok, "per world: bodies 0-8 are single SPHERE shapes, 9-17 single BOX shapes")
+    check(layout_ok, "per world: even bodies single SPHERE shapes, odd bodies single BOX shapes")
     check(radius_ok, f"every sphere radius == {SPHERE_RADIUS}")
     check(half_ok, f"every box half-extent == {BOX_HALF}")
     check(offset_ok, "every dynamic shape sits at its body origin (identity offset)")
@@ -118,23 +125,22 @@ def verify_quaternion(trials: int = 200) -> None:
 
 
 def verify_evolution(arm_name: str, knob, n: int = 8, boundaries: int = 120) -> None:
-    print(f"[6] state evolution: {arm_name} knob={knob}, n={n}")
+    print(f"[6] state evolution: {arm_name} knob={knob}, scene={SCENE}, n={n}")
     kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
-    model = build_model(n)
-    arm = make_arm(model, arm_name, **kwargs)
+    model = build_model(n, scene=SCENE)
+    arm = make_arm(model, arm_name, scene=SCENE, **kwargs)
     s0, s1, ctrl = model.state(), model.state(), model.control()
-    per_world = 18
+    geom = _Geometry(model)
     mins_sphere, mins_corner, pens = [], [], []
     for _ in range(boundaries):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         bq = s0.body_q.numpy().reshape(-1, 7)
-        idx = np.arange(bq.shape[0]) % per_world
-        sph = bq[idx < 9]
-        box = bq[idx >= 9]
+        sph = bq[geom.is_sphere]
+        box = bq[geom.is_box]
         corners = _quat_rotate(box[:, 3:], _CORNERS) + box[:, None, :3]
         mins_sphere.append(float(sph[:, 2].min()))
         mins_corner.append(float(corners[:, :, 2].min()))
-        pens.append(float(_penetrations(model, s0).max()))
+        pens.append(float(geom.penetrations(s0).max()))
     ms, mc, mp = np.array(mins_sphere), np.array(mins_corner), np.array(pens)
     check(ms[0] > ms[-1] + 0.05, f"spheres fell: min center z {ms[0]:.3f} -> {ms[-1]:.4f}")
     check(np.isfinite(ms).all() and np.isfinite(mc).all(), "all readbacks finite")
@@ -155,7 +161,7 @@ def verify_timing() -> None:
                 [sys.executable, "-c", f"""
 import time, numpy as np, warp as wp
 from scripts.bench.four_arms import build_model, make_arm
-m = build_model(64); a = make_arm(m, 'icf', n_sub={knob})
+m = build_model(64, scene='{SCENE}'); a = make_arm(m, 'icf', scene='{SCENE}', n_sub={knob})
 s0, s1, c = m.state(), m.state(), m.control()
 for _ in range(20): s0, s1 = a.boundary(s0, s1, c)
 wp.synchronize(); ts = []

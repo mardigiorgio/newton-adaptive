@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 
-from scripts.bench.four_arms import build_model, make_arm
+from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
 from scripts.scenes.cenic_scenes import DT_OUTER, ball_energy, ball_initial_energy
 
 N_SUB_LADDER = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]  # dt 10 ms .. 10 us
@@ -38,16 +38,27 @@ ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
 HORIZON_S = 10.0
 
 
+MAX_SUBSTEPS = 4096
+
+
 def _run(arm_name: str, knob) -> dict:
-    kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
+    fixed = arm_name in ("mujoco", "icf")
+    kwargs = {"n_sub": knob} if fixed else {"tol": knob, "max_substeps": MAX_SUBSTEPS}
     model = build_model(1, scene="ball")
     arm = make_arm(model, arm_name, scene="ball", **kwargs)
+    tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     e0 = ball_initial_energy(model)
     for _ in range(int(round(HORIZON_S / DT_OUTER))):
         s0, s1 = arm.boundary(s0, s1, ctrl)
+        if tracker:
+            tracker.tick()
     e_end = ball_energy(model, s0)[0]
-    return {"energy_change_pct": 100.0 * (e_end - e0) / e0, "final_z": float(s0.body_q.numpy().reshape(-1, 7)[0, 2])}
+    return {
+        "energy_change_pct": 100.0 * (e_end - e0) / e0,
+        "final_z": float(s0.body_q.numpy().reshape(-1, 7)[0, 2]),
+        "exhausted_frac": tracker.fraction() if tracker else 0.0,
+    }
 
 
 def main() -> int:
@@ -72,8 +83,10 @@ def main() -> int:
             "arm": arm_name,
             "dt_s": DT_OUTER / knob if fixed else "",
             "accuracy": "" if fixed else knob,
+            "max_substeps": "" if fixed else MAX_SUBSTEPS,
             "energy_change_pct": "",
             "final_z": "",
+            "exhausted_frac": "",
             "status": "ok",
         }
         try:
@@ -90,6 +103,8 @@ def main() -> int:
                 print(f"FAIL {arm_name} {knob}: {r.stderr[-300:]}", flush=True)
             else:
                 row.update(got)
+                if got["exhausted_frac"] > 0.0:
+                    row["status"] = "budget-exhausted"
         except subprocess.TimeoutExpired:
             row["status"] = "timeout"
         rows.append(row)

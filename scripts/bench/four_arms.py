@@ -106,7 +106,8 @@ def _make_mujoco(model: newton.Model, n_sub: int) -> Arm:
     return Arm("mujoco", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
 
 
-def _make_mujoco_adaptive(model: newton.Model, tol: float) -> Arm:
+def _make_mujoco_adaptive(model: newton.Model, tol: float, max_substeps: int | None = None) -> Arm:
+    extra = {"max_substeps": int(max_substeps)} if max_substeps else {}
     solver = newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
@@ -116,6 +117,7 @@ def _make_mujoco_adaptive(model: newton.Model, tol: float) -> Arm:
         dt_mode="per_world",
         nconmax=NCONMAX,
         njmax=NJMAX,
+        **extra,
     )
 
     def boundary(s0, s1, ctrl):
@@ -163,8 +165,11 @@ def _make_icf(model: newton.Model, n_sub: int, icf: dict | None = None) -> Arm:
     return Arm("icf", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
 
 
-def _make_icf_adaptive(model: newton.Model, tol: float, icf_overrides: dict | None = None) -> Arm:
+def _make_icf_adaptive(
+    model: newton.Model, tol: float, icf_overrides: dict | None = None, max_substeps: int | None = None
+) -> Arm:
     icf = _icf()
+    extra = {"max_substeps": int(max_substeps)} if max_substeps else {}
     solver = icf.SolverICFAdaptive(
         model,
         params=_icf_params(icf_overrides),
@@ -173,6 +178,7 @@ def _make_icf_adaptive(model: newton.Model, tol: float, icf_overrides: dict | No
             dt_inner_init=DT_OUTER,
             dt_inner_min=DT_INNER_MIN,
             dt_inner_max=DT_OUTER,
+            **extra,
         ),
     )
     pipeline = newton.CollisionPipeline(model)
@@ -193,22 +199,71 @@ def _make_icf_adaptive(model: newton.Model, tol: float, icf_overrides: dict | No
 
 
 def make_arm(
-    model: newton.Model, name: str, *, n_sub: int = 1, tol: float = 1e-3, scene: str | None = None
+    model: newton.Model,
+    name: str,
+    *,
+    n_sub: int = 1,
+    tol: float = 1e-3,
+    scene: str | None = None,
+    max_substeps: int | None = None,
 ) -> Arm:
     """Build one arm on ``model``. Fixed arms take ``n_sub`` (dt = DT_OUTER /
-    n_sub), adaptive arms ``tol`` (the paper's accuracy eps_acc). ``scene``
-    selects the ICF material overrides the scene declares (MuJoCo reads its
-    materials from the shapes)."""
+    n_sub), adaptive arms ``tol`` (the paper's accuracy eps_acc) and an
+    optional ``max_substeps`` march budget. ``scene`` selects the ICF
+    material overrides the scene declares (MuJoCo reads its materials from
+    the shapes)."""
     icf = SCENES[scene].icf if scene in SCENES else None
     if name == "mujoco":
         return _make_mujoco(model, n_sub)
     if name == "mujoco-adaptive":
-        return _make_mujoco_adaptive(model, tol)
+        return _make_mujoco_adaptive(model, tol, max_substeps)
     if name == "icf":
         return _make_icf(model, n_sub, icf)
     if name == "icf-adaptive":
-        return _make_icf_adaptive(model, tol, icf)
+        return _make_icf_adaptive(model, tol, icf, max_substeps)
     raise ValueError(f"unknown arm {name!r}; choose from {ARMS}")
+
+
+@wp.kernel
+def _or_bool_kernel(src: wp.array(dtype=wp.bool), acc: wp.array(dtype=wp.int32)):
+    i = wp.tid()
+    if src[i]:
+        acc[i] = 1
+
+
+@wp.kernel
+def _or_int_kernel(src: wp.array(dtype=wp.int32), acc: wp.array(dtype=wp.int32)):
+    i = wp.tid()
+    if src[i] != 0:
+        acc[i] = 1
+
+
+class ExhaustionTracker:
+    """Accumulates, on the device, whether an adaptive arm ever latched a
+    world as diverged / exhausted its march budget — the paper's "solver
+    failure" — without a host sync inside the timed loop. Call ``tick()``
+    after every boundary; read ``fraction()`` once at the end."""
+
+    def __init__(self, arm: Arm):
+        self._srcs = []
+        div = getattr(arm.solver, "diverged", None)
+        if div is not None:
+            self._srcs.append((_or_bool_kernel, div, wp.zeros(div.shape[0], dtype=wp.int32, device=div.device)))
+        flag = getattr(arm.solver, "_boundary_flag", None)
+        if flag is not None:
+            self._srcs.append((_or_int_kernel, flag, wp.zeros(flag.shape[0], dtype=wp.int32, device=flag.device)))
+
+    def tick(self) -> None:
+        for kern, src, acc in self._srcs:
+            wp.launch(kern, dim=src.shape[0], inputs=[src, acc], device=src.device)
+
+    def fraction(self) -> float:
+        """Max over sources of the fraction of entries that ever latched."""
+        best = 0.0
+        for _, _, acc in self._srcs:
+            a = acc.numpy()
+            best = max(best, float(a.mean()) if a.size else 0.0)
+        return best
 
 
 def build_model(n: int, seed: int = 42, scene: str = "contact-objects") -> newton.Model:
