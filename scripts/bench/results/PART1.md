@@ -129,4 +129,63 @@ control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
 
 ## Results
 
-_(filled from the final CSVs — see `figures/` and `tables/`)_
+### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
+
+Wall time per simulated second, δt_max = 10 ms, timeouts at 100 s/sim-s.
+
+| scene, N | arm | ε = 10⁻¹ | 10⁻² | 10⁻³ | 10⁻⁴ | 10⁻⁵ | 10⁻⁶ |
+|---|---|---|---|---|---|---|---|
+| soft, 1 | ICF error control | 0.26 | 0.26 | 0.30 | 0.36 | 0.57 | 1.11 |
+| soft, 1 | MuJoCo error control | 0.15 | 0.15 | 0.25 | 0.58 | 1.19 | 2.48 |
+| hard, 1 | ICF error control | 0.68 | 1.27 | 3.59 | 11.5 | 63.0 | timeout |
+| hard, 1 | MuJoCo error control | 0.19 | 0.26 | 0.12 | 0.27 | 1.68 | 5.08 |
+| soft, 1024 | ICF error control | 7.6 | 10.4 | 14.7 | 14.6 | 17.6 | 29.7 |
+| soft, 1024 | MuJoCo error control | 0.42 | 0.98 | 2.47 | 5.64 | 14.4 | 43.7 |
+| hard, 1024 | ICF error control | 28.7 | 53.2 | timeout | timeout | timeout | timeout |
+| hard, 1024 | MuJoCo error control | 0.71 | 4.71 | 2.92 | 6.78 | 11.3 | 27.8 |
+
+Fixed-step reference levels (N = 1 / N = 1024, s per simulated second): soft —
+ICF 0.067 / 7.2 at 10 ms, 0.55 / 36 at 1 ms; MuJoCo 0.052 / 0.35 at 10 ms,
+0.37 / 1.5 at 1 ms. Hard — ICF 0.23 / 7.2 at 10 ms, 0.80 / 36 at 1 ms; MuJoCo
+0.11 / 0.35 at 10 ms, 0.35 / 1.5 at 1 ms (read the exact values from the CSVs).
+
+What the figure supports:
+* On soft clutter, ICF error control is cheaper than MuJoCo error control at
+  every ε ≤ 10⁻³ (N = 1) and at ε = 10⁻⁶ (N = 1024); on hard clutter MuJoCo
+  error control is cheaper everywhere, by 4–40×.
+* ICF error control reaches the paper's default ε = 10⁻³ on hard clutter at
+  3.6 s per simulated second for one world (28 % real time); at 1024 worlds it
+  exceeds the timeout.
+* MuJoCo error control is **non-monotone in ε on hard clutter** (ε = 10⁻³ is
+  cheaper than 10⁻² and 10⁻¹ at N = 1 as 3-trial medians, and at N = 1024) —
+  a property of its controller on this scene, reported as measured.
+* No configuration exhausted the 4096-substep march budget; every missing
+  point is a genuine timeout.
+
+### Energy convergence (`figures/ball_energy.pdf`, `tables/part1_table1.md`)
+
+| δt | 10 ms | 5 ms | 2 ms | 1 ms | 0.5 ms | 0.2 ms | 0.1 ms | 50 µs | 20 µs | 10 µs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ICF, % energy change | −99.6 | −99.6 | −99.6 | −99.6 | −97.6 | −56.8 | −32.1 | −16.2 | −6.8 | −3.5 |
+| ICF, rebounds in 10 s | 2 | 3 | 8 | 12 | 21 | 13 | 11 | 10 | 11 | 11 |
+| MuJoCo, % energy change | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 |
+| MuJoCo, rebounds | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+* Fixed ICF converges at first order once the impact is resolved
+  (δt ≤ 0.2 ms: each halving of δt halves the energy loss) and rebounds 11
+  times in 10 s at δt ≤ 0.1 ms — the count the paper states for this scene.
+  At δt ≥ 1 ms the first impact absorbs essentially all the energy and the
+  ball settles (the ≥ 12 "rebounds" at 0.5–1 ms are resting chatter).
+* MuJoCo loses 99.5 % of the energy at every δt down to 10 µs and never
+  rebounds more than once: its dissipation lives in the contact model, not
+  in the step, so refining δt cannot recover the conservative dynamics.
+* ICF error control: the bounce is resolved only at ε ≤ 10⁻⁵ (−61 %; −22 % at
+  10⁻⁶ with 11 rebounds); MuJoCo error control is dead at every ε.
+* Open question for the authors: the paper's Fig. 8 shows step-doubling
+  retaining some energy at δt = 1 ms, where ours loses 99.6 %; our assumed
+  radius (5 cm) and 5 mm contact margin are the likely knobs.
+
+### Penetration vs wall and wall vs worlds
+
+_(filled when the budget-4096 reruns land — see `figures/penetration_*.pdf`,
+`figures/scaling_*.pdf`)_
