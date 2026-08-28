@@ -354,10 +354,120 @@ def realtime_trace() -> None:
         _save(fig, f"realtime_trace_n{n}")
 
 
+# ---------------------------------------------------------------- story figures
+import math as _math
+
+_OBJECT_MASS = 1000.0 * 4.0 / 3.0 * _math.pi * 0.025**3  # water-density 2.5 cm sphere [kg]
+_SCENE_K = {"soft-clutter": 1.0e3, "hard-clutter": 1.0e5}
+
+
+def _static_pen(scene: str) -> float:
+    """Single-object static penetration m*g/k [m] -- the compliance the contact model prescribes."""
+    return _OBJECT_MASS * 9.81 / _SCENE_K[scene]
+
+
+def artifacts() -> None:
+    """Claim 1: resolution cannot buy MuJoCo out of its artifacts; fixed ICF
+    can, but only by choosing dt; error control is artifact-free at any
+    requested accuracy. One panel per scene: artifact ratio = max
+    penetration / (10 x static compliance) vs cost; ratio 1 is the line;
+    ejections ringed; the cheapest artifact-free point of each arm starred."""
+    scenes = [sc for sc in SCENE_ORDER if _rows(f"part1_penetration_{sc}.csv")]
+    if not scenes:
+        return
+    fig, axes = plt.subplots(1, len(scenes), figsize=(5.0 * len(scenes), 4.0), constrained_layout=True, squeeze=False)
+    claims = []
+    for ax, scene in zip(axes[0], scenes):
+        rows = _rows(f"part1_penetration_{scene}.csv")
+        thr = 10.0 * _static_pen(scene)
+        dto = rows[0].get("dt_outer_s", 0.01) or 0.01
+        n = int(rows[0]["n_worlds"])
+        ax.axhspan(1.0, 1e6, color="#c0392b", alpha=0.06, lw=0)
+        ax.axhline(1.0, color="#c0392b", lw=0.9, ls="--")
+        ax.text(0.005, 1.0, "artifact: penetration > 10× static compliance", fontsize=6.5, color="#c0392b", va="bottom", ha="left", transform=ax.get_yaxis_transform())
+        cheapest = {}
+        for arm in STYLE:
+            pts = sorted(((r["wall_ms_per_boundary"] / 1e3) / dto, r["pen_max_m"] / thr, r["out_of_bin_frac"] > 0, _knob_label(r)) for r in rows if r["arm"] == arm)
+            if not pts:
+                continue
+            st = STYLE[arm]
+            xs = [p[0] for p in pts]; ys = [max(p[1], 1e-3) for p in pts]
+            ax.plot(xs, ys, lw=1.2, ms=6, **st)
+            for x, y, ej, lab in zip(xs, ys, [p[2] for p in pts], [p[3] for p in pts]):
+                if ej:
+                    ax.plot(x, y, marker="o", ms=13, mfc="none", mec="#c0392b", mew=1.6, ls="none", zorder=4)
+                    ax.annotate("ejects", (x, y), textcoords="offset points", xytext=(0, 9), ha="center", fontsize=6, color="#c0392b")
+                ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, -9), fontsize=5.5, color=st["color"])
+            clean = [(x, y, lab) for x, y, ej, lab in zip(xs, ys, [p[2] for p in pts], [p[3] for p in pts]) if y <= 1.0 and not ej]
+            if clean:
+                x, y, lab = min(clean)
+                ax.plot(x, y, marker="*", ms=15, color=st["color"], mec="k", mew=0.6, ls="none", zorder=5)
+                cheapest[arm] = (x, lab)
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel(f"Wall Time (s) per simulated second, {n} scenes")
+        ax.set_ylabel("max penetration / (10 × m·g/k)")
+        ax.grid(True, which="both", alpha=0.3)
+        parts = []
+        for arm, name in (("mujoco", "MuJoCo"), ("mujoco-adaptive", "MuJoCo error control"), ("icf", "ICF fixed"), ("icf-adaptive", "ICF error control")):
+            parts.append(f"{name}: {'never' if arm not in cheapest else f'{cheapest[arm][1]} at {cheapest[arm][0]:.2g} s'}")
+        ax.set_title(f"{SCENE_TITLE[scene]} — cheapest artifact-free setting\n" + "; ".join(parts), fontsize=7.5)
+    axes[0][0].legend(fontsize=7, loc="lower left")
+    axes[0][0].plot([], [], marker="*", ms=12, color="gray", mec="k", ls="none", label="cheapest artifact-free")
+    axes[0][0].plot([], [], marker="o", ms=10, mfc="none", mec="#c0392b", ls="none", label="ejects a body")
+    axes[0][0].legend(fontsize=7, loc="lower left")
+    _save(fig, "artifacts")
+
+
+def scaling_per_world() -> None:
+    """Batching: wall per world per boundary [us] vs world count; the
+    curve falling means the GPU is still amortizing; flat means saturated."""
+    for scene in SCENE_ORDER:
+        rows = _rows(f"part1_scaling_{scene}.csv")
+        if not rows:
+            continue
+        dto = rows[0].get("dt_outer_s", 0.01) or 0.01
+        fig, ax = plt.subplots(figsize=(5.4, 3.9), constrained_layout=True)
+        for arm in STYLE:
+            pts = sorted((r["n_worlds"], 1e3 * r["wall_ms_median"] / r["n_worlds"], _knob_label(r)) for r in rows if r["arm"] == arm)
+            if not pts:
+                continue
+            st = dict(STYLE[arm]); st["label"] = f"{st['label']}, {pts[0][2]}"
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], **st)
+        ax.set_xscale("log", base=2); ax.set_yscale("log")
+        ax.set_xlabel("Parallel worlds"); ax.set_ylabel(f"Wall Time per world per {dto * 1e3:g} ms step (µs)")
+        ax.set_title(f"{SCENE_TITLE[scene]} — cost per world falls until the GPU saturates", fontsize=8.5)
+        ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
+        _save(fig, f"scaling_per_world_{scene}")
+
+
+def ball_workprecision() -> None:
+    """Claim 3 on the same axes: energy error vs cost for fixed step (dt
+    sweep) and error control (eps sweep)."""
+    rows = [r for r in _rows("part1_ball_energy.csv") if r["status"] == "ok" and r.get("wall_s_per_sim_s", "") != ""]
+    if not rows:
+        return
+    fig, ax = plt.subplots(figsize=(5.4, 3.9), constrained_layout=True)
+    for arm in STYLE:
+        pts = sorted((r["wall_s_per_sim_s"], max(abs(r["energy_change_pct"]), 1e-3), _knob_label(r)) for r in rows if r["arm"] == arm)
+        if not pts:
+            continue
+        ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
+        for x, y, lab in pts:
+            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("|energy change after 10 s| (%)")
+    ax.set_title("Bouncing ball — energy error vs cost: ICF buys accuracy with resolution, MuJoCo cannot", fontsize=8)
+    ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
+    _save(fig, "ball_workprecision")
+
+
 if __name__ == "__main__":
     workprecision()
     speed_bars()
     ball_energy()
     penetration()
+    artifacts()
     scaling()
+    scaling_per_world()
+    ball_workprecision()
     realtime_trace()
