@@ -1,9 +1,8 @@
-# Part 1 — pure-solver results, in the CENIC paper's formats
+# Part 1 — pure-solver results
 
-Reference: Kurtz & Castro, *CENIC: Convex Error-controlled Numerical
-Integration for Contact*, arXiv:2511.08771. Every figure below is that
-paper's diagram, on that paper's scene, with the accuracy ε_acc or time
-step δt stated on every point. Regenerate everything with
+Test cases and diagrams follow Kurtz & Castro, *CENIC* (arXiv:2511.08771;
+`\cite{cenic}` below); every point states its accuracy ε_acc or time step δt.
+Regenerate everything with
 `uv run python scripts/bench/part1_plots.py && uv run python scripts/bench/part1_tables.py`.
 
 ## Four arms
@@ -15,9 +14,9 @@ step δt stated on every point. Regenerate everything with
 | ICF, fixed step | `SolverICF` (icf_warp), Newton collision pipeline per substep | δt |
 | ICF, error control (CENIC) | `SolverICFAdaptive` — the same controller over ICF, two geometry queries per step | ε_acc |
 
-Both error-controlled arms use the paper's position-only weighted L∞ error
-estimate ‖S(q − q̂)‖∞ with S = I (Sec. V-E; the bottom row of the paper's
-Fig. 10). All four arms replay one captured CUDA graph per boundary, so wall
+Both error-controlled arms use the position-only weighted L∞ error estimate
+‖S(q − q̂)‖∞ with S = I of~\cite{cenic} (their Sec. V-E; the bottom row of
+their Fig. 10). All four arms replay one captured CUDA graph per boundary, so wall
 times compare like with like (the MuJoCo-adaptive solver captures internally;
 driven eagerly, the other three would pay per-kernel launch overhead it does
 not — measured as a captured adaptive boundary timing *below* one eager fixed
@@ -25,38 +24,45 @@ substep). Captured-vs-eager physics agrees to 1e-8 on a well-posed scene.
 
 ## Scenes (`scripts/scenes/cenic_scenes.py`)
 
-From the paper's Sec. VII and Figs. 6/8:
+Three test cases from~\cite{cenic}, rebuilt on Newton with point contact
+(force only at penetration; no collision margin) and a single deterministic
+initial condition:
 
-* **Soft clutter** — 20 spheres dropped into a bin, k = 10³ N/m, v_s = 1 cm/s.
-* **Hard clutter** — 10 spheres + 10 cubes, k = 10⁵ N/m, v_s = 0.1 mm/s.
-* **Bouncing ball** (Fig. 8) — 0.1 kg, k = 10³ N/m, zero dissipation, 1 m drop,
-  10 s; potential energy zero at rest on the ground; the paper states 11 bounces.
+* **Soft clutter** — 20 spheres (r = 2.5 cm, water density) dropped into a
+  30 × 30 × 30 cm bin; k = 10³ N/m, v_s = 1 cm/s, μ = 0.5.
+* **Hard clutter** — 10 spheres and 10 cubes (h = 2.5 cm) into the same bin;
+  k = 10⁵ N/m, v_s = 0.1 mm/s, μ = 0.5.
+* **Bouncing ball** — 0.1 kg, r = 5 cm, k = 10³ N/m, zero dissipation,
+  dropped from 1 m and simulated for 10 s; potential energy zero at rest on
+  the ground (11 rebounds in~\cite{cenic}).
 
-Stiffness, dissipation and stiction reach the two backends differently and
-each scene sets both: MuJoCo from per-shape `ke`/`kd` (Newton's solref
-conversion), ICF from `IcfParams.contact_stiffness / contact_hc_dissipation /
+The clutter drop starts from a 4 × 5 lattice above the bin, alternate layers
+staggered by half the column spacing, every body jittered by ±1.5 cm in xy
+and ±5 mm in z and every cube tilted by a random rotation, under a fixed
+seed (7). Dissipation: kd = 0.02·k for MuJoCo, Hunt–Crossley d = 10 s/m for
+ICF (0 for the ball). Stiffness, dissipation and stiction reach the two
+backends differently and each scene sets both: MuJoCo from per-shape
+`ke`/`kd` (Newton's solref conversion), ICF from
+`IcfParams.contact_stiffness / contact_hc_dissipation /
 contact_stiction_tolerance`.
 
-**Assumed (the paper does not state them) — to confirm with the authors:**
-sphere radius and cube half-extent 2.5 cm; bin 30 × 30 cm, 30 cm walls;
-μ = 0.5; clutter dissipation kd = 0.02·k (MuJoCo) and Hunt–Crossley d = 10 s/m
-(ICF default); water density; initial 4 × 5 lattice above the bin; ball
-radius 5 cm.
+Object and bin sizes, μ, dissipation and the initial arrangement are not
+specified in~\cite{cenic}; the values above are this work's definition.
 
-**Deliberate deviations from the paper, stated in every caption:**
-* Maximum step δt_max = 10 ms — our control boundary (the paper's clutter
-  runs allowed 0.1 s). Error control never steps past a boundary.
-* GPU, not CPU: "N = 1 world" is the paper's single-scene semantics but sits
-  near the launch-latency floor (~1–3 ms per boundary); "N = 1024" is the
-  regime robot learning runs in. Both are reported.
-* Only the point-contact scenes are reproduced; cylinder / gripper / Franka
-  use hydroelastic contact and an inverse-dynamics controller we do not have.
+**Deviations from~\cite{cenic}, stated in every caption:**
+* Maximum step δt_max = 10 ms — the control boundary (their clutter runs
+  allowed 0.1 s). Error control never steps past a boundary.
+* GPU, not CPU: N = 1 is the single-scene setting and sits near the
+  launch-latency floor (~1–3 ms per boundary); N = 1024 is the regime robot
+  learning runs in. Both are reported.
+* Only the point-contact test cases are reproduced; cylinder, gripper and
+  Franka use hydroelastic contact and an inverse-dynamics controller.
 * Fixed-step arms have no accuracy knob; they appear as reference levels at
-  δt (the paper's Fig. 11 does the same).
+  δt.
 * ICF's Newton convergence tolerance is fixed at 10⁻⁵ (relative, on the
-  scaled residual). The paper's ε_tol = max(κ·ε_acc, 10⁻⁸), κ = 10⁻³, was
-  tested on hard clutter at ε_acc = 10⁻²…10⁻⁵ and changes the march step
-  count by < 10 % (`probe_march_cost.py`), so it is not adopted.
+  scaled residual). The rule ε_tol = max(κ·ε_acc, 10⁻⁸), κ = 10⁻³, was tested
+  on hard clutter at ε_acc = 10⁻²…10⁻⁵ and changes the march step count by
+  < 10 % (`probe_march_cost.py`), so it is not adopted.
 
 ## Contact budgets (validity precondition)
 
@@ -74,11 +80,12 @@ as `contact-overflow`, never as a data point.
 * **Work-precision** (paper Fig. 9/10): x = ε_acc from 10⁻¹ to 10⁻⁶, y = wall
   time per simulated second over a 2 s horizon, first two boundaries (module
   load, graph capture) excluded; N = 1 rows are medians of 3 subprocess trials.
-  Timeout = the paper's 100 s per simulated second **of one scene**: a batch of
-  N worlds simulates N scenes, so the rule is wall / (N × simulated s) > 100 s
-  (unchanged at N = 1); drawn as × on the threshold line. A separate practical
-  wall budget (1 h per run) bounds the N = 1024 sweeps; a run killed by it is
-  `budget`, drawn as +, and is not the paper's timeout.
+  Timeout = 100 s per simulated second **of one scene** (the criterion
+  of~\cite{cenic}): a batch of N worlds simulates N scenes, so the rule is
+  wall / (N × simulated s) > 100 s (unchanged at N = 1); drawn as × on the
+  threshold line. A separate practical wall budget (1 h per run) bounds the
+  N = 1024 sweeps; a run killed by it is `budget`, drawn as +, and is not a
+  timeout.
   The error-controlled arms run with a 4096-substep march budget (δt floor
   2.4 µs); a run in which any world ever exhausted it is marked
   `budget-exhausted` and treated as a failure — none did.
@@ -101,7 +108,7 @@ as `contact-overflow`, never as a data point.
   contact model itself prescribes (6.5 µm on hard clutter at k = 10⁵ N/m,
   0.65 mm on soft clutter at k = 10³ N/m, 65 g objects) — in the 64-world
   run. A few static depths is the model; tens of them is the step. The
-  criterion is ours; the paper's Table I judged artifacts visually.
+  criterion is ours; Table I of~\cite{cenic} judged artifacts visually.
 
 ## Captions (LaTeX, ICRA style — paste with the PDFs in `figures/`; `\cite{cenic}` = Kurtz & Castro, arXiv:2511.08771)
 
