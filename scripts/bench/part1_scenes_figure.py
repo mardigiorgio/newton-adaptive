@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 
 import matplotlib
+import matplotlib.colors
 import numpy as np
 
 matplotlib.use("Agg")
@@ -43,44 +44,75 @@ def _quat_to_mat(q):
     ])
 
 
-def _draw_box(ax, center, half, rot, color, alpha=0.9):
-    c = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]) * half
-    v = (rot @ c.T).T + center
-    faces = [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]]
-    ax.add_collection3d(Poly3DCollection([v[f] for f in faces], facecolors=color, edgecolors="k", linewidths=0.3, alpha=alpha))
+class _Scene:
+    """Every face of every object goes into ONE depth-sorted collection:
+    matplotlib's 3D painter draws separate collections in call order, which
+    is what made bodies show through each other and through the walls."""
 
+    def __init__(self):
+        self.polys, self.colors = [], []
 
-def _draw_sphere(ax, center, r, color):
-    u, v = np.mgrid[0 : 2 * np.pi : 14j, 0 : np.pi : 8j]
-    ax.plot_surface(center[0] + r * np.cos(u) * np.sin(v), center[1] + r * np.sin(u) * np.sin(v),
-                    center[2] + r * np.cos(v), color=color, linewidth=0, antialiased=False, shade=True)
+    def box(self, center, half, rot, color, alpha=1.0, tiles=1):
+        # each face tiled so large translucent walls sort against small bodies
+        for axis in range(3):
+            for sign in (-1, 1):
+                u, v = [i for i in range(3) if i != axis]
+                for i in range(tiles):
+                    for j in range(tiles):
+                        corners = []
+                        for du, dv in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                            c = np.zeros(3)
+                            c[axis] = sign * half[axis]
+                            c[u] = -half[u] + 2 * half[u] * (i + du) / tiles
+                            c[v] = -half[v] + 2 * half[v] * (j + dv) / tiles
+                            corners.append(c)
+                        self.polys.append((rot @ np.array(corners).T).T + center)
+                        self.colors.append((*matplotlib.colors.to_rgb(color), alpha))
 
+    def sphere(self, center, r, color, nu=16, nv=10):
+        u = np.linspace(0, 2 * np.pi, nu + 1)
+        v = np.linspace(0, np.pi, nv + 1)
+        light = np.array([0.4, -0.6, 0.7]); light /= np.linalg.norm(light)
+        for i in range(nu):
+            for j in range(nv):
+                quad = []
+                for uu, vv in ((u[i], v[j]), (u[i + 1], v[j]), (u[i + 1], v[j + 1]), (u[i], v[j + 1])):
+                    quad.append(center + r * np.array([np.cos(uu) * np.sin(vv), np.sin(uu) * np.sin(vv), np.cos(vv)]))
+                n = (quad[0] + quad[2]) / 2 - center
+                shade = 0.55 + 0.45 * max(0.0, float(n @ light) / max(np.linalg.norm(n), 1e-9))
+                rgb = np.array(matplotlib.colors.to_rgb(color)) * shade
+                self.polys.append(np.array(quad))
+                self.colors.append((*rgb, 1.0))
 
-def _draw_bin(ax):
-    hw, h = BIN_HALF, BIN_WALL_H
-    for cx, cy, hx, hy in ((-hw, 0, 0.005, hw), (hw, 0, 0.005, hw), (0, -hw, hw, 0.005), (0, hw, hw, 0.005)):
-        _draw_box(ax, np.array([cx, cy, h / 2]), np.array([hx, hy, h / 2]), np.eye(3), "#9ecae1", alpha=0.25)
-    xx, yy = np.meshgrid([-hw, hw], [-hw, hw])
-    ax.plot_surface(xx, yy, np.zeros_like(xx), color="#deebf7", alpha=0.6, linewidth=0)
+    def draw(self, ax):
+        coll = Poly3DCollection(self.polys, facecolors=self.colors, edgecolors=(0, 0, 0, 0.15), linewidths=0.15, zsort="average")
+        ax.add_collection3d(coll)
 
 
 def _draw_state(ax, model, state, scene):
-    bq = state.body_q.numpy().reshape(-1, 7)
     from newton._src.geometry.types import GeoType
+
+    bq = state.body_q.numpy().reshape(-1, 7)
     st, sb, sc = model.shape_type.numpy(), model.shape_body.numpy(), model.shape_scale.numpy()
+    S = _Scene()
     if scene != "ball":
-        _draw_bin(ax)
+        hw, h = BIN_HALF, BIN_WALL_H
+        S.box(np.array([0, 0, -0.004]), np.array([hw + 0.02, hw + 0.02, 0.004]), np.eye(3), "#c6dbef", 1.0, tiles=4)
+        for cx, cy, hx, hy in ((-hw - 0.005, 0, 0.005, hw + 0.01), (hw + 0.005, 0, 0.005, hw + 0.01),
+                               (0, -hw - 0.005, hw + 0.01, 0.005), (0, hw + 0.005, hw + 0.01, 0.005)):
+            S.box(np.array([cx, cy, h / 2]), np.array([hx, hy, h / 2]), np.eye(3), "#9ecae1", 0.22, tiles=4)
+    else:
+        S.box(np.array([0, 0, -0.004]), np.array([0.3, 0.3, 0.004]), np.eye(3), "#c6dbef", 1.0, tiles=4)
     for i, b in enumerate(sb):
         if b < 0:
             continue
         p, q = bq[b, :3], bq[b, 3:]
         if GeoType(int(st[i])) == GeoType.SPHERE:
-            _draw_sphere(ax, p, sc[i][0], "#e6550d" if scene != "ball" else "#31a354")
+            S.sphere(p, sc[i][0], "#e6550d" if scene != "ball" else "#31a354")
         else:
-            _draw_box(ax, p, sc[i], _quat_to_mat(q), "#3182bd")
+            S.box(p, sc[i], _quat_to_mat(q), "#3182bd")
+    S.draw(ax)
     if scene == "ball":
-        xx, yy = np.meshgrid([-0.3, 0.3], [-0.3, 0.3])
-        ax.plot_surface(xx, yy, np.zeros_like(xx), color="#deebf7", alpha=0.6, linewidth=0)
         ax.set_xlim(-0.3, 0.3); ax.set_ylim(-0.3, 0.3); ax.set_zlim(0, 1.2)
         ax.set_box_aspect((1, 1, 2))
     else:
@@ -88,7 +120,7 @@ def _draw_state(ax, model, state, scene):
         ax.set_xlim(-L, L); ax.set_ylim(-L, L); ax.set_zlim(0, 0.5)
         ax.set_box_aspect((1, 1, 1.25))
     ax.set_axis_off()
-    ax.view_init(elev=22, azim=-55)
+    ax.view_init(elev=24, azim=-58)
 
 
 def main() -> None:

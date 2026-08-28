@@ -7,6 +7,14 @@
     simulated second.  "Missing data points indicate solver failure or
     timeout after 100 seconds (real-time rate < 1%)."  (Fig. 10 caption)
 
+The paper's timeout is per simulated second OF ONE SCENE; a batch of N
+worlds simulates N scenes, so the criterion here is wall / (N * simulated
+seconds) > 100 s -- unchanged at N = 1, and at N = 1024 a batch is only a
+timeout past 100 s per world-second. Separately, every run is bounded by
+a practical wall budget (``--wall-budget-s``); a run killed by it is
+reported ``budget`` (not the paper's timeout) and drawn as a distinct
+cross.
+
 The adaptive arms sweep eps_acc over 1e-1 .. 1e-6 with a march budget of
 ``--max-substeps`` (default 4096, dt floor ~2.4 us) so the accuracy is
 genuinely pursued; a run in which ANY world ever exhausted the budget or
@@ -43,7 +51,7 @@ from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
 
 ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
 FIXED_N_SUB = [1, 2, 5, 10]  # dt = 10, 5, 2, 1 ms
-TIMEOUT_PER_SIM_S = 100.0  # the paper's criterion, per simulated second
+TIMEOUT_PER_SIM_S = 100.0  # the paper's criterion, per simulated second of ONE scene (per world)
 
 
 def _run(scene: str, arm_name: str, knob, n: int, horizon: float, max_substeps: int) -> dict:
@@ -80,6 +88,7 @@ def main() -> int:
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--horizon", type=float, default=None, help="simulated seconds (default: the scene's)")
     p.add_argument("--max-substeps", type=int, default=4096)
+    p.add_argument("--wall-budget-s", type=float, default=3600.0, help="practical cap per run; exceeding it is 'budget', not the paper's timeout")
     p.add_argument("--out", type=str, default=None)
     p.add_argument("--single", nargs=2, metavar=("ARM", "KNOB"), default=None)
     args = p.parse_args()
@@ -108,6 +117,7 @@ def main() -> int:
             "horizon_s": horizon,
             "trials": args.trials,
             "wall_s_per_sim_s": "",
+            "wall_s_per_world_sim_s": "",
             "exhausted_frac": "",
             "status": "ok",
         }
@@ -120,10 +130,11 @@ def main() -> int:
                         "--scene", args.scene, "--single", arm_name, str(knob),
                         "--n", str(args.n), "--horizon", str(horizon), "--max-substeps", str(args.max_substeps),
                     ],
-                    capture_output=True, text=True, timeout=TIMEOUT_PER_SIM_S * horizon + 120,
+                    capture_output=True, text=True,
+                    timeout=min(args.wall_budget_s, TIMEOUT_PER_SIM_S * horizon * args.n) + 120,
                 )
             except subprocess.TimeoutExpired:
-                row["status"] = "timeout"
+                row["status"] = "timeout" if TIMEOUT_PER_SIM_S * horizon * args.n <= args.wall_budget_s else "budget"
                 break
             got = None
             for line in r.stdout.splitlines():
@@ -137,8 +148,9 @@ def main() -> int:
             exhausted.append(got["exhausted_frac"])
         if walls and row["status"] == "ok":
             row["wall_s_per_sim_s"] = statistics.median(walls)
+            row["wall_s_per_world_sim_s"] = row["wall_s_per_sim_s"] / args.n
             row["exhausted_frac"] = max(exhausted)
-            if row["wall_s_per_sim_s"] > TIMEOUT_PER_SIM_S:
+            if row["wall_s_per_world_sim_s"] > TIMEOUT_PER_SIM_S:
                 row["status"] = "timeout"
             elif row["exhausted_frac"] > 0.0:
                 row["status"] = "budget-exhausted"

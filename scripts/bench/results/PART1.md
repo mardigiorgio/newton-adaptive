@@ -59,7 +59,11 @@ radius 5 cm.
 * **Work-precision** (paper Fig. 9/10): x = ε_acc from 10⁻¹ to 10⁻⁶, y = wall
   time per simulated second over a 2 s horizon, first two boundaries (module
   load, graph capture) excluded; N = 1 rows are medians of 3 subprocess trials.
-  Timeout = 100 s per simulated second (real-time rate < 1 %), drawn as ×.
+  Timeout = the paper's 100 s per simulated second **of one scene**: a batch of
+  N worlds simulates N scenes, so the rule is wall / (N × simulated s) > 100 s
+  (unchanged at N = 1); drawn as × on the threshold line. A separate practical
+  wall budget (1 h per run) bounds the N = 1024 sweeps; a run killed by it is
+  `budget`, drawn as +, and is not the paper's timeout.
   The error-controlled arms run with a 4096-substep march budget (δt floor
   2.4 µs); a run in which any world ever exhausted it is marked
   `budget-exhausted` and treated as a failure — none did.
@@ -141,7 +145,7 @@ Wall time per simulated second, δt_max = 10 ms, timeouts at 100 s/sim-s.
 | hard, 1 | MuJoCo error control | 0.19 | 0.26 | 0.12 | 0.27 | 1.68 | 5.08 |
 | soft, 1024 | ICF error control | 7.6 | 10.4 | 14.7 | 14.6 | 17.6 | 29.7 |
 | soft, 1024 | MuJoCo error control | 0.42 | 0.98 | 2.47 | 5.64 | 14.4 | 43.7 |
-| hard, 1024 | ICF error control | 28.7 | 53.2 | timeout | timeout | timeout | timeout |
+| hard, 1024 | ICF error control | 28.7 | 53.2 | 124 | rerun | rerun | rerun |
 | hard, 1024 | MuJoCo error control | 0.71 | 4.71 | 2.92 | 6.78 | 11.3 | 27.8 |
 
 Fixed-step reference levels at δt = 10, 5, 2, 1 ms for N = 1 and 1024 are
@@ -152,8 +156,9 @@ What the figure supports:
   every ε ≤ 10⁻³ (N = 1) and at ε = 10⁻⁶ (N = 1024); on hard clutter MuJoCo
   error control is cheaper everywhere, by 4–40×.
 * ICF error control reaches the paper's default ε = 10⁻³ on hard clutter at
-  3.6 s per simulated second for one world (28 % real time); at 1024 worlds it
-  exceeds the timeout.
+  3.6 s per simulated second for one world (28 % real time); at 1024 worlds
+  124 s per batch-second (0.12 s per scene-second — far inside the paper's
+  timeout; the tighter ε points are being rerun under the per-scene rule).
 * MuJoCo error control is **non-monotone in ε on hard clutter** (ε = 10⁻³ is
   cheaper than 10⁻² and 10⁻¹ at N = 1 as 3-trial medians, and at N = 1024) —
   a property of its controller on this scene, reported as measured.

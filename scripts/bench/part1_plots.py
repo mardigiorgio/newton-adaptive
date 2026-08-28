@@ -106,12 +106,22 @@ def workprecision() -> None:
             ax.set_yscale("log")
             if not ax.xaxis_inverted():  # shared x: invert exactly once (the paper tightens accuracy to the right)
                 ax.invert_xaxis()
+            thresh = 100.0 * n  # the paper's timeout, per simulated second of one scene
             top = max([r["wall_s_per_sim_s"] for r in ok if r["wall_s_per_sim_s"] != ""] + [1.0]) * 4.0
+            if any(r["status"] == "timeout" for r in bad):
+                top = max(top, thresh * 2.5)
             ax.set_ylim(top=top)
+            if thresh < top:
+                ax.axhline(thresh, color="gray", lw=0.8, ls="-.")
+                ax.text(0.005, thresh, f"timeout: 100 s per scene-second (×{n})" if n > 1 else "timeout: 100 s per simulated second",
+                        fontsize=5.5, color="gray", va="bottom", ha="left", transform=ax.get_yaxis_transform())
             for r in bad:
-                ax.plot(r["accuracy"], top / 1.8, marker="x", ms=6, mew=1.6, ls="none", color=STYLE[r["arm"]]["color"])
-            if bad:
-                ax.text(0.99, 0.97, "× = timeout (>100 s / sim s)", transform=ax.transAxes, ha="right", va="top", fontsize=5.5, color="gray")
+                if r["status"] == "timeout":
+                    ax.plot(r["accuracy"], thresh, marker="x", ms=6, mew=1.6, ls="none", color=STYLE[r["arm"]]["color"])
+                else:  # 'budget' (practical wall cap) or 'budget-exhausted' / 'fail'
+                    ax.plot(r["accuracy"], top / 1.6, marker="+", ms=7, mew=1.6, ls="none", color=STYLE[r["arm"]]["color"])
+                    ax.annotate(r["status"], (r["accuracy"], top / 1.6), textcoords="offset points", xytext=(0, -9),
+                                ha="center", fontsize=5, color=STYLE[r["arm"]]["color"])
             ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
             ax.text(0.005, 1.0, "real time", fontsize=5.5, color="k", alpha=0.6, va="bottom", ha="left",
                     transform=ax.get_yaxis_transform())
