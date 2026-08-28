@@ -53,8 +53,10 @@ ARMS = ("mujoco", "mujoco-adaptive", "icf", "icf-adaptive")
 # silently and every number downstream is physics of a different scene;
 # scripts/bench/verify_contact_budgets.py re-measures demand and fails
 # unless these hold the 2x margin -- run it whenever a scene changes.
+# njmax is capacity only (measured demand ~200 rows/world); 4096 x 8192
+# worlds x nv-wide Jacobian rows exhausted the 32 GB GPU at 2^13 worlds.
 NCONMAX = 1024
-NJMAX = 4096
+NJMAX = 1024
 ICF_MAX_RIGID_CONTACT = 2048
 
 
