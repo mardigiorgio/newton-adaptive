@@ -148,42 +148,74 @@ control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
 
 ## Results
 
-> **Re-measurement in progress.** The clutter numbers below were taken with
-> budgets of 256 contacts per world — below the measured demand on both
-> scenes for both backends — and are superseded by the rerun under the
-> budgets above. The ball scene (one contact) is unaffected.
+All clutter numbers below are from the rerun under the verified contact
+budgets (ICF 2048, MuJoCo nconmax 1024 — ≥ 2× measured demand); no
+configuration timed out, exhausted its march budget, or dropped a contact.
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
-Wall time per simulated second, δt_max = 10 ms, timeouts at 100 s/sim-s.
+Wall time per simulated second, δt_max = 10 ms; N = 1 rows are 3-trial medians.
 
 | scene, N | arm | ε = 10⁻¹ | 10⁻² | 10⁻³ | 10⁻⁴ | 10⁻⁵ | 10⁻⁶ |
 |---|---|---|---|---|---|---|---|
-| soft, 1 | ICF error control | 0.26 | 0.26 | 0.30 | 0.36 | 0.57 | 1.11 |
-| soft, 1 | MuJoCo error control | 0.15 | 0.15 | 0.25 | 0.58 | 1.19 | 2.48 |
-| hard, 1 | ICF error control | 0.68 | 1.27 | 3.59 | 11.5 | 63.0 | timeout |
-| hard, 1 | MuJoCo error control | 0.19 | 0.26 | 0.12 | 0.27 | 1.68 | 5.08 |
-| soft, 1024 | ICF error control | 7.6 | 10.4 | 14.7 | 14.6 | 17.6 | 29.7 |
-| soft, 1024 | MuJoCo error control | 0.42 | 0.98 | 2.47 | 5.64 | 14.4 | 43.7 |
-| hard, 1024 | ICF error control | 28.7 | 53.2 | 124 | rerun | rerun | rerun |
-| hard, 1024 | MuJoCo error control | 0.71 | 4.71 | 2.92 | 6.78 | 11.3 | 27.8 |
+| hard, 1 | ICF error control | 0.23 | 0.23 | 0.23 | 0.28 | 0.42 | 0.89 |
+| hard, 1 | MuJoCo error control | 0.14 | 0.34 | 0.12 | 0.26 | 1.61 | 4.94 |
+| soft, 1 | ICF error control | 0.13 | 0.13 | 0.16 | 0.18 | 0.29 | 0.61 |
+| soft, 1 | MuJoCo error control | 0.10 | 0.10 | 0.11 | 0.19 | 0.40 | 1.06 |
+| hard, 1024 | ICF error control | 5.2 | 5.2 | 5.3 | 7.2 | 11.9 | 21.4 |
+| hard, 1024 | MuJoCo error control | 0.78 | 5.07 | 3.55 | 6.27 | 12.0 | 29.8 |
+| soft, 1024 | ICF error control | 2.3 | 2.3 | 3.3 | 3.8 | 6.2 | 12.7 |
+| soft, 1024 | MuJoCo error control | 0.22 | 0.22 | 0.24 | 0.43 | 0.98 | 2.68 |
 
-Fixed-step reference levels at δt = 10, 5, 2, 1 ms for N = 1 and 1024 are
-generated into `tables/part1_table1.md` ("Fixed-step reference levels").
+Fixed-step levels at δt = 10 / 1 ms (s per simulated second): hard N=1 ICF
+0.045 / 0.33, MuJoCo 0.11 / 0.34; hard N=1024 ICF 0.54 / 4.3, MuJoCo 0.33 /
+1.6; soft N=1 ICF 0.041 / 0.31, MuJoCo 0.048 / 0.26; soft N=1024 ICF 0.85 /
+5.0, MuJoCo 0.14 / 0.66 (full ladder in `tables/part1_table1.md`).
 
 What the figure supports:
-* On soft clutter, ICF error control is cheaper than MuJoCo error control at
-  every ε ≤ 10⁻³ (N = 1) and at ε = 10⁻⁶ (N = 1024); on hard clutter MuJoCo
-  error control is cheaper everywhere, by 4–40×.
-* ICF error control reaches the paper's default ε = 10⁻³ on hard clutter at
-  3.6 s per simulated second for one world (28 % real time); at 1024 worlds
-  124 s per batch-second (0.12 s per scene-second — far inside the paper's
-  timeout; the tighter ε points are being rerun under the per-scene rule).
-* MuJoCo error control is **non-monotone in ε on hard clutter** (ε = 10⁻³ is
-  cheaper than 10⁻² and 10⁻¹ at N = 1 as 3-trial medians, and at N = 1024) —
-  a property of its controller on this scene, reported as measured.
-* No configuration exhausted the 4096-substep march budget; every missing
-  point is a genuine timeout.
+* Every error-controlled configuration runs faster than real time for a
+  single world on both scenes, down to ε = 10⁻⁶ — no timeouts.
+* Hard clutter: ICF error control is flat at 0.23 s/sim-s for ε ≥ 10⁻³
+  (one accepted 10 ms step per boundary) and grows only to 0.89 s at 10⁻⁶;
+  MuJoCo error control is cheaper at loose accuracy but 4–6× more expensive
+  at ε ≤ 10⁻⁵ (1.6 s and 4.9 s). At N = 1024 the crossover sits at 10⁻⁵.
+* Soft clutter: MuJoCo error control is cheaper at every ε for N = 1024
+  (its per-step cost is lower); at N = 1 the two are within 2× everywhere.
+* MuJoCo error control is non-monotone in ε on hard clutter (10⁻³ cheaper
+  than 10⁻² at both N; 3-trial medians at N = 1) — a property of its
+  controller on this scene, reported as measured.
+* Step counts (`probe_march_cost.py`, hard clutter, N = 1): ICF error control
+  takes 100 / 100 / 149 / 355 march iterations per simulated second at
+  ε = 10⁻² … 10⁻⁵ at ~2.0–2.4 ms per iteration (three ICF solves and two
+  geometry queries; kernel-launch-bound for one world). The paper's CPU
+  implementation reports ~500 steps at 10⁻³ with δt_max = 0.1 s (Table III).
+
+### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
+
+64 worlds, 200 boundaries, model-read geometry (`verify_part1_penetration.py`).
+
+| scene | arm | setting | mean penetration | max penetration | ejected |
+|---|---|---|---|---|---|
+| hard | MuJoCo fixed | δt = 10 → 1 ms | 0.69 → 0.19 mm | 13.6 → 4.9 mm | 0 |
+| hard | MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.18–0.26 mm | 3.8–7.5 mm | 0 |
+| hard | ICF fixed | δt = 10 → 1 ms | **0** | **0** | 0 |
+| hard | ICF error control | ε = 10⁻¹ → 10⁻⁴ | **0** | **0** | 0 |
+| soft | MuJoCo fixed | δt = 10 → 1 ms | 1.1 → 0.89 mm | 34 → 23 mm | 0 |
+| soft | MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.88–0.89 mm | 22–24 mm | 0 |
+| soft | ICF fixed | δt = 10 → 1 ms | 4–7 µm | 1.7–2.2 mm | 0 |
+| soft | ICF error control | ε = 10⁻¹ → 10⁻⁴ | 5–6 µm | 1.9–2.2 mm | 0 |
+
+* On hard clutter ICF resolves contact to exactly zero ground penetration at
+  every δt and every ε — including fixed 10 ms steps — at 0.4–5 ms per
+  boundary for 64 worlds; MuJoCo never gets below ~0.2 mm mean / ~5 mm max
+  at any setting, because its compliance is in the model, not the step.
+* On soft clutter (k = 10³ N/m, 65 g objects) MuJoCo's max penetration is
+  about the object radius (22–34 mm; the pile's bottom layer) at every δt
+  and ε; ICF stays at ~2 mm max and ~5 µm mean.
+* No body left the bin in any configuration on either scene.
+* The earlier "fixed ICF launches spheres over the rim" and "MuJoCo tunnels
+  through the floor" observations were artifacts of the starved contact
+  budgets and do not survive re-measurement.
 
 ### Energy convergence (`figures/ball_energy.pdf`, `tables/part1_table1.md`)
 
