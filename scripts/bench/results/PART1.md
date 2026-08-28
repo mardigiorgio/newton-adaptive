@@ -53,6 +53,10 @@ radius 5 cm.
   use hydroelastic contact and an inverse-dynamics controller we do not have.
 * Fixed-step arms have no accuracy knob; they appear as reference levels at
   δt (the paper's Fig. 11 does the same).
+* ICF's Newton convergence tolerance is fixed at 10⁻⁵ (relative, on the
+  scaled residual). The paper's ε_tol = max(κ·ε_acc, 10⁻⁸), κ = 10⁻³, was
+  tested on hard clutter at ε_acc = 10⁻²…10⁻⁵ and changes the march step
+  count by < 10 % (`probe_march_cost.py`), so it is not adopted.
 
 ## Contact budgets (validity precondition)
 
