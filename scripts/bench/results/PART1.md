@@ -114,47 +114,56 @@ as `contact-overflow`, never as a data point.
 
 ```latex
 \begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/scenes.pdf}
+\caption{Test cases, from~\cite{cenic}: (a) soft clutter, 20 spheres dropped
+into a bin, $k = 10^3$\,N/m, $v_s = 1$\,cm/s; (b) hard clutter, spheres and
+cubes, $k = 10^5$\,N/m, $v_s = 0.1$\,mm/s; (c) a 0.1\,kg ball with zero
+dissipation dropped from 1\,m. Top: initial condition; bottom: after
+settling under error control.}
+\end{figure}
+
+\begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/workprecision.pdf}
-\caption{Work-precision plots for the soft- and
-hard-clutter test cases of~\cite{cenic}, error control on positions ($\mathbf{S}=\mathbf{I}$).
-Wall time is normalized to one simulated second; top row a single world
-(N=1), bottom row N=1024 parallel worlds on one GPU. Dotted levels are the
-fixed-step arms at $\delta t = 10$\,ms and $1$\,ms. Maximum step
-$\delta t_{\max} = 10$\,ms in all arms (the control boundary).
-$\times$ marks a timeout ($>100$\,s per simulated second). Lower is better.}
+\caption{Work-precision plots for soft and hard clutter, error control on
+positions ($\mathbf{S}=\mathbf{I}$), $\delta t_{\max} = 10$\,ms. Wall times
+are normalized to one simulated second; top row a single scene, bottom row
+1024 scenes in parallel on one GPU. Dotted levels are fixed-step
+integration at $\delta t = 10$\,ms and $1$\,ms. Lower is better. A cross
+marks a timeout (100\,s per simulated second).}
 \end{figure}
 
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/speed_bars.pdf}
-\caption{Simulator speed comparison, single world:
-fixed step at $\delta t=10$\,ms / $1$\,ms and error control at
-$\varepsilon_{acc} = 10^{-1}, 10^{-3}, 10^{-5}$. Speed only, not quality;
-see Table~I and Fig.~\ref{fig:penetration} for artifacts.}
+\caption{Simulator speed comparison for a single scene: fixed step at
+$\delta t = 10$\,ms and $1$\,ms, error control at $\varepsilon_{acc} =
+10^{-1}, 10^{-3}, 10^{-5}$. This test measures speed only, not quality.}
 \end{figure}
 
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/ball_energy.pdf}
-\caption{Energy conservation: percent change in total
-energy after 10\,s for a 0.1\,kg ball, $k=10^3$\,N/m, zero dissipation,
-dropped from 1\,m. Left: fixed step vs.\ $\delta t$; right: error control
-vs.\ $\varepsilon_{acc}$. ICF converges at first order; MuJoCo's contact
-dissipates the same fraction of the energy at every $\delta t$ down to
-$10\,\mu$s.}
+\caption{Energy conservation error (percent of energy lost after 10\,s) for
+a 0.1\,kg bouncing ball with zero dissipation, $k = 10^3$\,N/m. Left: fixed
+step versus $\delta t$; right: error control versus $\varepsilon_{acc}$.
+ICF converges at first order; MuJoCo's contact dissipates the same energy
+at every $\delta t$.}
 \end{figure}
 
-\begin{figure*}[t]\centering
-\includegraphics[width=\textwidth]{figures/penetration_hard-clutter.pdf}
-\caption{Ground penetration (mean, max) and bin ejections versus wall time on
-hard clutter, 64 worlds. Each point is labeled with its $\delta t$ (fixed
-step) or $\varepsilon_{acc}$ (error control); open markers are exactly zero.}
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/penetration_hard-clutter.pdf}
+\caption{Ground penetration versus wall time on hard clutter, 64 scenes.
+Each point is labeled with its $\delta t$ (fixed step) or
+$\varepsilon_{acc}$ (error control). ICF penetrates by the contact model's
+static compliance ($m g / k$); MuJoCo by its constraint impedance, at every
+resolution.}
 \label{fig:penetration}
-\end{figure*}
+\end{figure}
 
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/scaling_hard-clutter.pdf}
-\caption{Wall time per 10\,ms boundary versus number of parallel worlds
-($2^6$--$2^{13}$) on hard clutter; fixed step at $\delta t=10$\,ms, error
-control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
+\caption{Wall time per 10\,ms step versus number of parallel scenes
+($2^6$--$2^{13}$) on hard clutter; fixed step at $\delta t = 10$\,ms, error
+control at $\varepsilon_{acc} = 10^{-3}$; median of three runs, band the
+spread.}
 \end{figure}
 ```
 
