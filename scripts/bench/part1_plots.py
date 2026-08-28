@@ -227,9 +227,10 @@ def _knob_label(r: dict) -> str:
 def penetration() -> None:
     """Mean and max ground penetration vs wall time; the ejection panel is
     drawn only if any configuration ejected a body, otherwise the title
-    states that none did."""
-    for scene in ("hard-clutter", "soft-clutter"):
-        rows = _rows(f"part1_penetration_{scene}.csv")
+    states that none did. The ``_margin5mm`` variant (contact activated
+    5 mm before touching) is drawn as its own figure when present."""
+    for scene, suffix in [(sc, sf) for sc in ("hard-clutter", "soft-clutter") for sf in ("", "_margin5mm")]:
+        rows = _rows(f"part1_penetration_{scene}{suffix}.csv")
         if not rows:
             continue
         any_eject = any(r["out_of_bin_frac"] > 0 for r in rows)
@@ -277,8 +278,9 @@ def penetration() -> None:
         axes[0].legend(fontsize=7.5)
         n = int(rows[0]["n_worlds"])
         eject_note = "" if any_eject else "; no body left the bin in any configuration"
-        fig.suptitle(f"{SCENE_TITLE[scene]}, {n} worlds{eject_note}", fontsize=9)
-        _save(fig, f"penetration_{scene}")
+        margin_note = "; 5 mm collision margin" if suffix else ""
+        fig.suptitle(f"{SCENE_TITLE[scene]}, {n} worlds{margin_note}{eject_note}", fontsize=9)
+        _save(fig, f"penetration_{scene}{suffix}")
 
 
 def scaling() -> None:

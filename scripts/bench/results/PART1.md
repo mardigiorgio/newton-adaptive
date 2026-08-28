@@ -25,8 +25,8 @@ substep). Captured-vs-eager physics agrees to 1e-8 on a well-posed scene.
 ## Scenes (`scripts/scenes/cenic_scenes.py`)
 
 Three test cases from~\cite{cenic}, rebuilt on Newton with point contact
-(force only at penetration; no collision margin) and a single deterministic
-initial condition:
+(force only at penetration; no collision margin), the maximum step of their
+Table III (0.1 s on clutter), and a single deterministic initial condition:
 
 * **Soft clutter** — 20 spheres (r = 2.5 cm, water density) dropped into a
   30 × 30 × 30 cm bin; k = 10³ N/m, v_s = 1 cm/s, μ = 0.5.
@@ -50,8 +50,9 @@ Object and bin sizes, μ, dissipation and the initial arrangement are not
 specified in~\cite{cenic}; the values above are this work's definition.
 
 **Deviations from~\cite{cenic}, stated in every caption:**
-* Maximum step δt_max = 10 ms — the control boundary (their clutter runs
-  allowed 0.1 s). Error control never steps past a boundary.
+* Maximum step δt_max = 0.1 s on the clutter cases (their Table III) and
+  10 ms on the ball; the first attempt is k_Init·δt_max = 0.1·δt_max.
+  Error control never steps past a boundary.
 * GPU, not CPU: N = 1 is the single-scene setting and sits near the
   launch-latency floor (~1–3 ms per boundary); N = 1024 is the regime robot
   learning runs in. Both are reported.
@@ -59,10 +60,15 @@ specified in~\cite{cenic}; the values above are this work's definition.
   Franka use hydroelastic contact and an inverse-dynamics controller.
 * Fixed-step arms have no accuracy knob; they appear as reference levels at
   δt.
-* ICF's Newton convergence tolerance is fixed at 10⁻⁵ (relative, on the
-  scaled residual). The rule ε_tol = max(κ·ε_acc, 10⁻⁸), κ = 10⁻³, was tested
-  on hard clutter at ε_acc = 10⁻²…10⁻⁵ and changes the march step count by
-  < 10 % (`probe_march_cost.py`), so it is not adopted.
+* ICF's Newton convergence tolerance follows their Sec. VI-B: ε_tol =
+  max(κ·ε_acc, 10⁻⁸) with κ = 10⁻³ under error control, 10⁻⁸ in fixed-step
+  mode. (Measured effect on the march step count: < 10 %.)
+* Step selection uses their constants: safety 0.9, dead band 0.9–1.2, growth
+  cap 5, shrink floor 0.1, error order p = 2.
+* Point contact, no collision margin, as in their model; a variant with a
+  5 mm margin (contact activated before touching — what a collision margin
+  does to ICF's law, `distance − margin`) is reported for the penetration
+  and ejection metrics so the two can be compared.
 
 ## Contact budgets (validity precondition)
 
