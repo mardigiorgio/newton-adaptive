@@ -225,8 +225,9 @@ def main() -> int:
         return None
 
     rows = []
+    dt_outer = scene_dt_outer(args.scene)
     for arm_name in args.arms:
-        knobs = FIXED_DTS if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
+        knobs = [int(round(dt_outer / d)) for d in FIXED_DTS] if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
         for knob in knobs:
             timed = run_pass(arm_name, knob, "timed")
             metric = run_pass(arm_name, knob, "metric")
