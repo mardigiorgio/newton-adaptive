@@ -257,15 +257,20 @@ def penetration() -> None:
             ax.set_xscale("log")
             if col != "out_of_bin_frac":
                 ax.set_yscale("log")
-                ymax = max([r[col] for r in rows] + [0.05])
-                ax.set_ylim(floor / 3, ymax * 4.0)
+                vals = [r[col] for r in rows]
+                ymax = max(vals + [1e-6])
+                pos = [v for v in vals if v > 0]
+                has_zero = any(v == 0.0 for v in vals)
+                ymin = (floor / 3) if has_zero else (min(pos) / 4.0 if pos else 1e-7)
+                ax.set_ylim(ymin, ymax * 4.0)
                 if ymax > 0.1:
                     ax.axhline(0.025, color="gray", lw=0.6, ls="--")
                     ax.text(0.01, 0.025, "object radius: deeper = tunnelled", fontsize=6, color="gray", va="bottom",
                             transform=ax.get_yaxis_transform())
-                ax.axhline(floor, color="gray", lw=0.6, ls=":")
-                ax.text(0.01, 0.06, "open markers: exactly 0 (drawn at axis floor)", transform=ax.transAxes,
-                        ha="left", va="bottom", fontsize=6.5, color="gray")
+                if has_zero:
+                    ax.axhline(floor, color="gray", lw=0.6, ls=":")
+                    ax.text(0.01, 0.06, "open markers: exactly 0 (drawn at axis floor)", transform=ax.transAxes,
+                            ha="left", va="bottom", fontsize=6.5, color="gray")
             ax.set_xlabel("Wall Time per 10 ms step (ms)")
             ax.set_ylabel(title)
             ax.grid(True, which="both", alpha=0.3)
