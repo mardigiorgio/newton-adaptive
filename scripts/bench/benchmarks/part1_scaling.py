@@ -26,33 +26,43 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.four_arms import ARMS, build_model, make_arm
+from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm
 from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
 
 
+MAX_SUBSTEPS = 4096
+
+
 def _run(scene: str, arm_name: str, n: int, steps: int, warmup: int, seed: int, n_sub: int, tol: float) -> dict:
-    kwargs = {"n_sub": n_sub} if arm_name in ("mujoco", "icf") else {"tol": tol}
+    fixed = arm_name in ("mujoco", "icf")
+    kwargs = {"n_sub": n_sub} if fixed else {"tol": tol, "max_substeps": MAX_SUBSTEPS}
     model = build_model(n, seed=seed, scene=scene)
     arm = make_arm(model, arm_name, scene=scene, **kwargs)
+    tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     for _ in range(warmup):
         s0, s1 = arm.boundary(s0, s1, ctrl)
+        if tracker:
+            tracker.tick()
     wp.synchronize()
     times = []
     for _ in range(steps):
         t0 = time.perf_counter()
         s0, s1 = arm.boundary(s0, s1, ctrl)
+        if tracker:
+            tracker.tick()
         wp.synchronize()
         times.append(time.perf_counter() - t0)
-    fixed = arm_name in ("mujoco", "icf")
     return {
         "scene": scene,
         "arm": arm_name,
         "accuracy": "" if fixed else tol,
         "dt_s": DT_OUTER / n_sub if fixed else "",
+        "max_substeps": "" if fixed else MAX_SUBSTEPS,
         "n_worlds": n,
         "wall_ms_median": float(np.median(times) * 1e3),
         "wall_ms_p90": float(np.quantile(times, 0.9) * 1e3),
+        "exhausted_frac": tracker.fraction() if tracker else 0.0,
     }
 
 

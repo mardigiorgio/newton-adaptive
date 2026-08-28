@@ -176,8 +176,9 @@ def penetration() -> None:
                 st = STYLE[arm]
                 ys = [p[1] if (p[1] > 0 or col == "out_of_bin_frac") else floor for p in pts]
                 ax.plot([p[0] for p in pts], ys, **st)
+                dy = {"mujoco": 6, "mujoco-adaptive": -9, "icf": 6, "icf-adaptive": -9}[arm]
                 for x, y, lab in zip([p[0] for p in pts], ys, [p[2] for p in pts]):
-                    ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 4), fontsize=5.5, color=st["color"])
+                    ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, dy), fontsize=5.5, color=st["color"])
                 if col != "out_of_bin_frac":
                     zx = [p[0] for p in pts if p[1] == 0.0]
                     if zx:

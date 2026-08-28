@@ -41,7 +41,7 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.four_arms import ARMS, build_model, make_arm
+from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm
 from scripts.scenes.cenic_scenes import BIN_HALF, BIN_WALL_H, DT_OUTER, SCENES
 
 FIXED_SUBS = [1, 2, 5, 10]  # dt = 10, 5, 2, 1 ms
@@ -109,17 +109,39 @@ class _Geometry:
         bq = state.body_q.numpy().reshape(-1, 7)
         return (np.abs(bq[:, 0]) > BIN_HALF) | (np.abs(bq[:, 1]) > BIN_HALF) | (bq[:, 2] > BIN_WALL_H)
 
+    def ejection_breakdown(self, state) -> dict:
+        """Where and what escaped: a body beyond the inner walls while BELOW
+        the rim passed THROUGH a wall (a collision failure); one above the
+        rim went OVER it (dynamics). Split by shape so a cube-vs-wall
+        narrowphase problem is distinguishable from bounce physics."""
+        bq = state.body_q.numpy().reshape(-1, 7)
+        lateral = (np.abs(bq[:, 0]) > BIN_HALF) | (np.abs(bq[:, 1]) > BIN_HALF)
+        over = bq[:, 2] > BIN_WALL_H
+        through = lateral & ~over
+        n = max(bq.shape[0], 1)
+        return {
+            "eject_through_wall_frac": float(through.mean()),
+            "eject_over_rim_frac": float(over.mean()),
+            "eject_spheres_frac": float((through | over)[self.is_sphere].mean()) if self.is_sphere.any() else 0.0,
+            "eject_cubes_frac": float((through | over)[self.is_box].mean()) if self.is_box.any() else 0.0,
+        }
+
 
 def _penetrations(model, state) -> np.ndarray:
     return _Geometry(model).penetrations(state)
 
 
+MAX_SUBSTEPS = 4096
+
+
 def _run_pass(scene: str, arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, which: str) -> dict:
     """One measurement pass — ONE model build per process (a second build
     in-process reproduces the CUDA 700 on the MuJoCo arms)."""
-    kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
+    fixed = arm_name in ("mujoco", "icf")
+    kwargs = {"n_sub": knob} if fixed else {"tol": knob, "max_substeps": MAX_SUBSTEPS}
     model = build_model(n, seed=seed, scene=scene)
     arm = make_arm(model, arm_name, scene=scene, **kwargs)
+    tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     if which == "timed":
         for _ in range(warmup):
@@ -132,9 +154,14 @@ def _run_pass(scene: str, arm_name: str, knob, n: int, steps: int, warmup: int, 
         for _ in range(steps):
             t0 = time.perf_counter()
             s0, s1 = arm.boundary(s0, s1, ctrl)
+            if tracker:
+                tracker.tick()
             wp.synchronize()
             times.append(time.perf_counter() - t0)
-        return {"wall_ms_per_boundary": round(float(np.median(times)) * 1e3, 4)}
+        return {
+            "wall_ms_per_boundary": round(float(np.median(times)) * 1e3, 4),
+            "exhausted_frac": tracker.fraction() if tracker else 0.0,
+        }
     geom = _Geometry(model)
     pens, outs = [], []
     for _ in range(warmup + steps):
@@ -147,6 +174,7 @@ def _run_pass(scene: str, arm_name: str, knob, n: int, steps: int, warmup: int, 
         "pen_max_m": float(pen.max()),
         "pen_p95_m": float(np.quantile(pen, 0.95)),
         "out_of_bin_frac": float(outs[-1].mean()),
+        **geom.ejection_breakdown(s0),
     }
 
 
@@ -200,9 +228,11 @@ def main() -> int:
                 "arm": arm_name,
                 "accuracy": "" if fixed else knob,
                 "dt_s": DT_OUTER / knob if fixed else "",
+                "max_substeps": "" if fixed else MAX_SUBSTEPS,
                 "n_worlds": args.n,
                 **timed,
                 **metric,
+                "status": "budget-exhausted" if timed.get("exhausted_frac", 0.0) > 0.0 else "ok",
             }
             rows.append(row)
             print(row, flush=True)
