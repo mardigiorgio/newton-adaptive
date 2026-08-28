@@ -208,6 +208,8 @@ def main() -> int:
             ],
             capture_output=True, text=True,
         )
+        if "over the scannable budget" in r.stderr:
+            raise RuntimeError(f"CONTACT OVERFLOW {arm_name} {knob} ({which}): contacts dropped -- raise the budgets in four_arms.py")
         for line in r.stdout.splitlines():
             if line.startswith("ROW "):
                 return json.loads(line[4:])

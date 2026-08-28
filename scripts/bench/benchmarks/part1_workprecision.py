@@ -137,6 +137,10 @@ def main() -> int:
                 row["status"] = "timeout" if TIMEOUT_PER_SIM_S * horizon * args.n <= args.wall_budget_s else "budget"
                 break
             got = None
+            if "over the scannable budget" in r.stderr:
+                row["status"] = "contact-overflow"
+                print(f"CONTACT OVERFLOW {arm_name} {knob}: contacts dropped -- raise the budgets in four_arms.py", flush=True)
+                break
             for line in r.stdout.splitlines():
                 if line.startswith("ROW "):
                     got = json.loads(line[4:])

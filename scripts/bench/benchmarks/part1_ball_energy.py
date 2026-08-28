@@ -107,6 +107,10 @@ def main() -> int:
                 capture_output=True, text=True, timeout=1500,
             )
             got = None
+            if "over the scannable budget" in r.stderr:
+                row["status"] = "contact-overflow"
+                print(f"CONTACT OVERFLOW {arm_name} {knob}: contacts dropped -- raise the budgets in four_arms.py", flush=True)
+                break
             for line in r.stdout.splitlines():
                 if line.startswith("ROW "):
                     got = json.loads(line[4:])

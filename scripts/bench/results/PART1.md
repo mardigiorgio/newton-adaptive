@@ -54,6 +54,17 @@ radius 5 cm.
 * Fixed-step arms have no accuracy knob; they appear as reference levels at
   δt (the paper's Fig. 11 does the same).
 
+## Contact budgets (validity precondition)
+
+A contact the collision pipeline generates but the solver cannot scan is
+dropped silently, and every number downstream is physics of a different
+scene. Measured peak demand per world: hard clutter ~500 pipeline contacts
+(ICF) / ~380 active contacts (MuJoCo); soft clutter ~280 / ~256. The
+budgets in `four_arms.py` (ICF 1024, MuJoCo nconmax 1024, njmax 4096) hold
+≥ 2× that; `verify_contact_budgets.py` re-measures and fails otherwise, and
+every bench marks a configuration whose subprocess reported dropped contacts
+as `contact-overflow`, never as a data point.
+
 ## Protocol and failure conventions
 
 * **Work-precision** (paper Fig. 9/10): x = ε_acc from 10⁻¹ to 10⁻⁶, y = wall
@@ -132,6 +143,11 @@ control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
 ```
 
 ## Results
+
+> **Re-measurement in progress.** The clutter numbers below were taken with
+> budgets of 256 contacts per world — below the measured demand on both
+> scenes for both backends — and are superseded by the rerun under the
+> budgets above. The ball scene (one contact) is unaffected.
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
