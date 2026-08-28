@@ -415,6 +415,8 @@ def artifacts() -> None:
                 ax.plot(x, y, marker="*", ms=15, color=st["color"], mec="k", mew=0.6, ls="none", zorder=5)
                 cheapest[arm] = (x, lab)
         ax.set_xscale("log"); ax.set_yscale("log")
+        ymax = max([r["pen_max_m"] / d_imp for r in rows] + [2.0])
+        ax.set_ylim(top=ymax * 30.0)
         ax.set_ylabel("max penetration / impact depth")
         ax.grid(True, which="both", alpha=0.3)
         parts = [f"{name}: {'never' if arm not in cheapest else f'{cheapest[arm][1]} ({cheapest[arm][0]:.2g} s)'}"
