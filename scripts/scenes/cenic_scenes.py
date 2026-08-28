@@ -37,7 +37,7 @@ import warp as wp
 
 import newton
 
-DT_OUTER = 0.01  # maximum step / control boundary [s]
+DT_OUTER = 0.01  # default boundary [s]; clutter scenes use the paper's dt_max = 0.1 s (SceneSpec.dt_outer)
 
 # Point contact: force only at penetration (phi < 0). A shape margin would
 # inflate every surface -- ICF applies its law at (distance - margin), so
@@ -65,6 +65,7 @@ class SceneSpec:
     icf: dict = field(default_factory=dict)  # IcfParams overrides
     horizon_s: float = 2.0  # simulated seconds for work-precision runs
     note: str = ""
+    dt_outer: float = DT_OUTER  # boundary = maximum step dt_max [s]
 
 
 def _finish(builder: newton.ModelBuilder) -> newton.Model:
@@ -149,12 +150,14 @@ SCENES: dict[str, SceneSpec] = {
         lambda n: build_clutter(n, hard=False),
         icf={"contact_stiffness": 1.0e3, "contact_stiction_tolerance": 1.0e-2},
         note="20 spheres in a bin, k=1e3 N/m, v_s=1 cm/s",
+        dt_outer=0.1,
     ),
     "hard-clutter": SceneSpec(
         "hard-clutter",
         lambda n: build_clutter(n, hard=True),
         icf={"contact_stiffness": 1.0e5, "contact_stiction_tolerance": 1.0e-4},
         note="10 spheres + 10 cubes in a bin, k=1e5 N/m, v_s=0.1 mm/s",
+        dt_outer=0.1,
     ),
     "ball": SceneSpec(
         "ball",

@@ -19,8 +19,8 @@ import time
 
 import warp as wp
 
-from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
+from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.scenes.cenic_scenes import SCENES
 
 
 def main() -> int:
@@ -30,7 +30,8 @@ def main() -> int:
     p.add_argument("--horizon", type=float, default=1.0)
     p.add_argument("--accuracies", nargs="*", type=float, default=[1e-2, 1e-3, 1e-4, 1e-5])
     args = p.parse_args()
-    B = int(round(args.horizon / DT_OUTER))
+    dt_outer = scene_dt_outer(args.scene)
+    B = int(round(args.horizon / dt_outer))
     print(f"{'arm':16s} {'eps':>6} {'iters/sim_s':>11} {'wall_s/sim_s':>12} {'us/iter':>8} {'exhausted':>9}")
     for arm_name in ("icf-adaptive", "mujoco-adaptive"):
         for eps in args.accuracies:
@@ -54,7 +55,7 @@ def main() -> int:
             wp.synchronize()
             wall = time.perf_counter() - t0
             iters = (int(cum.numpy()[0]) - it0) if cum is not None else per_boundary
-            sim = (B - 2) * DT_OUTER
+            sim = (B - 2) * dt_outer
             print(f"{arm_name:16s} {eps:>6.0e} {iters / sim:>11.0f} {wall / sim:>12.2f} {1e6 * wall / max(iters, 1):>8.0f} {tr.fraction():>9.2f}", flush=True)
     return 0
 

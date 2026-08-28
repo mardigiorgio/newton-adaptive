@@ -19,9 +19,9 @@ checked here against the Newton MODEL (not against the bench's own code):
      ``wp.quat_rotate`` on random unit quaternions in body_q's layout;
   6. state evolution: the metric pass reads a state that actually moves —
      per-boundary min sphere-center z and min box-corner z for
-     icf-adaptive (the "exactly zero" arm) and mujoco n_sub=1, so the
+     icf-adaptive and mujoco at dt = 10 ms, so the
      zero is a settled contact ABOVE the plane, not a frozen state;
-  7. timing stability: three independent trials of icf n_sub=1 and 2.
+  7. timing stability: three independent trials of icf at dt = 10 and 5 ms.
 
 Standalone:
     uv run python scripts/bench/verify_part1_penetration.py
@@ -38,7 +38,7 @@ import warp as wp
 
 
 from scripts.bench.benchmarks.part1_penetration import _UNIT_CORNERS, _Geometry, _quat_rotate
-from scripts.bench.four_arms import build_model, make_arm
+from scripts.bench.four_arms import build_model, make_arm, scene_dt_outer
 from scripts.scenes.cenic_scenes import CLUTTER_CUBE_HALF, CLUTTER_SPHERE_R
 
 SCENE = "hard-clutter"
@@ -124,15 +124,16 @@ def verify_quaternion(trials: int = 200) -> None:
     check(worst < 1e-5, f"numpy rotation matches warp (x,y,z,w) to {worst:.1e}")
 
 
-def verify_evolution(arm_name: str, knob, n: int = 8, boundaries: int = 120) -> None:
+def verify_evolution(arm_name: str, knob, n: int = 8, sim_s: float = 1.2) -> None:
     print(f"[6] state evolution: {arm_name} knob={knob}, scene={SCENE}, n={n}")
-    kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
+    dt_outer = scene_dt_outer(SCENE)
+    kwargs = {"n_sub": int(round(dt_outer / knob))} if arm_name in ("mujoco", "icf") else {"tol": knob}
     model = build_model(n, scene=SCENE)
     arm = make_arm(model, arm_name, scene=SCENE, **kwargs)
     s0, s1, ctrl = model.state(), model.state(), model.control()
     geom = _Geometry(model)
     mins_sphere, mins_corner, pens = [], [], []
-    for _ in range(boundaries):
+    for _ in range(int(round(sim_s / dt_outer))):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         bq = s0.body_q.numpy().reshape(-1, 7)
         sph = bq[geom.is_sphere]
@@ -154,14 +155,14 @@ def verify_evolution(arm_name: str, knob, n: int = 8, boundaries: int = 120) -> 
 
 def verify_timing() -> None:
     print("[7] timing stability: 3 trials each, per-boundary median")
-    for knob in (1, 2):
+    for knob in (1e-2, 5e-3):  # fixed-step dt [s]; n_sub follows the scene's dt_max
         meds = []
         for _ in range(3):
             r = subprocess.run(
                 [sys.executable, "-c", f"""
 import time, numpy as np, warp as wp
-from scripts.bench.four_arms import build_model, make_arm
-m = build_model(64, scene='{SCENE}'); a = make_arm(m, 'icf', scene='{SCENE}', n_sub={knob})
+from scripts.bench.four_arms import build_model, make_arm, scene_dt_outer
+m = build_model(64, scene='{SCENE}'); a = make_arm(m, 'icf', scene='{SCENE}', n_sub=int(round(scene_dt_outer('{SCENE}') / {knob})))
 s0, s1, c = m.state(), m.state(), m.control()
 for _ in range(20): s0, s1 = a.boundary(s0, s1, c)
 wp.synchronize(); ts = []
@@ -174,16 +175,16 @@ print('MED', np.median(ts) * 1e3)
             for line in r.stdout.splitlines():
                 if line.startswith("MED"):
                     meds.append(float(line.split()[1]))
-        print(f"       icf n_sub={knob}: medians {['%.2f' % m for m in meds]} ms")
+        print(f"       icf dt={knob:g}: medians {['%.2f' % m for m in meds]} ms")
         if len(meds) == 3:
-            check(max(meds) / min(meds) < 1.5, f"icf n_sub={knob} trial spread < 1.5x")
+            check(max(meds) / min(meds) < 1.5, f"icf dt={knob:g} trial spread < 1.5x")
 
 
 def main() -> int:
     verify_structure()
     verify_quaternion()
     verify_evolution("icf-adaptive", 1e-3)
-    verify_evolution("mujoco", 1)
+    verify_evolution("mujoco", 1e-2)
     verify_timing()
     print("\nVERIFY FAILED:\n  - " + "\n  - ".join(FAIL) if FAIL else "\nVERIFY PASSED: the instrument measures what it claims")
     return 1 if FAIL else 0

@@ -21,30 +21,32 @@ import sys
 import newton
 import numpy as np
 
-from scripts.bench.four_arms import ICF_MAX_RIGID_CONTACT, NCONMAX, NJMAX, build_model, make_arm
+from scripts.bench.four_arms import ICF_MAX_RIGID_CONTACT, NCONMAX, NJMAX, build_model, make_arm, scene_dt_outer
 from scripts.scenes.cenic_scenes import SCENES
 
 MARGIN = 2.0
-BOUNDARIES = 200  # 2 s
+SIM_S = 2.0
+DT_FIXED = 1e-2
 
 
 def demand(scene: str, n: int) -> dict:
     m = build_model(n, scene=scene)
     pipe = newton.CollisionPipeline(m, rigid_contact_max=200000)
     contacts = pipe.contacts()
-    a = make_arm(m, "icf", scene=scene, n_sub=10)
+    n_sub = int(round(scene_dt_outer(scene) / DT_FIXED))
+    a = make_arm(m, "icf", scene=scene, n_sub=n_sub)
     s0, s1, c = m.state(), m.state(), m.control()
     peak = 0
-    for _ in range(BOUNDARIES):
+    for _ in range(int(round(SIM_S / a.dt_outer))):
         s0, s1 = a.boundary(s0, s1, c)
         pipe.collide(s0, contacts)
         peak = max(peak, int(contacts.rigid_contact_count.numpy()[0]))
     m2 = build_model(n, scene=scene)
-    a2 = make_arm(m2, "mujoco", scene=scene, n_sub=10)
+    a2 = make_arm(m2, "mujoco", scene=scene, n_sub=n_sub)
     s0, s1, c = m2.state(), m2.state(), m2.control()
     d = a2.solver.mjw_data
     pk_con, pk_efc = 0, 0
-    for _ in range(BOUNDARIES):
+    for _ in range(int(round(SIM_S / a2.dt_outer))):
         s0, s1 = a2.boundary(s0, s1, c)
         pk_con = max(pk_con, int(np.asarray(d.nacon.numpy()).max()))
         if hasattr(d, "nefc"):

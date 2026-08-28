@@ -26,10 +26,11 @@ import time
 
 import warp as wp
 
-from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
+from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.scenes.cenic_scenes import SCENES
 
-CONFIGS = [("icf", 1), ("icf", 10), ("icf-adaptive", 1e-2), ("icf-adaptive", 1e-3), ("mujoco", 1), ("mujoco", 10), ("mujoco-adaptive", 1e-3)]
+FIXED_DTS = [1e-2, 1e-3]
+CONFIGS = [("icf", "fixed"), ("icf-adaptive", 1e-2), ("icf-adaptive", 1e-3), ("mujoco", "fixed"), ("mujoco-adaptive", 1e-3)]
 
 
 def _run(scene: str, arm_name: str, knob, n: int, horizon: float) -> dict:
@@ -47,7 +48,7 @@ def _run(scene: str, arm_name: str, knob, n: int, horizon: float) -> dict:
     wp.synchronize()
     walls, iters = [], []
     last = int(cum.numpy()[0]) if cum is not None else 0
-    for _ in range(int(round(horizon / DT_OUTER)) - 2):
+    for _ in range(int(round(horizon / arm.dt_outer)) - 2):
         t0 = time.perf_counter()
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
@@ -83,7 +84,14 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
     rows = []
+    dt_outer = scene_dt_outer(args.scene)
+    expanded = []
     for arm_name, knob in CONFIGS:
+        if knob == "fixed":
+            expanded += [(arm_name, int(round(dt_outer / d))) for d in FIXED_DTS]
+        else:
+            expanded.append((arm_name, knob))
+    for arm_name, knob in expanded:
         r = subprocess.run(
             [sys.executable, "-m", "scripts.bench.benchmarks.part1_realtime_trace", "--scene", args.scene,
              "--single", arm_name, str(knob), "--n", str(args.n), "--horizon", str(args.horizon)],
@@ -102,8 +110,8 @@ def main() -> int:
         fixed = arm_name in ("mujoco", "icf")
         for i, (w, it) in enumerate(zip(got["wall_s"], got["iters"])):
             rows.append({"scene": args.scene, "arm": arm_name, "accuracy": "" if fixed else knob,
-                         "dt_s": DT_OUTER / knob if fixed else "", "n_worlds": args.n,
-                         "t_s": (i + 2) * DT_OUTER, "wall_ms": w * 1e3, "iters": it,
+                         "dt_s": dt_outer / knob if fixed else "", "dt_outer_s": dt_outer, "n_worlds": args.n,
+                         "t_s": (i + 2) * dt_outer, "wall_ms": w * 1e3, "iters": it,
                          "exhausted_frac": got["exhausted_frac"]})
         print(f"{arm_name} {knob}: {len(got['wall_s'])} boundaries, total wall {sum(got['wall_s']):.2f} s, exhausted {got['exhausted_frac']:.2f}", flush=True)
     with open(out, "w", newline="") as f:

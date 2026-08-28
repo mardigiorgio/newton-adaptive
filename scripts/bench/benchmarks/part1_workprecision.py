@@ -46,11 +46,11 @@ import time
 
 import warp as wp
 
-from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
+from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.scenes.cenic_scenes import SCENES
 
 ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
-FIXED_N_SUB = [1, 2, 5, 10]  # dt = 10, 5, 2, 1 ms
+FIXED_DTS = [1e-2, 5e-3, 2e-3, 1e-3]  # fixed-step ladder [s]; n_sub = dt_outer / dt
 TIMEOUT_PER_SIM_S = 100.0  # the paper's criterion, per simulated second of ONE scene (per world)
 
 
@@ -61,7 +61,8 @@ def _run(scene: str, arm_name: str, knob, n: int, horizon: float, max_substeps: 
     arm = make_arm(model, arm_name, scene=scene, **kwargs)
     tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
-    boundaries = int(round(horizon / DT_OUTER))
+    dt_outer = arm.dt_outer
+    boundaries = int(round(horizon / dt_outer))
     for _ in range(2):  # eager load + capture, untimed
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
@@ -74,7 +75,7 @@ def _run(scene: str, arm_name: str, knob, n: int, horizon: float, max_substeps: 
             tracker.tick()
     wp.synchronize()
     wall = time.perf_counter() - t0
-    sim_s = (boundaries - 2) * DT_OUTER
+    sim_s = (boundaries - 2) * dt_outer
     return {
         "wall_s_per_sim_s": wall / sim_s,
         "exhausted_frac": tracker.fraction() if tracker else 0.0,
@@ -103,15 +104,17 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
     rows = []
+    dt_outer = scene_dt_outer(args.scene)
     configs = [(a, k) for a in ("mujoco-adaptive", "icf-adaptive") for k in ACCURACIES]
-    configs += [(a, k) for a in ("mujoco", "icf") for k in FIXED_N_SUB]
+    configs += [(a, int(round(dt_outer / d))) for a in ("mujoco", "icf") for d in FIXED_DTS]
     for arm_name, knob in configs:
         fixed = arm_name in ("mujoco", "icf")
         row = {
             "scene": args.scene,
             "arm": arm_name,
             "accuracy": "" if fixed else knob,
-            "dt_s": DT_OUTER / knob if fixed else "",
+            "dt_s": dt_outer / knob if fixed else "",
+            "dt_outer_s": dt_outer,
             "max_substeps": "" if fixed else args.max_substeps,
             "n_worlds": args.n,
             "horizon_s": horizon,

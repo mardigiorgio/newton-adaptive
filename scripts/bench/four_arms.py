@@ -38,12 +38,16 @@ import warp as wp
 
 import newton
 
-from scripts.scenes.cenic_scenes import SCENES
+from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
 from scripts.scenes.contact_objects import (
     DT_INNER_MIN,
-    DT_OUTER,
     build_model_randomized,
 )
+
+K_INIT = 0.1  # first attempt = k_Init * dt_max (CENIC Sec. V-F)
+NEWTON_KAPPA = 1.0e-3  # eps_tol = max(kappa * eps_acc, NEWTON_TOL_FLOOR) under error control (CENIC Eq. 34)
+NEWTON_TOL_FLOOR = 1.0e-8
+NEWTON_TOL_FIXED = 1.0e-8  # fixed-step mode (CENIC Sec. VI-B)
 
 ARMS = ("mujoco", "mujoco-adaptive", "icf", "icf-adaptive")
 
@@ -66,6 +70,7 @@ class Arm:
     solver: object
     boundary: Callable  # (s0, s1, ctrl) -> (s0, s1)
     iteration_count: Callable  # () -> int, inner iterations of the last boundary
+    dt_outer: float = DT_OUTER  # seconds advanced per boundary call
 
 
 class _CapturedBoundary:
@@ -94,12 +99,12 @@ class _CapturedBoundary:
         return (s1, s0) if self._ends_in_other else (s0, s1)
 
 
-def _make_mujoco(model: newton.Model, n_sub: int) -> Arm:
+def _make_mujoco(model: newton.Model, n_sub: int, dt_outer: float) -> Arm:
     solver = newton.solvers.SolverMuJoCo(
         model, separate_worlds=True, nconmax=NCONMAX, njmax=NJMAX
     )
     contacts = model.contacts()
-    dt = DT_OUTER / n_sub
+    dt = dt_outer / n_sub
 
     def run(a, b, ctrl):
         # step() writes state_out in place and returns None; ping-pong
@@ -107,17 +112,17 @@ def _make_mujoco(model: newton.Model, n_sub: int) -> Arm:
             solver.step(a, b, ctrl, contacts, dt)
             a, b = b, a
 
-    return Arm("mujoco", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
+    return Arm("mujoco", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub, dt_outer)
 
 
-def _make_mujoco_adaptive(model: newton.Model, tol: float, max_substeps: int | None = None) -> Arm:
+def _make_mujoco_adaptive(model: newton.Model, tol: float, dt_outer: float, max_substeps: int | None = None) -> Arm:
     extra = {"max_substeps": int(max_substeps)} if max_substeps else {}
     solver = newton.solvers.SolverMuJoCoAdaptive(
         model,
         tol=tol,
-        dt_inner_init=DT_OUTER,
+        dt_inner_init=K_INIT * dt_outer,
         dt_inner_min=DT_INNER_MIN,
-        dt_inner_max=DT_OUTER,
+        dt_inner_max=dt_outer,
         dt_mode="per_world",
         nconmax=NCONMAX,
         njmax=NJMAX,
@@ -125,13 +130,14 @@ def _make_mujoco_adaptive(model: newton.Model, tol: float, max_substeps: int | N
     )
 
     def boundary(s0, s1, ctrl):
-        return solver.step_dt(DT_OUTER, s0, s1, ctrl)
+        return solver.step_dt(dt_outer, s0, s1, ctrl)
 
     return Arm(
         "mujoco-adaptive",
         solver,
         boundary,
         lambda: int(solver.iteration_count.numpy()[0]),
+        dt_outer,
     )
 
 
@@ -154,11 +160,11 @@ def _icf_params(overrides: dict | None = None):
     return replace(_icf().IcfParams(), max_rigid_contact=ICF_MAX_RIGID_CONTACT, **(overrides or {}))
 
 
-def _make_icf(model: newton.Model, n_sub: int, icf: dict | None = None) -> Arm:
-    solver = _icf().SolverICF(model, params=_icf_params(icf))
+def _make_icf(model: newton.Model, n_sub: int, dt_outer: float, icf: dict | None = None) -> Arm:
+    solver = _icf().SolverICF(model, params=_icf_params({**(icf or {}), "newton_tolerance": NEWTON_TOL_FIXED}))
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
-    dt = DT_OUTER / n_sub
+    dt = dt_outer / n_sub
 
     def run(a, b, ctrl):
         for _ in range(n_sub):
@@ -166,22 +172,23 @@ def _make_icf(model: newton.Model, n_sub: int, icf: dict | None = None) -> Arm:
             solver.step(a, b, ctrl, contacts, dt)
             a, b = b, a
 
-    return Arm("icf", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
+    return Arm("icf", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub, dt_outer)
 
 
 def _make_icf_adaptive(
-    model: newton.Model, tol: float, icf_overrides: dict | None = None, max_substeps: int | None = None
+    model: newton.Model, tol: float, dt_outer: float, icf_overrides: dict | None = None, max_substeps: int | None = None
 ) -> Arm:
     icf = _icf()
     extra = {"max_substeps": int(max_substeps)} if max_substeps else {}
+    newton_tol = max(NEWTON_KAPPA * tol, NEWTON_TOL_FLOOR)
     solver = icf.SolverICFAdaptive(
         model,
-        params=_icf_params(icf_overrides),
+        params=_icf_params({**(icf_overrides or {}), "newton_tolerance": newton_tol}),
         adaptive=icf.IcfAdaptiveParams(
             tol=tol,
-            dt_inner_init=DT_OUTER,
+            dt_inner_init=K_INIT * dt_outer,
             dt_inner_min=DT_INNER_MIN,
-            dt_inner_max=DT_OUTER,
+            dt_inner_max=dt_outer,
             **extra,
         ),
     )
@@ -193,13 +200,18 @@ def _make_icf_adaptive(
         # under the outer capture the march records as a conditional
         # while-node (the manager's mode); eagerly on the warm-up call
         pipeline.collide(a, contacts)
-        solver.step(a, b, ctrl, contacts, DT_OUTER)
+        solver.step(a, b, ctrl, contacts, dt_outer)
 
     def iterations() -> int:
         count = getattr(solver, "iteration_count", None)
         return int(count.numpy()[0]) if count is not None else -1
 
-    return Arm("icf-adaptive", solver, _CapturedBoundary(run, True), iterations)
+    return Arm("icf-adaptive", solver, _CapturedBoundary(run, True), iterations, dt_outer)
+
+
+def scene_dt_outer(scene: str | None) -> float:
+    """The boundary (= dt_max) the scene declares; DT_OUTER otherwise."""
+    return SCENES[scene].dt_outer if scene in SCENES else DT_OUTER
 
 
 def make_arm(
@@ -211,20 +223,21 @@ def make_arm(
     scene: str | None = None,
     max_substeps: int | None = None,
 ) -> Arm:
-    """Build one arm on ``model``. Fixed arms take ``n_sub`` (dt = DT_OUTER /
-    n_sub), adaptive arms ``tol`` (the paper's accuracy eps_acc) and an
-    optional ``max_substeps`` march budget. ``scene`` selects the ICF
-    material overrides the scene declares (MuJoCo reads its materials from
-    the shapes)."""
+    """Build one arm on ``model``. Fixed arms take ``n_sub`` (dt = dt_outer /
+    n_sub), adaptive arms ``tol`` (accuracy eps_acc) and an optional
+    ``max_substeps`` march budget. ``scene`` sets the boundary dt_outer
+    (= dt_max) and the ICF material overrides the scene declares (MuJoCo
+    reads its materials from the shapes)."""
     icf = SCENES[scene].icf if scene in SCENES else None
+    dt_outer = scene_dt_outer(scene)
     if name == "mujoco":
-        return _make_mujoco(model, n_sub)
+        return _make_mujoco(model, n_sub, dt_outer)
     if name == "mujoco-adaptive":
-        return _make_mujoco_adaptive(model, tol, max_substeps)
+        return _make_mujoco_adaptive(model, tol, dt_outer, max_substeps)
     if name == "icf":
-        return _make_icf(model, n_sub, icf)
+        return _make_icf(model, n_sub, dt_outer, icf)
     if name == "icf-adaptive":
-        return _make_icf_adaptive(model, tol, icf, max_substeps)
+        return _make_icf_adaptive(model, tol, dt_outer, icf, max_substeps)
     raise ValueError(f"unknown arm {name!r}; choose from {ARMS}")
 
 

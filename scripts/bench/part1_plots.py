@@ -271,7 +271,7 @@ def penetration() -> None:
                     ax.axhline(floor, color="gray", lw=0.6, ls=":")
                     ax.text(0.01, 0.06, "open markers: exactly 0 (drawn at axis floor)", transform=ax.transAxes,
                             ha="left", va="bottom", fontsize=6.5, color="gray")
-            ax.set_xlabel("Wall Time per 10 ms step (ms)")
+            ax.set_xlabel(f"Wall Time per {rows[0].get('dt_outer_s', 0.01) * 1e3:g} ms step (ms)")
             ax.set_ylabel(title)
             ax.grid(True, which="both", alpha=0.3)
         axes[0].legend(fontsize=7.5)
@@ -303,7 +303,7 @@ def scaling() -> None:
         ax.set_xlabel("Parallel worlds")
         trials = int(rows[0].get("trials", 1) or 1)
         band = f"band: spread of {trials} independent runs" if trials > 1 else "band: median → p90"
-        ax.set_ylabel("Wall Time per 10 ms step (ms)")
+        ax.set_ylabel(f"Wall Time per {rows[0].get('dt_outer_s', 0.01) * 1e3:g} ms step (ms)")
         ax.set_title(f"{SCENE_TITLE[scene]}  ({band})", fontsize=8.5)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
@@ -335,13 +335,14 @@ def realtime_trace() -> None:
             # smooth the rate over 10 boundaries (0.1 s) for legibility; cumulative is exact
             k = 10
             w_s = np.convolve(w, np.ones(k) / k, mode="same")
-            axes[0].plot(t, 100.0 * 10.0 / w_s, lw=1.1, **st)
+            dto_ms = rows[0].get("dt_outer_s", 0.01) * 1e3
+            axes[0].plot(t, 100.0 * dto_ms / w_s, lw=1.1, **st)
             axes[1].plot(t, np.convolve(it, np.ones(k) / k, mode="same"), lw=1.1, **st)
             axes[2].plot(t, np.cumsum(w) / 1e3, lw=1.1, **st)
         axes[0].axhline(100.0, color="k", lw=0.6, ls="--", alpha=0.5)
         axes[0].text(0.005, 100.0, "100% RTR", fontsize=6, va="bottom", transform=axes[0].get_yaxis_transform())
         axes[0].set_yscale("log"); axes[0].set_ylabel("Real-Time Rate (%)")
-        axes[1].set_yscale("log"); axes[1].set_ylabel("Solver steps per 10 ms")
+        axes[1].set_yscale("log"); axes[1].set_ylabel(f"Solver steps per {rows[0].get('dt_outer_s', 0.01) * 1e3:g} ms")
         axes[2].set_ylabel("Cumulative Wall Time (s)"); axes[2].set_xlabel("Simulation Time (s)")
         for ax in axes:
             ax.grid(True, which="both", alpha=0.3)

@@ -26,18 +26,22 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import DT_OUTER, SCENES
+from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.scenes.cenic_scenes import SCENES
 
 
 MAX_SUBSTEPS = 4096
 
 
-def _run(scene: str, arm_name: str, n: int, steps: int, warmup: int, seed: int, n_sub: int, tol: float) -> dict:
+def _run(scene: str, arm_name: str, n: int, sim_s: float, warmup_s: float, seed: int, dt_fixed: float, tol: float) -> dict:
     fixed = arm_name in ("mujoco", "icf")
+    dt_outer = scene_dt_outer(scene)
+    n_sub = int(round(dt_outer / dt_fixed))
     kwargs = {"n_sub": n_sub} if fixed else {"tol": tol, "max_substeps": MAX_SUBSTEPS}
     model = build_model(n, seed=seed, scene=scene)
     arm = make_arm(model, arm_name, scene=scene, **kwargs)
+    steps = int(round(sim_s / dt_outer))
+    warmup = int(round(warmup_s / dt_outer))
     tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     for _ in range(warmup):
@@ -57,7 +61,8 @@ def _run(scene: str, arm_name: str, n: int, steps: int, warmup: int, seed: int, 
         "scene": scene,
         "arm": arm_name,
         "accuracy": "" if fixed else tol,
-        "dt_s": DT_OUTER / n_sub if fixed else "",
+        "dt_s": dt_outer / n_sub if fixed else "",
+        "dt_outer_s": dt_outer,
         "max_substeps": "" if fixed else MAX_SUBSTEPS,
         "n_worlds": n,
         "wall_ms_median": float(np.median(times) * 1e3),
@@ -70,10 +75,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--scene", default="hard-clutter", choices=sorted(SCENES))
     p.add_argument("--ns", nargs="*", type=int, default=[64, 128, 256, 512, 1024, 2048, 4096, 8192])
-    p.add_argument("--steps", type=int, default=100)
-    p.add_argument("--warmup", type=int, default=20)
+    p.add_argument("--sim-s", type=float, default=2.0, help="timed simulated seconds after warm-up")
+    p.add_argument("--warmup-s", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--n-sub", type=int, default=1)
+    p.add_argument("--dt-fixed", type=float, default=1e-2, help="fixed-step dt [s]")
     p.add_argument("--tol", type=float, default=1e-3)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
     p.add_argument("--out", type=str, default=None)
@@ -84,7 +89,7 @@ def main() -> int:
 
     if args.single is not None:
         arm_name, n_s = args.single
-        row = _run(args.scene, arm_name, int(n_s), args.steps, args.warmup, args.seed, args.n_sub, args.tol)
+        row = _run(args.scene, arm_name, int(n_s), args.sim_s, args.warmup_s, args.seed, args.dt_fixed, args.tol)
         print("ROW " + json.dumps(row), flush=True)
         return 0
 
@@ -97,8 +102,8 @@ def main() -> int:
                     [
                         sys.executable, "-m", "scripts.bench.benchmarks.part1_scaling",
                         "--scene", args.scene, "--single", arm_name, str(n),
-                        "--steps", str(args.steps), "--warmup", str(args.warmup),
-                        "--seed", str(args.seed), "--n-sub", str(args.n_sub), "--tol", str(args.tol),
+                        "--sim-s", str(args.sim_s), "--warmup-s", str(args.warmup_s),
+                        "--seed", str(args.seed), "--dt-fixed", str(args.dt_fixed), "--tol", str(args.tol),
                     ],
                     capture_output=True, text=True,
                 )

@@ -41,10 +41,10 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import BIN_HALF, BIN_WALL_H, DT_OUTER, SCENES
+from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.scenes.cenic_scenes import BIN_HALF, BIN_WALL_H, SCENES
 
-FIXED_SUBS = [1, 2, 5, 10]  # dt = 10, 5, 2, 1 ms
+FIXED_DTS = [1e-2, 5e-3, 2e-3, 1e-3]  # fixed-step ladder [s]; n_sub = dt_outer / dt
 ADAPTIVE_TOLS = [1e-1, 1e-2, 1e-3, 1e-4]
 
 _UNIT_CORNERS = np.array(
@@ -134,13 +134,18 @@ def _penetrations(model, state) -> np.ndarray:
 MAX_SUBSTEPS = 4096
 
 
-def _run_pass(scene: str, arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, which: str) -> dict:
+def _run_pass(scene: str, arm_name: str, knob, n: int, sim_s: float, warmup_s: float, seed: int, which: str, margin: float) -> dict:
     """One measurement pass — ONE model build per process (a second build
     in-process reproduces the CUDA 700 on the MuJoCo arms)."""
+    import scripts.scenes.cenic_scenes as CS
+
+    CS.CONTACT_MARGIN = margin  # read at build time by the scene builders
     fixed = arm_name in ("mujoco", "icf")
     kwargs = {"n_sub": knob} if fixed else {"tol": knob, "max_substeps": MAX_SUBSTEPS}
     model = build_model(n, seed=seed, scene=scene)
     arm = make_arm(model, arm_name, scene=scene, **kwargs)
+    steps = int(round(sim_s / arm.dt_outer))
+    warmup = int(round(warmup_s / arm.dt_outer))
     tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     if which == "timed":
@@ -182,8 +187,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--scene", default="hard-clutter", choices=sorted(SCENES))
     p.add_argument("--n", type=int, default=64)
-    p.add_argument("--steps", type=int, default=200)
-    p.add_argument("--warmup", type=int, default=20)
+    p.add_argument("--sim-s", type=float, default=2.0, help="timed / measured simulated seconds after warm-up")
+    p.add_argument("--warmup-s", type=float, default=0.2)
+    p.add_argument("--margin", type=float, default=None, help="collision margin [m] (default: the scene's, 0 = point contact)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
     p.add_argument("--out", type=str, default=None)
@@ -194,7 +200,8 @@ def main() -> int:
     if args.single is not None:
         arm_name, knob_s, which = args.single
         knob = int(knob_s) if arm_name in ("mujoco", "icf") else float(knob_s)
-        row = _run_pass(args.scene, arm_name, knob, args.n, args.steps, args.warmup, args.seed, which)
+        margin = args.margin if args.margin is not None else __import__("scripts.scenes.cenic_scenes", fromlist=["CONTACT_MARGIN"]).CONTACT_MARGIN
+        row = _run_pass(args.scene, arm_name, knob, args.n, args.sim_s, args.warmup_s, args.seed, which, margin)
         print("ROW " + json.dumps(row), flush=True)
         return 0
 
@@ -203,8 +210,9 @@ def main() -> int:
             [
                 sys.executable, "-m", "scripts.bench.benchmarks.part1_penetration",
                 "--scene", args.scene, "--single", arm_name, str(knob), which,
-                "--n", str(args.n), "--steps", str(args.steps),
-                "--warmup", str(args.warmup), "--seed", str(args.seed),
+                "--n", str(args.n), "--sim-s", str(args.sim_s),
+                "--warmup-s", str(args.warmup_s), "--seed", str(args.seed),
+                *(["--margin", str(args.margin)] if args.margin is not None else []),
             ],
             capture_output=True, text=True,
         )
@@ -218,7 +226,7 @@ def main() -> int:
 
     rows = []
     for arm_name in args.arms:
-        knobs = FIXED_SUBS if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
+        knobs = FIXED_DTS if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
         for knob in knobs:
             timed = run_pass(arm_name, knob, "timed")
             metric = run_pass(arm_name, knob, "metric")
@@ -229,7 +237,9 @@ def main() -> int:
                 "scene": args.scene,
                 "arm": arm_name,
                 "accuracy": "" if fixed else knob,
-                "dt_s": DT_OUTER / knob if fixed else "",
+                "dt_s": dt_outer / knob if fixed else "",
+                "dt_outer_s": dt_outer,
+                "margin_m": args.margin if args.margin is not None else 0.0,
                 "max_substeps": "" if fixed else MAX_SUBSTEPS,
                 "n_worlds": args.n,
                 **timed,

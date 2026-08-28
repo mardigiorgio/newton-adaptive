@@ -31,7 +31,9 @@ import subprocess
 import sys
 
 from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
-from scripts.scenes.cenic_scenes import DT_OUTER, ball_energy, ball_initial_energy
+from scripts.scenes.cenic_scenes import SCENES, ball_energy, ball_initial_energy
+
+DT_OUTER = SCENES["ball"].dt_outer
 
 N_SUB_LADDER = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]  # dt 10 ms .. 10 us
 ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
