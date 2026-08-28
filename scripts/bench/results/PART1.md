@@ -154,6 +154,31 @@ ICF converges at first order; MuJoCo's contact dissipates the same energy
 at every $\delta t$.}
 \end{figure}
 
+\begin{figure*}[t]\centering
+\includegraphics[width=\textwidth]{figures/artifacts.pdf}
+\caption{Contact artifacts versus cost on soft and hard clutter, 64 scenes.
+Top: maximum ground penetration relative to the contact model's own impact
+depth $v\sqrt{m/k}$ -- above the line the time step, not the model, made
+the depth; a ring marks a setting that ejected a body from the bin; a star
+marks the cheapest artifact-free setting of each arm. Bottom: mean
+penetration relative to the model's resting depth $mg/k$. Every point is
+labeled with its $\delta t$ (fixed step) or $\varepsilon_{acc}$ (error
+control).}
+\label{fig:artifacts}
+\end{figure*}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/ball_workprecision.pdf}
+\caption{Energy error versus cost for the bouncing ball: fixed step sweeps
+$\delta t$, error control sweeps $\varepsilon_{acc}$, on the same axes.}
+\end{figure}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/scaling_per_world_hard-clutter.pdf}
+\caption{Wall time per world per step versus number of parallel scenes on
+hard clutter: cost per world falls with batch size until the GPU saturates.}
+\end{figure}
+
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/penetration_hard-clutter.pdf}
 \caption{Ground penetration versus wall time on hard clutter, 64 scenes.
