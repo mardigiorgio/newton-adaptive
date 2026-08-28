@@ -48,14 +48,14 @@ from scripts.scenes.contact_objects import (
 ARMS = ("mujoco", "mujoco-adaptive", "icf", "icf-adaptive")
 
 # Matched per-world contact budgets, >= 2x the peak demand the paper's
-# scenes generate (hard clutter: ~500 pipeline contacts and ~380 MuJoCo
+# scenes generate (hard clutter: ~520 pipeline contacts and ~380 MuJoCo
 # active contacts per world). A contact the solver cannot scan is dropped
 # silently and every number downstream is physics of a different scene;
 # scripts/bench/verify_contact_budgets.py re-measures demand and fails
 # unless these hold the 2x margin -- run it whenever a scene changes.
 NCONMAX = 1024
 NJMAX = 4096
-ICF_MAX_RIGID_CONTACT = 1024
+ICF_MAX_RIGID_CONTACT = 2048
 
 
 @dataclass
