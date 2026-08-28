@@ -5,7 +5,7 @@
 
 Each configuration (arm x accuracy knob) runs the shared contact scene
 twice from identical initial states: a TIMED pass with no readbacks
-(wall-clock per outer boundary, synced), and a METRIC pass that reads the
+(per-boundary median wall-clock, synced each boundary), and a METRIC pass that reads the
 state back every boundary and measures ground-plane penetration
 analytically from the state — spheres by center height against their
 radius, boxes by their deepest transformed corner. Analytic state-side
@@ -79,35 +79,33 @@ def _penetrations(model, state) -> np.ndarray:
     return pen
 
 
-def _run(arm_name: str, knob, n: int, steps: int, warmup: int, seed: int) -> dict:
+def _run_pass(arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, which: str) -> dict:
+    """One measurement pass — ONE model build per process (a second build
+    in-process reproduces the CUDA 700 on the MuJoCo arms)."""
     kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
-
-    # timed pass: no readbacks
     model = build_model(n, seed=seed)
     arm = make_arm(model, arm_name, **kwargs)
     s0, s1, ctrl = model.state(), model.state(), model.control()
-    for _ in range(warmup):
-        s0, s1 = arm.boundary(s0, s1, ctrl)
-    wp.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(steps):
-        s0, s1 = arm.boundary(s0, s1, ctrl)
-    wp.synchronize()
-    wall_ms = (time.perf_counter() - t0) / steps * 1e3
-
-    # metric pass: fresh identical build, read back every boundary
-    model = build_model(n, seed=seed)
-    arm = make_arm(model, arm_name, **kwargs)
-    s0, s1, ctrl = model.state(), model.state(), model.control()
+    if which == "timed":
+        for _ in range(warmup):
+            s0, s1 = arm.boundary(s0, s1, ctrl)
+        wp.synchronize()
+        # per-boundary MEDIAN, synced each boundary: a mean over the run is
+        # hostage to any transient GPU contention (measured 3x inflation
+        # when another sweep overlapped).
+        times = []
+        for _ in range(steps):
+            t0 = time.perf_counter()
+            s0, s1 = arm.boundary(s0, s1, ctrl)
+            wp.synchronize()
+            times.append(time.perf_counter() - t0)
+        return {"wall_ms_per_boundary": round(float(np.median(times)) * 1e3, 4)}
     pens = []
     for _ in range(warmup + steps):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         pens.append(_penetrations(model, s0))
     pen = np.concatenate(pens[warmup:])
     return {
-        "arm": arm_name,
-        "knob": knob,
-        "wall_ms_per_boundary": round(wall_ms, 4),
         "pen_mean_m": float(pen.mean()),
         "pen_max_m": float(pen.max()),
         "pen_p95_m": float(np.quantile(pen, 0.95)),
@@ -122,36 +120,41 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
     p.add_argument("--out", type=str, default="scripts/bench/results/part1_penetration.csv")
-    p.add_argument("--single", nargs=2, metavar=("ARM", "KNOB"), default=None)
+    p.add_argument("--single", nargs=3, metavar=("ARM", "KNOB", "PASS"), default=None)
     args = p.parse_args()
 
     if args.single is not None:
-        arm_name, knob_s = args.single
+        arm_name, knob_s, which = args.single
         knob = int(knob_s) if arm_name in ("mujoco", "icf") else float(knob_s)
-        row = _run(arm_name, knob, args.n, args.steps, args.warmup, args.seed)
+        row = _run_pass(arm_name, knob, args.n, args.steps, args.warmup, args.seed, which)
         print("ROW " + json.dumps(row), flush=True)
         return 0
+
+    def run_pass(arm_name, knob, which):
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "scripts.bench.benchmarks.part1_penetration",
+                "--single", arm_name, str(knob), which,
+                "--n", str(args.n), "--steps", str(args.steps),
+                "--warmup", str(args.warmup), "--seed", str(args.seed),
+            ],
+            capture_output=True, text=True,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("ROW "):
+                return json.loads(line[4:])
+        print(f"PASS FAILED {arm_name} knob={knob} {which}:\n{r.stderr[-500:]}", flush=True)
+        return None
 
     rows = []
     for arm_name in args.arms:
         knobs = FIXED_SUBS if arm_name in ("mujoco", "icf") else ADAPTIVE_TOLS
         for knob in knobs:
-            r = subprocess.run(
-                [
-                    sys.executable, "-m", "scripts.bench.benchmarks.part1_penetration",
-                    "--single", arm_name, str(knob),
-                    "--n", str(args.n), "--steps", str(args.steps),
-                    "--warmup", str(args.warmup), "--seed", str(args.seed),
-                ],
-                capture_output=True, text=True,
-            )
-            row = None
-            for line in r.stdout.splitlines():
-                if line.startswith("ROW "):
-                    row = json.loads(line[4:])
-            if row is None:
-                print(f"CONFIG FAILED {arm_name} knob={knob}:\n{r.stderr[-600:]}", flush=True)
+            timed = run_pass(arm_name, knob, "timed")
+            metric = run_pass(arm_name, knob, "metric")
+            if timed is None or metric is None:
                 continue
+            row = {"arm": arm_name, "knob": knob, **timed, **metric}
             rows.append(row)
             print(row, flush=True)
 

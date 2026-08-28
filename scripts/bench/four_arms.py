@@ -35,11 +35,13 @@ from scripts.scenes.contact_objects import (
 
 ARMS = ("mujoco", "mujoco-adaptive", "icf", "icf-adaptive")
 
-# Matched per-world contact budgets: the scene's own MuJoCo sizing, and an
-# ICF cap comfortably above the scene's 18-object worst case.
-NCONMAX = 128
-NJMAX = 640
-ICF_MAX_RIGID_CONTACT = 128
+# Matched per-world contact budgets. The scene's demo sizing (128/640)
+# under-allocates on chaotic 64-world layouts — piled objects exceed it
+# and MuJoCo's constraint arrays go out of bounds (CUDA 700, observed in
+# the penetration sweep). Doubled with matched ICF capacity.
+NCONMAX = 256
+NJMAX = 1280
+ICF_MAX_RIGID_CONTACT = 256
 
 
 @dataclass
