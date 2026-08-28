@@ -43,7 +43,8 @@ def g(v, nd=3):
 
 
 def workprecision():
-    out = ["## Work-precision — wall time [s] per simulated second (δt_max = 10 ms)\n",
+    dtos = sorted({r.get("dt_outer_s", 0.01) or 0.01 for sc in ("soft-clutter", "hard-clutter") for n in (1, 1024) for r in rows(f"part1_workprecision_{sc}_n{n}.csv")})
+    out = [f"## Work-precision — wall time [s] per simulated second (δt_max = {', '.join(f'{d * 1e3:g} ms' for d in dtos)})\n",
            "| scene, N | arm | " + " | ".join(f"ε = 10^{int(round(__import__('math').log10(e)))}" for e in EPS) + " |",
            "|---|---|" + "---|" * len(EPS)]
     for scene in ("soft-clutter", "hard-clutter"):
