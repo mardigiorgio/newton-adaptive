@@ -64,7 +64,7 @@ A contact the collision pipeline generates but the solver cannot scan is
 dropped silently, and every number downstream is physics of a different
 scene. Measured peak demand per world: hard clutter ~500 pipeline contacts
 (ICF) / ~380 active contacts (MuJoCo); soft clutter ~280 / ~256. The
-budgets in `four_arms.py` (ICF 1024, MuJoCo nconmax 1024, njmax 4096) hold
+budgets in `four_arms.py` (ICF 2048, MuJoCo nconmax 1024, njmax 1024) hold
 ≥ 2× that; `verify_contact_budgets.py` re-measures and fails otherwise, and
 every bench marks a configuration whose subprocess reported dropped contacts
 as `contact-overflow`, never as a data point.
@@ -149,7 +149,7 @@ control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
 ## Results
 
 All clutter numbers below are from the rerun under the verified contact
-budgets (ICF 2048, MuJoCo nconmax 1024 — ≥ 2× measured demand); no
+budgets (ICF 2048, MuJoCo nconmax 1024, njmax 1024 — ≥ 2× measured demand); no
 configuration timed out, exhausted its march budget, or dropped a contact.
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
