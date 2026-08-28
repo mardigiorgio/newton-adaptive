@@ -37,7 +37,13 @@ import warp as wp
 
 import newton
 
-DT_OUTER = 0.01  # the paper's max time step / our control boundary [s]
+DT_OUTER = 0.01  # maximum step / control boundary [s]
+
+# Point contact: force only at penetration (phi < 0). A shape margin would
+# inflate every surface -- ICF applies its law at (distance - margin), so
+# bodies would settle ON the margin skin and read "zero penetration" by
+# construction; MuJoCo's contact activation would shift likewise.
+CONTACT_MARGIN = 0.0
 
 # ASSUMED geometry (not stated in the paper)
 CLUTTER_SPHERE_R = 0.025
@@ -49,6 +55,7 @@ CLUTTER_MU = 0.5
 BALL_R = 0.05
 BALL_MASS = 0.1
 BALL_DROP = 1.0
+LATTICE_SEED = 7
 
 
 @dataclass
@@ -82,15 +89,30 @@ def _clutter_template(hard: bool) -> newton.ModelBuilder:
     # ke: the paper's k. kd: ASSUMED at kd = 0.02 * ke (the repo's demo
     # scene ratio); the paper states no dissipation for clutter.
     ke = 1.0e5 if hard else 1.0e3
-    cfg = newton.ModelBuilder.ShapeConfig(ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=0.005, density=1000.0)
+    cfg = newton.ModelBuilder.ShapeConfig(ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=CONTACT_MARGIN, density=1000.0)
     t = newton.ModelBuilder()
     newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(t)
-    # ASSUMED initial lattice: 4 columns x 5 layers above the bin
+    # Initial arrangement: 4 columns x 5 layers above the bin, alternate
+    # layers staggered by half the column spacing, every body jittered
+    # (+-1.5 cm in xy, +-5 mm in z) and every cube tilted by a random
+    # rotation -- a fixed seed, so the scene is one deterministic drop.
+    # Perfectly aligned columns would land as columns, not as clutter.
+    import math
+    import random
+
+    rng = random.Random(LATTICE_SEED)
     i = 0
     for layer in range(5):
+        shift = 0.03 if layer % 2 else 0.0
         for cx, cy in ((-0.06, -0.06), (0.06, -0.06), (-0.06, 0.06), (0.06, 0.06)):
-            z = 0.12 + 0.07 * layer
-            b = t.add_body(xform=wp.transform(p=wp.vec3(cx, cy, z), q=wp.quat_identity()))
+            x = cx + shift + rng.uniform(-0.015, 0.015)
+            y = cy + shift + rng.uniform(-0.015, 0.015)
+            z = 0.12 + 0.07 * layer + rng.uniform(-0.005, 0.005)
+            q = wp.quat_identity()
+            if hard and i % 2 == 1:
+                ax = wp.vec3(rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1))
+                q = wp.quat_from_axis_angle(wp.normalize(ax), rng.uniform(0.0, math.pi))
+            b = t.add_body(xform=wp.transform(p=wp.vec3(x, y, z), q=q))
             if hard and i % 2 == 1:
                 t.add_shape_box(b, hx=CLUTTER_CUBE_HALF, hy=CLUTTER_CUBE_HALF, hz=CLUTTER_CUBE_HALF, cfg=cfg)
             else:
@@ -102,7 +124,7 @@ def _clutter_template(hard: bool) -> newton.ModelBuilder:
 def build_clutter(n_worlds: int, hard: bool) -> newton.Model:
     template = _clutter_template(hard)
     ke = 1.0e5 if hard else 1.0e3
-    wall_cfg = newton.ModelBuilder.ShapeConfig(ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=0.005, is_visible=False)
+    wall_cfg = newton.ModelBuilder.ShapeConfig(ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=CONTACT_MARGIN, is_visible=False)
     builder = newton.ModelBuilder()
     builder.replicate(template, n_worlds)
     _add_bin(builder, wall_cfg)
@@ -111,7 +133,7 @@ def build_clutter(n_worlds: int, hard: bool) -> newton.Model:
 
 def build_ball(n_worlds: int) -> newton.Model:
     density = BALL_MASS / (4.0 / 3.0 * 3.141592653589793 * BALL_R**3)
-    cfg = newton.ModelBuilder.ShapeConfig(ke=1.0e3, kd=0.0, mu=0.0, margin=0.005, density=density)
+    cfg = newton.ModelBuilder.ShapeConfig(ke=1.0e3, kd=0.0, mu=0.0, margin=CONTACT_MARGIN, density=density)
     t = newton.ModelBuilder()
     newton.solvers.SolverMuJoCoAdaptive.register_custom_attributes(t)
     b = t.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, BALL_DROP + BALL_R), q=wp.quat_identity()))

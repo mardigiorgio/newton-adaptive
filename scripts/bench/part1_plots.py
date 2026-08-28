@@ -127,9 +127,9 @@ def workprecision() -> None:
             if i == 0:
                 ax.set_title(SCENE_TITLE[scene], fontsize=9)
             if i == len(ns) - 1:
-                ax.set_xlabel("Accuracy ε_acc")
+                ax.set_xlabel("Accuracy")
             if j == 0:
-                ax.set_ylabel(f"Wall Time (s) per simulated s\nN = {n} world{'s' if n > 1 else ''}")
+                ax.set_ylabel(f"Wall Time (s)\nN = {n}")
             ax.grid(True, which="both", alpha=0.3)
             ax.tick_params(labelsize=7)
     axes[0][0].legend(fontsize=6.5, loc="upper left")
@@ -171,9 +171,9 @@ def speed_bars() -> None:
         ax.set_yscale("log")
         ax.set_xticks(ticks)
         ax.set_xticklabels(labels, fontsize=7)
-        ax.set_ylabel("Wall Time (s)\nper simulated s", fontsize=8)
+        ax.set_ylabel("Wall Time (s)", fontsize=8)
         ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
-        ax.set_title(SCENE_TITLE[scene] + "  (N = 1, GPU)", fontsize=8.5)
+        ax.set_title(SCENE_TITLE[scene], fontsize=9)
         ax.grid(True, axis="y", which="both", alpha=0.3)
         ax.tick_params(labelsize=7)
     h, l = axes[0][0].get_legend_handles_labels()
@@ -199,8 +199,8 @@ def ball_energy() -> None:
     axes[0].set_xscale("log")
     axes[0].set_yscale("log")
     axes[0].invert_xaxis()
-    axes[0].set_xlabel("time step δt [s]")
-    axes[0].set_ylabel("|energy change after 10 s| [%]")
+    axes[0].set_xlabel("Time Step δt (s)")
+    axes[0].set_ylabel("Change in energy (%)")
     axes[0].set_title("fixed step", fontsize=9)
     axes[0].legend(fontsize=7.5)
     axes[0].grid(True, which="both", alpha=0.3)
@@ -211,12 +211,12 @@ def ball_energy() -> None:
     axes[1].set_xscale("log")
     axes[1].set_yscale("log")
     axes[1].invert_xaxis()
-    axes[1].set_xlabel("requested accuracy ε_acc")
-    axes[1].set_ylabel("|energy change after 10 s| [%]")
+    axes[1].set_xlabel("Accuracy")
+    axes[1].set_ylabel("Change in energy (%)")
     axes[1].set_title("error control", fontsize=9)
     axes[1].legend(fontsize=7.5)
     axes[1].grid(True, which="both", alpha=0.3)
-    fig.suptitle(f"Energy conservation — {SCENE_NOTE['ball']}", fontsize=9)
+    fig.suptitle("Bouncing ball, zero dissipation", fontsize=9)
     _save(fig, "ball_energy")
 
 
@@ -233,9 +233,9 @@ def penetration() -> None:
         if not rows:
             continue
         any_eject = any(r["out_of_bin_frac"] > 0 for r in rows)
-        panels = [("pen_mean_m", "mean ground penetration [m]"), ("pen_max_m", "max ground penetration [m]")]
+        panels = [("pen_mean_m", "Mean penetration (m)"), ("pen_max_m", "Max penetration (m)")]
         if any_eject:
-            panels.append(("out_of_bin_frac", "fraction of bodies ejected from the bin"))
+            panels.append(("out_of_bin_frac", "Fraction of bodies ejected"))
         fig, axes = plt.subplots(1, len(panels), figsize=(4.5 * len(panels), 3.8), constrained_layout=True)
         floor = 1e-10
         for ax, (col, title) in zip(axes, panels):
@@ -266,13 +266,13 @@ def penetration() -> None:
                 ax.axhline(floor, color="gray", lw=0.6, ls=":")
                 ax.text(0.01, 0.06, "open markers: exactly 0 (drawn at axis floor)", transform=ax.transAxes,
                         ha="left", va="bottom", fontsize=6.5, color="gray")
-            ax.set_xlabel("wall time per 10 ms boundary [ms]")
+            ax.set_xlabel("Wall Time per 10 ms step (ms)")
             ax.set_ylabel(title)
             ax.grid(True, which="both", alpha=0.3)
         axes[0].legend(fontsize=7.5)
         n = int(rows[0]["n_worlds"])
         eject_note = "" if any_eject else "; no body left the bin in any configuration"
-        fig.suptitle(f"Penetration vs wall time — {SCENE_NOTE[scene]}, {n} worlds; labels: δt (fixed) / ε_acc (error control){eject_note}", fontsize=8.5)
+        fig.suptitle(f"{SCENE_TITLE[scene]}, {n} worlds{eject_note}", fontsize=9)
         _save(fig, f"penetration_{scene}")
 
 
@@ -295,11 +295,11 @@ def scaling() -> None:
             ax.fill_between(xs, [p[2] for p in pts], [p[3] for p in pts], color=STYLE[arm]["color"], alpha=0.15, lw=0)
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
-        ax.set_xlabel("parallel worlds")
+        ax.set_xlabel("Parallel worlds")
         trials = int(rows[0].get("trials", 1) or 1)
         band = f"band: spread of {trials} independent runs" if trials > 1 else "band: median → p90"
-        ax.set_ylabel("wall per 10 ms boundary [ms]  (median)")
-        ax.set_title(f"wall time vs world count — {SCENE_NOTE[scene]}\n{band}; timed window t = 0.2–1.2 s (impact phase)", fontsize=7.5)
+        ax.set_ylabel("Wall Time per 10 ms step (ms)")
+        ax.set_title(f"{SCENE_TITLE[scene]}  ({band})", fontsize=8.5)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
         _save(fig, f"scaling_{scene}")
