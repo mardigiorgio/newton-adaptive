@@ -5,32 +5,32 @@
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
 | ICF real-time rate | 392% | 387% | 337% | 281% |
-| ICF artifacts | — | — | — | — |
+| ICF artifacts | Yes (pen 42.5 mm, eject 0.0%) | Yes (pen 27.5 mm, eject 0.0%) | Yes (pen 45.1 mm, eject 0.0%) | Yes (pen 3.0 mm, eject 0.0%) |
 | MuJoCo real-time rate | 672% | 657% | 402% | 172% |
-| MuJoCo artifacts | — | — | — | — |
+| MuJoCo artifacts | Yes (pen 2548.1 mm, eject 6.6%) | Yes (pen 2600.7 mm, eject 7.7%) | Yes (pen 2630.7 mm, eject 8.0%) | Yes (pen 3227.4 mm, eject 4.7%) |
 
 | Fixed step δt | 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|
 | ICF real-time rate | 1493% | 808% | 348% | 181% |
-| ICF artifacts | — | — | — | — |
+| ICF artifacts | Yes (pen 109.6 mm, eject 0.0%) | Yes (pen 24.1 mm, eject 0.0%) | Yes (pen 6.0 mm, eject 0.0%) | Yes (pen 5.1 mm, eject 0.0%) |
 | MuJoCo real-time rate | 1917% | 1094% | 480% | 272% |
-| MuJoCo artifacts | — | — | — | — |
+| MuJoCo artifacts | Yes (pen 1764.4 mm, eject 6.4%) | Yes (pen 2999.2 mm, eject 6.5%) | Yes (pen 5339.4 mm, eject 6.2%) | Yes (pen 3867.2 mm, eject 7.4%) |
 
 ### Hard clutter
 
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
 | ICF real-time rate | 147% | 78% | 28% | 9% |
-| ICF artifacts | Yes (pen 3.1 mm, eject 2.7%) | Yes (pen 14.4 mm, eject 0.0%) | No (pen 0.0 mm, eject 0.0%) | Yes (pen 0.0 mm, eject 0.1%) |
+| ICF artifacts | Yes (pen 3.9 mm, eject 2.0%) | Yes (pen 22.5 mm, eject 0.2%) | No (pen 0.0 mm, eject 0.0%) | No (pen 0.0 mm, eject 0.0%) |
 | MuJoCo real-time rate | 525% | 388% | 836% | 369% |
-| MuJoCo artifacts | Yes (pen 6.6 mm, eject 0.0%) | Yes (pen 7.7 mm, eject 0.0%) | Yes (pen 10.2 mm, eject 0.0%) | Yes (pen 8.3 mm, eject 0.0%) |
+| MuJoCo artifacts | Yes (pen 6.7 mm, eject 0.0%) | Yes (pen 7.9 mm, eject 0.0%) | Yes (pen 3.8 mm, eject 0.0%) | Yes (pen 6.2 mm, eject 0.0%) |
 
 | Fixed step δt | 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|
 | ICF real-time rate | 432% | 343% | 221% | 125% |
-| ICF artifacts | Yes (pen 5.2 mm, eject 10.2%) | Yes (pen 5.6 mm, eject 8.3%) | Yes (pen 1.1 mm, eject 5.2%) | Yes (pen 0.0 mm, eject 4.8%) |
+| ICF artifacts | Yes (pen 8.4 mm, eject 9.7%) | Yes (pen 3.9 mm, eject 9.7%) | Yes (pen 0.6 mm, eject 6.0%) | Yes (pen 0.0 mm, eject 5.4%) |
 | MuJoCo real-time rate | 948% | 579% | 619% | 283% |
-| MuJoCo artifacts | Yes (pen 13.2 mm, eject 0.0%) | Yes (pen 6.6 mm, eject 0.0%) | Yes (pen 5.2 mm, eject 0.0%) | Yes (pen 4.9 mm, eject 0.0%) |
+| MuJoCo artifacts | Yes (pen 12.5 mm, eject 0.0%) | Yes (pen 6.2 mm, eject 0.0%) | Yes (pen 5.2 mm, eject 0.0%) | Yes (pen 4.9 mm, eject 0.0%) |
 
 # Fixed-step reference levels — wall time [s] per simulated second
 
