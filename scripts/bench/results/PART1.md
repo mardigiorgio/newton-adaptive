@@ -159,6 +159,15 @@ resolution.}
 \end{figure}
 
 \begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/realtime_trace_n64.pdf}
+\caption{Real-time rate, solver steps per 10\,ms and cumulative wall time
+along a 5\,s hard-clutter drop, 64 scenes. Fixed step pays the same at
+every step; error control pays during the impacts and coasts at
+$\delta t_{\max}$ once the pile settles, so at artifact-free quality it is
+the cheapest way to simulate the horizon.}
+\end{figure}
+
+\begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/scaling_hard-clutter.pdf}
 \caption{Wall time per 10\,ms step versus number of parallel scenes
 ($2^6$--$2^{13}$) on hard clutter; fixed step at $\delta t = 10$\,ms, error

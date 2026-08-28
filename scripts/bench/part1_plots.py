@@ -310,9 +310,51 @@ def scaling() -> None:
         _save(fig, f"scaling_{scene}")
 
 
+def realtime_trace() -> None:
+    """Real-time rate and solver work along a 5 s drop (top: real-time rate
+    = 10 ms / wall per boundary; middle: march iterations per boundary;
+    bottom: cumulative wall). Fixed step pays the same every boundary;
+    error control pays for impacts and coasts at dt_max once settled."""
+    import numpy as np
+
+    for n in (64, 1):
+        rows = _rows(f"part1_realtime_trace_hard-clutter_n{n}.csv")
+        if not rows:
+            continue
+        fig, axes = plt.subplots(3, 1, figsize=(6.4, 7.2), constrained_layout=True, sharex=True)
+        series = {}
+        for r in rows:
+            key = (r["arm"], r["accuracy"] if r["accuracy"] != "" else r["dt_s"])
+            series.setdefault(key, []).append((r["t_s"], r["wall_ms"], r["iters"]))
+        for (arm, knob), pts in series.items():
+            pts.sort()
+            t = np.array([p[0] for p in pts]); w = np.array([p[1] for p in pts]); it = np.array([p[2] for p in pts])
+            st = dict(STYLE[arm]); st["marker"] = None
+            lab = f"{st['label']}, " + (f"ε = {knob:g}" if arm.endswith("adaptive") else _dt_label(knob))
+            st["label"] = lab
+            # smooth the rate over 10 boundaries (0.1 s) for legibility; cumulative is exact
+            k = 10
+            w_s = np.convolve(w, np.ones(k) / k, mode="same")
+            axes[0].plot(t, 100.0 * 10.0 / w_s, lw=1.1, **st)
+            axes[1].plot(t, np.convolve(it, np.ones(k) / k, mode="same"), lw=1.1, **st)
+            axes[2].plot(t, np.cumsum(w) / 1e3, lw=1.1, **st)
+        axes[0].axhline(100.0, color="k", lw=0.6, ls="--", alpha=0.5)
+        axes[0].text(0.005, 100.0, "100% RTR", fontsize=6, va="bottom", transform=axes[0].get_yaxis_transform())
+        axes[0].set_yscale("log"); axes[0].set_ylabel("Real-Time Rate (%)")
+        axes[1].set_yscale("log"); axes[1].set_ylabel("Solver steps per 10 ms")
+        axes[2].set_ylabel("Cumulative Wall Time (s)"); axes[2].set_xlabel("Simulation Time (s)")
+        for ax in axes:
+            ax.grid(True, which="both", alpha=0.3)
+            ax.tick_params(labelsize=7)
+        axes[0].set_title(f"Hard clutter drop, N = {n}", fontsize=9)
+        axes[2].legend(fontsize=6.5, ncol=2)
+        _save(fig, f"realtime_trace_n{n}")
+
+
 if __name__ == "__main__":
     workprecision()
     speed_bars()
     ball_energy()
     penetration()
     scaling()
+    realtime_trace()
