@@ -99,8 +99,9 @@ def workprecision() -> None:
                     if r["dt_s"] not in (1e-2, 1e-3):
                         continue  # the paper's Fig. 11 reference steps: 10 ms and 1 ms
                     ax.axhline(r["wall_s_per_sim_s"], color=STYLE[arm]["color"], ls=":", lw=0.9, alpha=0.9)
-                    ax.text(1.3e-1, r["wall_s_per_sim_s"], f"{STYLE[arm]['label'].split(',')[0]} fixed {_dt_label(r['dt_s'])}",
-                            fontsize=5.5, color=STYLE[arm]["color"], va="bottom", ha="left")
+                    ax.text(0.995, r["wall_s_per_sim_s"], f"{STYLE[arm]['label'].split(',')[0]} fixed {_dt_label(r['dt_s'])}",
+                            fontsize=5.5, color=STYLE[arm]["color"], va="bottom", ha="right",
+                            transform=ax.get_yaxis_transform())
             ax.set_xscale("log")
             ax.set_yscale("log")
             if not ax.xaxis_inverted():  # shared x: invert exactly once (the paper tightens accuracy to the right)
@@ -112,7 +113,8 @@ def workprecision() -> None:
             if bad:
                 ax.text(0.99, 0.97, "× = timeout (>100 s / sim s)", transform=ax.transAxes, ha="right", va="top", fontsize=5.5, color="gray")
             ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
-            ax.text(1.3e-1, 1.0, "real time", fontsize=5.5, color="k", alpha=0.6, va="bottom", ha="left")
+            ax.text(0.005, 1.0, "real time", fontsize=5.5, color="k", alpha=0.6, va="bottom", ha="left",
+                    transform=ax.get_yaxis_transform())
             if i == 0:
                 ax.set_title(SCENE_TITLE[scene], fontsize=9)
             if i == len(ns) - 1:
