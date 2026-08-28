@@ -94,9 +94,12 @@ as `contact-overflow`, never as a data point.
   % change of total energy after 10 s; rebounds counted as boundary-sampled
   upward velocity sign flips.
 * **Table I analog**: real-time rate = 100 / (wall per simulated second) at
-  N = 1; artifact = any ejection or max ground penetration > 1 mm (4 % of the
-  object radius) in the 64-world run. The criterion is ours; the paper's
-  Table I judged artifacts visually.
+  N = 1; artifact = any ejection, or max ground penetration above 10× the
+  scene's single-object static penetration m·g/k — the compliance the
+  contact model itself prescribes (6.5 µm on hard clutter at k = 10⁵ N/m,
+  0.65 mm on soft clutter at k = 10³ N/m, 65 g objects) — in the 64-world
+  run. A few static depths is the model; tens of them is the step. The
+  criterion is ours; the paper's Table I judged artifacts visually.
 
 ## Captions (LaTeX, ICRA style — paste with the PDFs in `figures/`)
 
@@ -184,11 +187,19 @@ What the figure supports:
 * MuJoCo error control is non-monotone in ε on hard clutter (10⁻³ cheaper
   than 10⁻² at both N; 3-trial medians at N = 1) — a property of its
   controller on this scene, reported as measured.
-* Step counts (`probe_march_cost.py`, hard clutter, N = 1): ICF error control
-  takes 100 / 100 / 149 / 355 march iterations per simulated second at
-  ε = 10⁻² … 10⁻⁵ at ~2.0–2.4 ms per iteration (three ICF solves and two
-  geometry queries; kernel-launch-bound for one world). The paper's CPU
+* Why the crossover (`tables/march_cost.md`, `probe_march_cost.py`, N = 1):
+  on hard clutter ICF error control takes 100 / 100 / 100 / 171 / 342 / 1027
+  march iterations per simulated second at ε = 10⁻¹ … 10⁻⁶ (one accepted
+  10 ms step per boundary down to 10⁻³) at 1.6–2.5 ms per iteration (three
+  ICF solves + two geometry queries, kernel-launch-bound for one world);
+  MuJoCo error control takes 100 / 118 / 127 / 239 / 1220 / 3812 at 1.1–1.5
+  ms — cheaper per iteration, but 3.7× more iterations at 10⁻⁶ because its
+  local error estimate on the stiff contact is larger. The paper's CPU
   implementation reports ~500 steps at 10⁻³ with δt_max = 0.1 s (Table III).
+* Timing floor: fixed ICF at δt = 10 ms costs 0.4 ms per boundary at 64
+  worlds (0.045 s per simulated second at N = 1); at that scale GPU wall
+  times scatter by up to 2× between runs (`verify_part1_penetration.py`
+  timing check), so sub-millisecond wall numbers carry that uncertainty.
 
 ### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
 

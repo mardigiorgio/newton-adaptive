@@ -1,22 +1,22 @@
-# Table I analog — real-time rate and artifacts (N = 1 GPU world; artifacts from the 64-world penetration run: any ejection or max penetration > 1 mm)
+# Table I analog — real-time rate and artifacts (N = 1 GPU world; artifacts from the 64-world penetration run: any ejection, or max penetration > 10× the scene's static penetration m·g/k)
 
-### Soft clutter
+### Soft clutter  (artifact if max penetration > 6.42 mm = 10× m·g/k, or any ejection)
 
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
 | ICF real-time rate | 765% | 764% | 640% | 555% |
-| ICF artifacts | Yes (pen 1.9 mm, eject 0.0%) | Yes (pen 1.9 mm, eject 0.0%) | Yes (pen 2.0 mm, eject 0.0%) | Yes (pen 2.2 mm, eject 0.0%) |
+| ICF artifacts | No (pen 1.9 mm, eject 0.0%) | No (pen 1.9 mm, eject 0.0%) | No (pen 2.0 mm, eject 0.0%) | No (pen 2.2 mm, eject 0.0%) |
 | MuJoCo real-time rate | 1017% | 1018% | 923% | 539% |
 | MuJoCo artifacts | Yes (pen 21.9 mm, eject 0.0%) | Yes (pen 21.9 mm, eject 0.0%) | Yes (pen 23.3 mm, eject 0.0%) | Yes (pen 24.3 mm, eject 0.0%) |
 
 | Fixed step δt | 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|
 | ICF real-time rate | 2425% | 1371% | 605% | 321% |
-| ICF artifacts | Yes (pen 1.7 mm, eject 0.0%) | Yes (pen 1.9 mm, eject 0.0%) | Yes (pen 2.2 mm, eject 0.0%) | Yes (pen 2.2 mm, eject 0.0%) |
+| ICF artifacts | No (pen 1.7 mm, eject 0.0%) | No (pen 1.9 mm, eject 0.0%) | No (pen 2.2 mm, eject 0.0%) | No (pen 2.2 mm, eject 0.0%) |
 | MuJoCo real-time rate | 2082% | 1707% | 707% | 382% |
 | MuJoCo artifacts | Yes (pen 33.8 mm, eject 0.0%) | Yes (pen 21.9 mm, eject 0.0%) | Yes (pen 23.6 mm, eject 0.0%) | Yes (pen 23.3 mm, eject 0.0%) |
 
-### Hard clutter
+### Hard clutter  (artifact if max penetration > 0.0642 mm = 10× m·g/k, or any ejection)
 
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
