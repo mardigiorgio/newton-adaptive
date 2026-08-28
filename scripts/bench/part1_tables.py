@@ -7,11 +7,11 @@ control) and per time step (fixed step), one block per scene, ICF and
 MuJoCo side by side. Also the bouncing-ball table (energy change, bounces).
 
 Artifact criterion (stated, since the paper's Table I is visual): any body
-ejected from the bin, or max ground penetration above 10x the scene's
-single-object static penetration m*g/k -- the compliance the contact model
-itself prescribes (6.5 um on hard clutter at k = 1e5 N/m, 0.65 mm on soft
-clutter at k = 1e3 N/m, for the 65 g objects) -- over the 64-world run.
-Penetration of a few static depths is the model; tens of them is the step.
+ejected from the bin, or max ground penetration above the contact model's
+own impact depth v*sqrt(m/k) for the drop (v = sqrt(2 g h), h = 0.4 m:
+2.3 mm on hard clutter at k = 1e5 N/m, 23 mm on soft clutter at k = 1e3
+N/m, 65 g objects) over the 64-world run. Below that depth the model made
+the penetration; above it the step did.
 
     uv run python scripts/bench/part1_tables.py
 Writes scripts/bench/results/tables/part1_table1.md and .tex
@@ -32,8 +32,13 @@ SCENE_K = {"soft-clutter": 1.0e3, "hard-clutter": 1.0e5}
 ARTIFACT_FACTOR = 10.0
 
 
+DROP_HEIGHT_M = 0.40  # top drop layer -> impact speed sqrt(2 g h)
+
+
 def pen_artifact_m(scene: str) -> float:
-    return ARTIFACT_FACTOR * OBJECT_MASS_KG * 9.81 / SCENE_K[scene]
+    """The contact model's own impact depth v*sqrt(m/k): deeper is the step's doing."""
+    v = math.sqrt(2.0 * 9.81 * DROP_HEIGHT_M)
+    return v * math.sqrt(OBJECT_MASS_KG / SCENE_K[scene])
 
 
 def _rows(name: str) -> list[dict]:
@@ -78,7 +83,7 @@ def table1() -> tuple[str, str]:
         pen = _rows(f"part1_penetration_{scene}.csv")
         if not wp:
             continue
-        md.append(f"\n### {title}  (artifact if max penetration > {pen_artifact_m(scene) * 1e3:.3g} mm = 10× m·g/k, or any ejection)\n")
+        md.append(f"\n### {title}  (artifact if max penetration > {pen_artifact_m(scene) * 1e3:.3g} mm = the model's impact depth v·√(m/k), or any ejection)\n")
         md.append("| Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |")
         md.append("|---|---|---|---|---|")
         for arm, name in (("icf-adaptive", "ICF"), ("mujoco-adaptive", "MuJoCo")):
@@ -101,7 +106,7 @@ def table1() -> tuple[str, str]:
             tex.append(f"{name} artifacts & " + " & ".join(_artifact(pen, arm, "dt_s", d, scene).split(" (")[0] for d in (1e-2, 5e-3, 2e-3, 1e-3)) + "\\\\")
         tex.append("\\hline")
     head = ("# Table I analog — real-time rate and artifacts (N = 1 GPU world; artifacts from the 64-world "
-            "penetration run: any ejection, or max penetration > 10× the scene's static penetration m·g/k)\n")
+            "penetration run: any ejection, or max penetration > the model's impact depth v·√(m/k))\n")
     tex_doc = "\\begin{tabular}{lcccc}\\hline\n" + "\n".join(tex) + "\n\\end{tabular}\n"
     return head + "\n".join(md) + "\n", tex_doc
 

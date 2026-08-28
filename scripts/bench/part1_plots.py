@@ -366,28 +366,39 @@ def _static_pen(scene: str) -> float:
     return _OBJECT_MASS * 9.81 / _SCENE_K[scene]
 
 
+_DROP_HEIGHT = 0.40  # top drop layer [m] -> impact speed sqrt(2 g h)
+
+
+def _impact_pen(scene: str) -> float:
+    """Deepest penetration the contact model itself produces for the drop's
+    impact speed: v * sqrt(m/k) (Hertz-free linear spring, single body)."""
+    v = _math.sqrt(2.0 * 9.81 * _DROP_HEIGHT)
+    return v * _math.sqrt(_OBJECT_MASS / _SCENE_K[scene])
+
+
 def artifacts() -> None:
-    """Claim 1: resolution cannot buy MuJoCo out of its artifacts; fixed ICF
-    can, but only by choosing dt; error control is artifact-free at any
-    requested accuracy. One panel per scene: artifact ratio = max
-    penetration / (10 x static compliance) vs cost; ratio 1 is the line;
-    ejections ringed; the cheapest artifact-free point of each arm starred."""
+    """Claim 1. Top row: max penetration relative to the model's own impact
+    depth v*sqrt(m/k) -- above 1 the step, not the model, made the depth
+    (artifact); ejections ringed; cheapest artifact-free setting starred.
+    Bottom row: mean penetration relative to the resting depth m*g/k --
+    how faithfully each arm reproduces the model at rest."""
     scenes = [sc for sc in SCENE_ORDER if _rows(f"part1_penetration_{sc}.csv")]
     if not scenes:
         return
-    fig, axes = plt.subplots(1, len(scenes), figsize=(5.0 * len(scenes), 4.0), constrained_layout=True, squeeze=False)
-    claims = []
-    for ax, scene in zip(axes[0], scenes):
+    fig, axes = plt.subplots(2, len(scenes), figsize=(5.2 * len(scenes), 7.4), constrained_layout=True, squeeze=False)
+    for j, scene in enumerate(scenes):
         rows = _rows(f"part1_penetration_{scene}.csv")
-        thr = 10.0 * _static_pen(scene)
         dto = rows[0].get("dt_outer_s", 0.01) or 0.01
         n = int(rows[0]["n_worlds"])
+        d_imp, d_stat = _impact_pen(scene), _static_pen(scene)
+        # ---- top: artifacts
+        ax = axes[0][j]
         ax.axhspan(1.0, 1e6, color="#c0392b", alpha=0.06, lw=0)
         ax.axhline(1.0, color="#c0392b", lw=0.9, ls="--")
-        ax.text(0.005, 1.0, "artifact: penetration > 10× static compliance", fontsize=6.5, color="#c0392b", va="bottom", ha="left", transform=ax.get_yaxis_transform())
+        ax.text(0.005, 1.0, f"impact depth of the model, v·√(m/k) = {d_imp * 1e3:.2g} mm", fontsize=6.5, color="#c0392b", va="bottom", ha="left", transform=ax.get_yaxis_transform())
         cheapest = {}
         for arm in STYLE:
-            pts = sorted(((r["wall_ms_per_boundary"] / 1e3) / dto, r["pen_max_m"] / thr, r["out_of_bin_frac"] > 0, _knob_label(r)) for r in rows if r["arm"] == arm)
+            pts = sorted(((r["wall_ms_per_boundary"] / 1e3) / dto, r["pen_max_m"] / d_imp, r["out_of_bin_frac"] > 0, _knob_label(r)) for r in rows if r["arm"] == arm)
             if not pts:
                 continue
             st = STYLE[arm]
@@ -404,17 +415,33 @@ def artifacts() -> None:
                 ax.plot(x, y, marker="*", ms=15, color=st["color"], mec="k", mew=0.6, ls="none", zorder=5)
                 cheapest[arm] = (x, lab)
         ax.set_xscale("log"); ax.set_yscale("log")
-        ax.set_xlabel(f"Wall Time (s) per simulated second, {n} scenes")
-        ax.set_ylabel("max penetration / (10 × m·g/k)")
+        ax.set_ylabel("max penetration / impact depth")
         ax.grid(True, which="both", alpha=0.3)
-        parts = []
-        for arm, name in (("mujoco", "MuJoCo"), ("mujoco-adaptive", "MuJoCo error control"), ("icf", "ICF fixed"), ("icf-adaptive", "ICF error control")):
-            parts.append(f"{name}: {'never' if arm not in cheapest else f'{cheapest[arm][1]} at {cheapest[arm][0]:.2g} s'}")
-        ax.set_title(f"{SCENE_TITLE[scene]} — cheapest artifact-free setting\n" + "; ".join(parts), fontsize=7.5)
-    axes[0][0].legend(fontsize=7, loc="lower left")
-    axes[0][0].plot([], [], marker="*", ms=12, color="gray", mec="k", ls="none", label="cheapest artifact-free")
-    axes[0][0].plot([], [], marker="o", ms=10, mfc="none", mec="#c0392b", ls="none", label="ejects a body")
-    axes[0][0].legend(fontsize=7, loc="lower left")
+        parts = [f"{name}: {'never' if arm not in cheapest else f'{cheapest[arm][1]} ({cheapest[arm][0]:.2g} s)'}"
+                 for arm, name in (("mujoco", "MuJoCo fixed"), ("mujoco-adaptive", "MuJoCo error control"), ("icf", "ICF fixed"), ("icf-adaptive", "ICF error control"))]
+        ax.set_title(f"{SCENE_TITLE[scene]} — cheapest artifact-free setting\n" + "\n".join(parts[:2]) + "\n" + "\n".join(parts[2:]), fontsize=7.5)
+        if j == 0:
+            ax.plot([], [], marker="*", ms=12, color="gray", mec="k", ls="none", label="cheapest artifact-free")
+            ax.plot([], [], marker="o", ms=10, mfc="none", mec="#c0392b", ls="none", label="ejects a body")
+            ax.legend(fontsize=6.5, loc="upper right")
+        # ---- bottom: fidelity at rest
+        ax = axes[1][j]
+        ax.axhline(1.0, color="gray", lw=0.9, ls="--")
+        ax.text(0.005, 1.0, f"resting depth of the model, m·g/k = {d_stat * 1e6:.2g} µm", fontsize=6.5, color="gray", va="bottom", ha="left", transform=ax.get_yaxis_transform())
+        for arm in STYLE:
+            pts = sorted(((r["wall_ms_per_boundary"] / 1e3) / dto, r["pen_mean_m"] / d_stat, _knob_label(r)) for r in rows if r["arm"] == arm)
+            if not pts:
+                continue
+            st = STYLE[arm]
+            xs = [p[0] for p in pts]; ys = [max(p[1], 1e-3) for p in pts]
+            ax.plot(xs, ys, lw=1.2, ms=6, **st)
+            for x, y, lab in zip(xs, ys, [p[2] for p in pts]):
+                ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, -9), fontsize=5.5, color=st["color"])
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel(f"Wall Time (s) per simulated second, {n} scenes")
+        ax.set_ylabel("mean penetration / resting depth")
+        ax.set_title("time-averaged penetration relative to the model at rest", fontsize=8)
+        ax.grid(True, which="both", alpha=0.3)
     _save(fig, "artifacts")
 
 
