@@ -83,9 +83,11 @@ as `contact-overflow`, never as a data point.
   2.4 µs); a run in which any world ever exhausted it is marked
   `budget-exhausted` and treated as a failure — none did.
 * **Penetration vs wall** (ours): 64 worlds, 200 boundaries after a 20-boundary
-  warm-up; ground penetration read from model geometry (verified against an
-  independent recomputation, `verify_part1_penetration.py`); ejections past the
-  bin walls split into through-wall (below the rim) vs over-rim, by shape.
+  warm-up; ground penetration read from model geometry and verified against
+  an independent recomputation on the final scene and budgets
+  (`verify_part1_penetration.py`: model structure, plane, rotation
+  convention, live evolution, timing stability — all pass); ejections past
+  the bin walls split into through-wall (below the rim) vs over-rim, by shape.
   Timing and metric passes are separate subprocesses (no host sync in the
   timed loop).
 * **Wall vs worlds**: 2⁶ … 2¹³ worlds, fixed arms at δt = 10 ms, error control
@@ -196,10 +198,12 @@ What the figure supports:
   ms — cheaper per iteration, but 3.7× more iterations at 10⁻⁶ because its
   local error estimate on the stiff contact is larger. The paper's CPU
   implementation reports ~500 steps at 10⁻³ with δt_max = 0.1 s (Table III).
-* Timing floor: fixed ICF at δt = 10 ms costs 0.4 ms per boundary at 64
-  worlds (0.045 s per simulated second at N = 1); at that scale GPU wall
-  times scatter by up to 2× between runs (`verify_part1_penetration.py`
-  timing check), so sub-millisecond wall numbers carry that uncertainty.
+* Timing floor: fixed ICF at δt = 10 ms costs 0.38 ms per boundary at 64
+  worlds (0.045 s per simulated second at N = 1). On an idle GPU three
+  repeats agree to < 1.5× at that scale (`verify_part1_penetration.py`,
+  passed on the final scene and budgets); one repeat taken while another
+  job was starting read 1.9× higher — sub-millisecond wall numbers are only
+  reproducible on an otherwise idle GPU, which is how every sweep here ran.
 
 ### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
 
