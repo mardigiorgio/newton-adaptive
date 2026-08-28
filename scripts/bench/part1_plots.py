@@ -226,17 +226,20 @@ def _knob_label(r: dict) -> str:
 
 
 def penetration() -> None:
+    """Mean and max ground penetration vs wall time; the ejection panel is
+    drawn only if any configuration ejected a body, otherwise the title
+    states that none did."""
     for scene in ("hard-clutter", "soft-clutter"):
         rows = _rows(f"part1_penetration_{scene}.csv")
         if not rows:
             continue
-        fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), constrained_layout=True)
+        any_eject = any(r["out_of_bin_frac"] > 0 for r in rows)
+        panels = [("pen_mean_m", "mean ground penetration [m]"), ("pen_max_m", "max ground penetration [m]")]
+        if any_eject:
+            panels.append(("out_of_bin_frac", "fraction of bodies ejected from the bin"))
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.5 * len(panels), 3.8), constrained_layout=True)
         floor = 1e-10
-        for ax, col, title in (
-            (axes[0], "pen_mean_m", "mean ground penetration [m]"),
-            (axes[1], "pen_max_m", "max ground penetration [m]"),
-            (axes[2], "out_of_bin_frac", "fraction of bodies ejected from the bin"),
-        ):
+        for ax, (col, title) in zip(axes, panels):
             for arm in STYLE:
                 pts = sorted((r["wall_ms_per_boundary"], r[col], _knob_label(r)) for r in rows if r["arm"] == arm)
                 if not pts:
@@ -269,7 +272,8 @@ def penetration() -> None:
             ax.grid(True, which="both", alpha=0.3)
         axes[0].legend(fontsize=7.5)
         n = int(rows[0]["n_worlds"])
-        fig.suptitle(f"Penetration vs wall time — {SCENE_NOTE[scene]}, {n} worlds; labels: δt (fixed) / ε_acc (error control)", fontsize=8.5)
+        eject_note = "" if any_eject else "; no body left the bin in any configuration"
+        fig.suptitle(f"Penetration vs wall time — {SCENE_NOTE[scene]}, {n} worlds; labels: δt (fixed) / ε_acc (error control){eject_note}", fontsize=8.5)
         _save(fig, f"penetration_{scene}")
 
 
