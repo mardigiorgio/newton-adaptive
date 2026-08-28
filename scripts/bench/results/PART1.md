@@ -184,261 +184,31 @@ spread.}
 
 ## Results
 
-All clutter numbers below are from the rerun under the verified contact
-budgets (ICF 2048, MuJoCo nconmax 1024, njmax 1024 — ≥ 2× measured demand); no
-configuration timed out, exhausted its march budget, or dropped a contact.
+All numbers are generated from the committed CSVs into
+`tables/results_tables.md` (work-precision, fixed-step levels, penetration
+and ejections, wall vs worlds, ball energy), `tables/part1_table1.md` (Table I
+analog) and `tables/march_cost.md`; the prose below reads them. Every clutter
+number comes from one rerun under the paper's hyperparameters (δt_max = 0.1 s,
+k_Init = 0.1, the Newton-tolerance rule, point contact, the perturbed drop,
+contact budgets ≥ 2× measured demand).
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
-Wall time per simulated second, δt_max = 10 ms; N = 1 rows are 3-trial medians.
+_(prose from the final CSVs — pending the rerun)_
 
-| scene, N | arm | ε = 10⁻¹ | 10⁻² | 10⁻³ | 10⁻⁴ | 10⁻⁵ | 10⁻⁶ |
-|---|---|---|---|---|---|---|---|
-| hard, 1 | ICF error control | 0.23 | 0.23 | 0.23 | 0.28 | 0.42 | 0.89 |
-| hard, 1 | MuJoCo error control | 0.14 | 0.34 | 0.12 | 0.26 | 1.61 | 4.94 |
-| soft, 1 | ICF error control | 0.13 | 0.13 | 0.16 | 0.18 | 0.29 | 0.61 |
-| soft, 1 | MuJoCo error control | 0.10 | 0.10 | 0.11 | 0.19 | 0.40 | 1.06 |
-| hard, 1024 | ICF error control | 5.2 | 5.2 | 5.3 | 7.2 | 11.9 | 21.4 |
-| hard, 1024 | MuJoCo error control | 0.78 | 5.07 | 3.55 | 6.27 | 12.0 | 29.8 |
-| soft, 1024 | ICF error control | 2.3 | 2.3 | 3.3 | 3.8 | 6.2 | 12.7 |
-| soft, 1024 | MuJoCo error control | 0.22 | 0.22 | 0.24 | 0.43 | 0.98 | 2.68 |
+### Penetration and ejections (`figures/penetration_*.pdf`, `figures/penetration_*_margin5mm.pdf`)
 
-Fixed-step levels at δt = 10 / 1 ms (s per simulated second): hard N=1 ICF
-0.045 / 0.33, MuJoCo 0.11 / 0.34; hard N=1024 ICF 0.54 / 4.3, MuJoCo 0.33 /
-1.6; soft N=1 ICF 0.041 / 0.31, MuJoCo 0.048 / 0.26; soft N=1024 ICF 0.85 /
-5.0, MuJoCo 0.14 / 0.66 (full ladder in `tables/part1_table1.md`).
+_(prose from the final CSVs — pending the rerun; the 5 mm-margin variant is
+reported alongside point contact)_
 
-What the figure supports:
-* Every error-controlled configuration runs faster than real time for a
-  single world on both scenes, down to ε = 10⁻⁶ — no timeouts.
-* Hard clutter: ICF error control is flat at 0.23 s/sim-s for ε ≥ 10⁻³
-  (one accepted 10 ms step per boundary) and grows only to 0.89 s at 10⁻⁶;
-  MuJoCo error control is cheaper at loose accuracy but 4–6× more expensive
-  at ε ≤ 10⁻⁵ (1.6 s and 4.9 s). At N = 1024 the crossover sits at 10⁻⁵.
-* Soft clutter: MuJoCo error control is cheaper at every ε for N = 1024
-  (its per-step cost is lower); at N = 1 the two are within 2× everywhere.
-* MuJoCo error control is non-monotone in ε on hard clutter (10⁻³ cheaper
-  than 10⁻² at both N; 3-trial medians at N = 1) — a property of its
-  controller on this scene, reported as measured.
-* Why the crossover (`tables/march_cost.md`, `probe_march_cost.py`, N = 1):
-  on hard clutter ICF error control takes 100 / 100 / 100 / 171 / 342 / 1027
-  march iterations per simulated second at ε = 10⁻¹ … 10⁻⁶ (one accepted
-  10 ms step per boundary down to 10⁻³) at 1.6–2.5 ms per iteration (three
-  ICF solves + two geometry queries, kernel-launch-bound for one world);
-  MuJoCo error control takes 100 / 118 / 127 / 239 / 1220 / 3812 at 1.1–1.5
-  ms — cheaper per iteration, but 3.7× more iterations at 10⁻⁶ because its
-  local error estimate on the stiff contact is larger. The paper's CPU
-  implementation reports ~500 steps at 10⁻³ with δt_max = 0.1 s (Table III).
-* Timing floor: fixed ICF at δt = 10 ms costs 0.38 ms per boundary at 64
-  worlds (0.045 s per simulated second at N = 1). On an idle GPU three
-  repeats agree to < 1.5× at that scale (`verify_part1_penetration.py`,
-  passed on the final scene and budgets); one repeat taken while another
-  job was starting read 1.9× higher — sub-millisecond wall numbers are only
-  reproducible on an otherwise idle GPU, which is how every sweep here ran.
+### Real-time rate along a drop (`figures/realtime_trace_n64.pdf`, `_n1.pdf`)
 
-### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
-
-64 worlds, 200 boundaries, model-read geometry (`verify_part1_penetration.py`).
-
-| scene | arm | setting | mean penetration | max penetration | ejected |
-|---|---|---|---|---|---|
-| hard | MuJoCo fixed | δt = 10 → 1 ms | 0.69 → 0.19 mm | 13.6 → 4.9 mm | 0 |
-| hard | MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.18–0.26 mm | 3.8–7.5 mm | 0 |
-| hard | ICF fixed | δt = 10 → 1 ms | **0** | **0** | 0 |
-| hard | ICF error control | ε = 10⁻¹ → 10⁻⁴ | **0** | **0** | 0 |
-| soft | MuJoCo fixed | δt = 10 → 1 ms | 1.1 → 0.89 mm | 34 → 23 mm | 0 |
-| soft | MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.88–0.89 mm | 22–24 mm | 0 |
-| soft | ICF fixed | δt = 10 → 1 ms | 4–7 µm | 1.7–2.2 mm | 0 |
-| soft | ICF error control | ε = 10⁻¹ → 10⁻⁴ | 5–6 µm | 1.9–2.2 mm | 0 |
-
-* On hard clutter ICF resolves contact to exactly zero ground penetration at
-  every δt and every ε — including fixed 10 ms steps — at 0.4–5 ms per
-  boundary for 64 worlds; MuJoCo never gets below ~0.2 mm mean / ~5 mm max
-  at any setting, because its compliance is in the model, not the step.
-* On soft clutter (k = 10³ N/m, 65 g objects) MuJoCo's max penetration is
-  about the object radius (22–34 mm; the pile's bottom layer) at every δt
-  and ε; ICF stays at ~2 mm max and ~5 µm mean.
-* No body left the bin in any configuration on either scene.
-* The earlier "fixed ICF launches spheres over the rim" and "MuJoCo tunnels
-  through the floor" observations were artifacts of the starved contact
-  budgets and do not survive re-measurement.
-
-### Energy convergence (`figures/ball_energy.pdf`, `tables/part1_table1.md`)
-
-| δt | 10 ms | 5 ms | 2 ms | 1 ms | 0.5 ms | 0.2 ms | 0.1 ms | 50 µs | 20 µs | 10 µs |
-|---|---|---|---|---|---|---|---|---|---|---|
-| ICF, % energy change | −99.6 | −99.6 | −99.6 | −99.6 | −97.6 | −56.8 | −32.1 | −16.2 | −6.8 | −3.5 |
-| ICF, rebounds in 10 s | 2 | 3 | 8 | 12 | 21 | 13 | 11 | 10 | 11 | 11 |
-| MuJoCo, % energy change | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 |
-| MuJoCo, rebounds | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-
-* Fixed ICF converges at first order once the impact is resolved
-  (δt ≤ 0.2 ms: each halving of δt halves the energy loss) and rebounds 11
-  times in 10 s at δt ≤ 0.1 ms — the count the paper states for this scene.
-  At δt ≥ 1 ms the first impact absorbs essentially all the energy and the
-  ball settles (the ≥ 12 "rebounds" at 0.5–1 ms are resting chatter).
-* MuJoCo loses 99.5 % of the energy at every δt down to 10 µs and never
-  rebounds more than once: its dissipation lives in the contact model, not
-  in the step, so refining δt cannot recover the conservative dynamics.
-* ICF error control: the bounce is resolved only at ε ≤ 10⁻⁵ (−61 %; −22 % at
-  10⁻⁶ with 11 rebounds); MuJoCo error control is dead at every ε.
-* Open question for the authors: the paper's Fig. 8 shows step-doubling
-  retaining some energy at δt = 1 ms, where ours loses 99.6 %; our assumed
-  radius (5 cm) and 5 mm contact margin are the likely knobs.
-
-### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
-
-64 worlds, 200 boundaries; every point labeled; no budget exhaustion.
-
-**Hard clutter** (k = 10⁵ N/m):
-
-| arm | setting | mean pen. | max pen. | ejected | of which over the rim / through a wall |
-|---|---|---|---|---|---|
-| MuJoCo fixed | δt = 10 → 1 ms | 0.68 → 0.19 mm | 12.5 → 4.9 mm | 0 | — |
-| MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.18–0.24 mm | 3.8–7.9 mm | 0 | — |
-| ICF fixed | δt = 10 / 5 / 2 / 1 ms | 2.9 µm / 1.1 µm / 4.6 nm / 0 | 8.4 / 3.9 / 0.58 / 0 mm | **9.6 % / 9.7 % / 6.0 % / 5.4 %** | all over the rim, all spheres (through-wall ≤ 0.16 %) |
-| ICF error control | ε = 10⁻¹ / 10⁻² / 10⁻³ / 10⁻⁴ | 0.3 µm / 10 µm / 0 / 0 | 3.9 / 22.5 / 0 / 0 mm | 2.0 % / 0.16 % / 0 / 0 | over the rim, spheres |
-
-* MuJoCo never ejects a body and never resolves contact below ~0.2 mm mean /
-  ~5 mm max penetration, at any δt or ε — its compliance is in the model.
-* Fixed ICF at δt ≥ 1 ms **launches 5–10 % of the spheres out of a 30 cm bin**:
-  the contact period at k = 10⁵ N/m is ~2.5 ms, so a 10 ms first-order step
-  does not resolve the impact and injects energy. The ejections are over the
-  rim (through-wall ≤ 0.16 %) and spheres only — dynamics, not a collision
-  failure.
-* ICF error control removes the launches (2 % at ε = 0.1, 0.16 % at 10⁻², none
-  at ≤ 10⁻³) and reaches exactly zero ground penetration at ε ≤ 10⁻³, at 25×
-  the fixed-10 ms cost (300 ms vs 12 ms per boundary at 64 worlds) or 4.5× the
-  fixed-1 ms cost.
-
-**Soft clutter** (k = 10³ N/m) — read with the mass caveat below:
-
-| arm | setting | mean pen. | max pen. | ejected |
-|---|---|---|---|---|
-| MuJoCo fixed | δt = 10 → 1 ms | 9.6 → 19 mm | **1.8–5.3 m** | 6–7 % |
-| MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 11 → 19 mm | **2.5–3.2 m** | 5–8 % |
-| ICF fixed | δt = 10 / 5 / 2 / 1 ms | 1.7 mm / 0.19 mm / 25 µm / 16 µm | 110 / 24 / 6.0 / 5.1 mm | 0 |
-| ICF error control | ε = 10⁻¹ / 10⁻² / 10⁻³ / 10⁻⁴ | 0.29 / 0.23 / 0.13 / 0.007 mm | 42 / 27 / 45 / 3.0 mm | 0 |
-
-* With the assumed objects (r = 2.5 cm at water density, 65 g), an impact at
-  ~2.8 m/s penetrates v·√(m/k) ≈ 22 mm — the sphere radius — so k = 10³ N/m
-  is near the limit of what point contact can represent for these masses.
-  The paper's own ball (0.1 kg, k = 10³, 1 m drop) penetrates ~4 cm of a 5 cm
-  radius, so deep penetration is in the paper's regime; the object mass is
-  the assumption to confirm with the authors.
-* MuJoCo (fixed and error-controlled): bodies **pass through the floor and
-  keep falling** (max "penetration" of metres = free fall after tunnelling)
-  and 5–8 % are launched over the rim, at every δt and ε.
-* ICF keeps every body in the bin at every setting; fixed 10 ms tunnels one
-  body 11 cm; error control at ε = 10⁻⁴ holds max penetration to 3 mm.
+_(prose from the final CSVs — pending the rerun)_
 
 ### Wall vs worlds (`figures/scaling_*.pdf`)
 
-Wall per 10 ms boundary [ms], median of per-run medians over 3 independent
-runs (100 timed boundaries after 20 warm-up, t = 0.2–1.2 s — the impact
-phase); the band in the figure is the spread across runs; no exhaustion.
+_(prose from the final CSVs — pending the rerun)_
 
-**Hard clutter**
+### Energy convergence (`figures/ball_energy.pdf`)
 
-| arm | 2^6 | 2^7 | 2^8 | 2^9 | 2^10 | 2^11 | 2^12 | 2^13 |
-|---|---|---|---|---|---|---|---|---|
-| MuJoCo fixed, δt = 10 ms | 1.7 | 1.9 | 2.1 | 2.6 | 3.4 | 5.7 | 9.8 | 15.8 |
-| MuJoCo error control, ε = 10⁻³ | 2.4 | 5.8 | 9.6 | 14.9 | 21.2 | 38.2 | 69 | 105 |
-| ICF fixed, δt = 10 ms | 0.38 | 0.44 | 1.7 | 2 | 1.4 | 2.4 | 4.6 | 9 |
-| ICF error control, ε = 10⁻³ | 5.4 | 8.3 | 13.6 | 25.2 | 48.1 | 94.5 | 188 | 373 |
-
-**Soft clutter**
-
-| arm | 2^6 | 2^7 | 2^8 | 2^9 | 2^10 | 2^11 | 2^12 | 2^13 |
-|---|---|---|---|---|---|---|---|---|
-| MuJoCo fixed, δt = 10 ms | 0.45 | 0.46 | 0.52 | 0.67 | 0.96 | 1.7 | 2.9 | 4.9 |
-| MuJoCo error control, ε = 10⁻³ | 1.4 | 1.4 | 1.5 | 1.7 | 2.2 | 3.8 | 6.5 | 12 |
-| ICF fixed, δt = 10 ms | 1.2 | 1.9 | 3.1 | 5.8 | 11 | 21.5 | 42.9 | 84.8 |
-| ICF error control, ε = 10⁻³ | 3 | 4.5 | 7.4 | 13.4 | 24.7 | 48 | 94.9 | 187 |
-
-* All four arms scale sub-linearly to 2¹³ worlds; with intact contacts ICF
-  error control is monotone (hard: 5.4 → 373 ms; the non-monotone single-run
-  sweep is superseded) and its run-to-run spread is < 1 % at every N.
-* Hard clutter at 2¹³ worlds: ICF fixed 10 ms 9.0 ms per boundary, MuJoCo
-  fixed 15.8 ms, ICF error control 373 ms,
-  MuJoCo error control 105 ms.
-* MuJoCo error control's run-to-run spread is wide at small N (e.g. 2.0–5.2 ms
-  at 64 worlds) and narrows with N; the ICF arms are reproducible throughout.
-* The MuJoCo arms at 2¹³ worlds run under njmax = 1024 (capacity; demand
-  ~200 rows per world) — the 4096-row Jacobian allocation exhausted the 32 GB
-  GPU at that world count.
-
-### Energy convergence (`figures/ball_energy.pdf`, `tables/part1_table1.md`)
-
-| δt | 10 ms | 5 ms | 2 ms | 1 ms | 0.5 ms | 0.2 ms | 0.1 ms | 50 µs | 20 µs | 10 µs |
-|---|---|---|---|---|---|---|---|---|---|---|
-| ICF, % energy change | −99.6 | −99.6 | −99.6 | −99.6 | −97.6 | −56.8 | −32.1 | −16.2 | −6.8 | −3.5 |
-| ICF, rebounds in 10 s | 2 | 3 | 8 | 12 | 21 | 13 | 11 | 10 | 11 | 11 |
-| MuJoCo, % energy change | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 | −99.5 |
-| MuJoCo, rebounds | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-
-* Fixed ICF converges at first order once the impact is resolved
-  (δt ≤ 0.2 ms: each halving of δt halves the energy loss) and rebounds 11
-  times in 10 s at δt ≤ 0.1 ms — the count the paper states for this scene.
-  At δt ≥ 1 ms the first impact absorbs essentially all the energy and the
-  ball settles (the ≥ 12 "rebounds" at 0.5–1 ms are resting chatter).
-* MuJoCo loses 99.5 % of the energy at every δt down to 10 µs and never
-  rebounds more than once: its dissipation lives in the contact model, not
-  in the step, so refining δt cannot recover the conservative dynamics.
-* ICF error control: the bounce is resolved only at ε ≤ 10⁻⁵ (−61 %; −22 % at
-  10⁻⁶ with 11 rebounds); MuJoCo error control is dead at every ε.
-* Open question for the authors: the paper's Fig. 8 shows step-doubling
-  retaining some energy at δt = 1 ms, where ours loses 99.6 %; our assumed
-  radius (5 cm) and 5 mm contact margin are the likely knobs.
-
-### Penetration and ejections vs wall time (`figures/penetration_*.pdf`)
-
-64 worlds, 200 boundaries; every point labeled; no budget exhaustion.
-
-**Hard clutter** (k = 10⁵ N/m):
-
-| arm | setting | mean pen. | max pen. | ejected | of which over the rim / through a wall |
-|---|---|---|---|---|---|
-| MuJoCo fixed | δt = 10 → 1 ms | 0.68 → 0.19 mm | 12.5 → 4.9 mm | 0 | — |
-| MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 0.18–0.24 mm | 3.8–7.9 mm | 0 | — |
-| ICF fixed | δt = 10 / 5 / 2 / 1 ms | 2.9 µm / 1.1 µm / 4.6 nm / 0 | 8.4 / 3.9 / 0.58 / 0 mm | **9.6 % / 9.7 % / 6.0 % / 5.4 %** | all over the rim, all spheres (through-wall ≤ 0.16 %) |
-| ICF error control | ε = 10⁻¹ / 10⁻² / 10⁻³ / 10⁻⁴ | 0.3 µm / 10 µm / 0 / 0 | 3.9 / 22.5 / 0 / 0 mm | 2.0 % / 0.16 % / 0 / 0 | over the rim, spheres |
-
-* MuJoCo never ejects a body and never resolves contact below ~0.2 mm mean /
-  ~5 mm max penetration, at any δt or ε — its compliance is in the model.
-* Fixed ICF at δt ≥ 1 ms **launches 5–10 % of the spheres out of a 30 cm bin**:
-  the contact period at k = 10⁵ N/m is ~2.5 ms, so a 10 ms first-order step
-  does not resolve the impact and injects energy. The ejections are over the
-  rim (through-wall ≤ 0.16 %) and spheres only — dynamics, not a collision
-  failure.
-* ICF error control removes the launches (2 % at ε = 0.1, 0.16 % at 10⁻², none
-  at ≤ 10⁻³) and reaches exactly zero ground penetration at ε ≤ 10⁻³, at 25×
-  the fixed-10 ms cost (300 ms vs 12 ms per boundary at 64 worlds) or 4.5× the
-  fixed-1 ms cost.
-
-**Soft clutter** (k = 10³ N/m) — read with the mass caveat below:
-
-| arm | setting | mean pen. | max pen. | ejected |
-|---|---|---|---|---|
-| MuJoCo fixed | δt = 10 → 1 ms | 9.6 → 19 mm | **1.8–5.3 m** | 6–7 % |
-| MuJoCo error control | ε = 10⁻¹ → 10⁻⁴ | 11 → 19 mm | **2.5–3.2 m** | 5–8 % |
-| ICF fixed | δt = 10 / 5 / 2 / 1 ms | 1.7 mm / 0.19 mm / 25 µm / 16 µm | 110 / 24 / 6.0 / 5.1 mm | 0 |
-| ICF error control | ε = 10⁻¹ / 10⁻² / 10⁻³ / 10⁻⁴ | 0.29 / 0.23 / 0.13 / 0.007 mm | 42 / 27 / 45 / 3.0 mm | 0 |
-
-* With the assumed objects (r = 2.5 cm at water density, 65 g), an impact at
-  ~2.8 m/s penetrates v·√(m/k) ≈ 22 mm — the sphere radius — so k = 10³ N/m
-  is near the limit of what point contact can represent for these masses.
-  The paper's own ball (0.1 kg, k = 10³, 1 m drop) penetrates ~4 cm of a 5 cm
-  radius, so deep penetration is in the paper's regime; the object mass is
-  the assumption to confirm with the authors.
-* MuJoCo (fixed and error-controlled): bodies **pass through the floor and
-  keep falling** (max "penetration" of metres = free fall after tunnelling)
-  and 5–8 % are launched over the rim, at every δt and ε.
-* ICF keeps every body in the bin at every setting; fixed 10 ms tunnels one
-  body 11 cm; error control at ε = 10⁻⁴ holds max penetration to 3 mm.
-
-### Wall vs worlds (`figures/scaling_*.pdf`)
-
-_(3-trial rerun in progress; the single-run sweep's ICF error-control row on
-hard clutter scattered with world count — zero exhaustion, chaotic impact
-window — and is superseded.)_
+_(prose from the final CSVs — pending the rerun)_
