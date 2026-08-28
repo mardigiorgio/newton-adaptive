@@ -29,6 +29,9 @@ import json
 import os
 import subprocess
 import sys
+import time
+
+import warp as wp
 
 from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm
 from scripts.scenes.cenic_scenes import SCENES, ball_energy, ball_initial_energy
@@ -57,7 +60,16 @@ def _run(arm_name: str, knob) -> dict:
     # ~pi*sqrt(m/k) = 31 ms, resolvable at 10 ms sampling).
     bounces = 0
     prev_vz = 0.0
-    for _ in range(int(round(HORIZON_S / DT_OUTER))):
+    # wall time per simulated second: the loop syncs once per boundary for
+    # the rebound count, the same for every arm (a ~50 us floor per 10 ms)
+    for _ in range(2):  # eager load + capture, untimed
+        s0, s1 = arm.boundary(s0, s1, ctrl)
+        if tracker:
+            tracker.tick()
+    wp.synchronize()
+    t0 = time.perf_counter()
+    n_timed = int(round(HORIZON_S / DT_OUTER)) - 2
+    for _ in range(n_timed):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
@@ -65,11 +77,14 @@ def _run(arm_name: str, knob) -> dict:
         if prev_vz < -0.05 and vz > 0.05:
             bounces += 1
         prev_vz = vz
+    wp.synchronize()
+    wall = time.perf_counter() - t0
     e_end = ball_energy(model, s0)[0]
     return {
         "energy_change_pct": 100.0 * (e_end - e0) / e0,
         "final_z": float(s0.body_q.numpy().reshape(-1, 7)[0, 2]),
         "bounces": bounces,
+        "wall_s_per_sim_s": wall / (n_timed * DT_OUTER),
         "exhausted_frac": tracker.fraction() if tracker else 0.0,
     }
 
@@ -100,6 +115,7 @@ def main() -> int:
             "energy_change_pct": "",
             "final_z": "",
             "bounces": "",
+            "wall_s_per_sim_s": "",
             "exhausted_frac": "",
             "status": "ok",
         }
