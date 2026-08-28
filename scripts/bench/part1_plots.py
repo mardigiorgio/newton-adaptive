@@ -63,56 +63,111 @@ def _dt_label(dt: float) -> str:
     return f"δt = {dt * 1e3:g} ms" if dt >= 1e-3 else f"δt = {dt * 1e6:g} µs"
 
 
+SCENE_TITLE = {"soft-clutter": "Soft Clutter", "hard-clutter": "Hard Clutter"}
+SCENE_ORDER = ("soft-clutter", "hard-clutter")  # the paper's order: least to most complex
+
+
+def _wp_rows(scene: str, n: int) -> list[dict]:
+    return _rows(f"part1_workprecision_{scene}_n{n}.csv")
+
+
 def workprecision() -> None:
-    """One row per world count (N=1 is the paper's single-scene semantics;
-    N=1024 the GPU regime), one column per scene. Points whose run timed
-    out or exhausted its march budget are drawn as crosses at the top edge:
-    the paper omits them; we show the gap."""
-    variants = [(n, s) for n in (1, 1024) for s in ("hard-clutter", "soft-clutter")
-                if _rows(f"part1_workprecision_{s}_n{n}.csv")]
-    if not variants:
+    """CENIC Fig. 10 layout: one column per scene, one row per world count
+    (N=1 is the paper's single-scene semantics, N=1024 the GPU regime).
+    x = requested accuracy, y = wall time per simulated second. A run that
+    timed out (>100 s per simulated second) or exhausted its march budget
+    is a cross at the top edge -- the paper omits such points; we show
+    the gap and say why."""
+    ns = [n for n in (1, 1024) if any(_wp_rows(sc, n) for sc in SCENE_ORDER)]
+    scenes = [sc for sc in SCENE_ORDER if any(_wp_rows(sc, n) for n in ns)]
+    if not ns or not scenes:
         return
-    ns = sorted({n for n, _ in variants})
-    scenes = [s for s in ("hard-clutter", "soft-clutter") if any(sc == s for _, sc in variants)]
-    fig, axes = plt.subplots(len(ns), len(scenes), figsize=(5.2 * len(scenes), 3.9 * len(ns)),
-                             constrained_layout=True, squeeze=False)
+    fig, axes = plt.subplots(len(ns), len(scenes), figsize=(3.6 * len(scenes), 2.9 * len(ns)),
+                             constrained_layout=True, squeeze=False, sharex=True)
     for i, n in enumerate(ns):
         for j, scene in enumerate(scenes):
             ax = axes[i][j]
-            rows = _rows(f"part1_workprecision_{scene}_n{n}.csv")
-            if not rows:
-                ax.set_visible(False)
-                continue
+            rows = _wp_rows(scene, n)
             ok = [r for r in rows if r["status"] == "ok"]
             bad = [r for r in rows if r["status"] != "ok" and r["accuracy"] != ""]
-            for arm in ("mujoco-adaptive", "icf-adaptive"):
+            for arm in ("icf-adaptive", "mujoco-adaptive"):
                 pts = sorted((r["accuracy"], r["wall_s_per_sim_s"]) for r in ok if r["arm"] == arm and r["accuracy"] != "")
                 if pts:
-                    ax.plot([p[0] for p in pts], [p[1] for p in pts], **STYLE[arm])
-            for arm in ("mujoco", "icf"):
+                    ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=4, lw=1.2, **STYLE[arm])
+            for arm in ("icf", "mujoco"):
                 for r in sorted((r for r in ok if r["arm"] == arm and r["dt_s"] != ""), key=lambda r: -r["dt_s"]):
-                    ax.axhline(r["wall_s_per_sim_s"], color=STYLE[arm]["color"], ls=":", lw=1.0, alpha=0.8)
-                    ax.text(1.4e-1, r["wall_s_per_sim_s"], f"{STYLE[arm]['label'].split(',')[0]} {_dt_label(r['dt_s'])}",
-                            fontsize=6.5, color=STYLE[arm]["color"], va="bottom", ha="left")
+                    if r["dt_s"] not in (1e-2, 1e-3):
+                        continue  # the paper's Fig. 11 reference steps: 10 ms and 1 ms
+                    ax.axhline(r["wall_s_per_sim_s"], color=STYLE[arm]["color"], ls=":", lw=0.9, alpha=0.9)
+                    ax.text(1.3e-1, r["wall_s_per_sim_s"], f"{STYLE[arm]['label'].split(',')[0]} fixed {_dt_label(r['dt_s'])}",
+                            fontsize=5.5, color=STYLE[arm]["color"], va="bottom", ha="left")
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.invert_xaxis()
-            ymax = max([r["wall_s_per_sim_s"] for r in ok] + [1.0]) * 3.0
-            ax.set_ylim(top=ymax)
+            top = max([r["wall_s_per_sim_s"] for r in ok if r["wall_s_per_sim_s"] != ""] + [1.0]) * 4.0
+            ax.set_ylim(top=top)
             for r in bad:
-                ax.plot(r["accuracy"], ymax / 1.5, marker="x", ms=8, mew=2, ls="none", color=STYLE[r["arm"]]["color"])
-                ax.annotate(r["status"], (r["accuracy"], ymax / 1.5), textcoords="offset points", xytext=(0, -10),
-                            ha="center", fontsize=5.5, color=STYLE[r["arm"]]["color"])
-            ax.set_xlabel("requested accuracy ε_acc  (error control on positions)")
-            ax.set_ylabel("wall time per simulated second [s]")
-            trials = int(rows[0].get("trials", 1) or 1)
-            budget = rows[0].get("max_substeps", "")
-            ax.set_title(f"{SCENE_NOTE[scene]}\n{n} world(s), median of {trials} trial(s), march budget {budget:g} substeps", fontsize=7.5)
+                ax.plot(r["accuracy"], top / 1.8, marker="x", ms=6, mew=1.6, ls="none", color=STYLE[r["arm"]]["color"])
+            if bad:
+                ax.text(0.99, 0.97, "× = timeout (>100 s / sim s)", transform=ax.transAxes, ha="right", va="top", fontsize=5.5, color="gray")
+            ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
+            ax.text(1.3e-1, 1.0, "real time", fontsize=5.5, color="k", alpha=0.6, va="bottom", ha="left")
+            if i == 0:
+                ax.set_title(SCENE_TITLE[scene], fontsize=9)
+            if i == len(ns) - 1:
+                ax.set_xlabel("Accuracy ε_acc")
+            if j == 0:
+                ax.set_ylabel(f"Wall Time (s) per simulated s\nN = {n} world{'s' if n > 1 else ''}")
             ax.grid(True, which="both", alpha=0.3)
-    axes[0][0].legend(fontsize=7.5, loc="lower left", bbox_to_anchor=(0.0, 0.05))
-    fig.suptitle("Work-precision (CENIC Fig. 9/10 definition): lower is better; × = timeout (>100 s per simulated second) or march budget exhausted",
-                 fontsize=8.5)
+            ax.tick_params(labelsize=7)
+    axes[0][0].legend(fontsize=6.5, loc="upper left")
     _save(fig, "workprecision")
+
+
+def speed_bars() -> None:
+    """CENIC Fig. 11 format: wall time per simulated second as bars, fixed
+    step at δt = 10 ms / 1 ms and error control at ε = 1e-1 / 1e-3 / 1e-5,
+    single scene (N=1). A missing bar is a timeout."""
+    scenes = [sc for sc in SCENE_ORDER if _wp_rows(sc, 1)]
+    if not scenes:
+        return
+    fig, axes = plt.subplots(len(scenes), 1, figsize=(6.4, 2.6 * len(scenes)), constrained_layout=True, squeeze=False)
+    settings = [("fixed", 1e-2, "#1f77b4", "Fixed Step, δt = 10 ms"), ("fixed", 1e-3, "#ff7f0e", "Fixed Step, δt = 1 ms"),
+                ("ec", 1e-1, "#2ca02c", "Error Control, ε = 10⁻¹"), ("ec", 1e-3, "#d62728", "Error Control, ε = 10⁻³"),
+                ("ec", 1e-5, "#9467bd", "Error Control, ε = 10⁻⁵")]
+    groups = [("icf-adaptive", "ICF\n(error control)", "ec"), ("icf", "ICF\n(fixed step)", "fixed"),
+              ("mujoco-adaptive", "MuJoCo\n(error control)", "ec"), ("mujoco", "MuJoCo\n(fixed step)", "fixed")]
+    for ax, scene in zip(axes[:, 0], scenes):
+        rows = _wp_rows(scene, 1)
+        x = 0.0
+        ticks, labels = [], []
+        for arm, name, kind in groups:
+            xs0 = x
+            for skind, val, color, lab in settings:
+                if skind != kind:
+                    continue
+                r = next((r for r in rows if r["arm"] == arm and (r["accuracy"] == val if kind == "ec" else r["dt_s"] == val)), None)
+                if r is not None and r["status"] == "ok":
+                    ax.bar(x, r["wall_s_per_sim_s"], width=0.8, color=color, label=lab)
+                else:
+                    ax.bar(x, 1e-3, width=0.8, color=color, alpha=0.25, hatch="//", label=lab)
+                    ax.text(x, 1.2e-3, r["status"] if r else "n/a", rotation=90, fontsize=5.5, ha="center", va="bottom", color=color)
+                x += 1.0
+            ticks.append((xs0 + x - 1.0) / 2.0)
+            labels.append(name)
+            x += 0.8
+        ax.set_yscale("log")
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels, fontsize=7)
+        ax.set_ylabel("Wall Time (s)\nper simulated s", fontsize=8)
+        ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
+        ax.set_title(SCENE_TITLE[scene] + "  (N = 1, GPU)", fontsize=8.5)
+        ax.grid(True, axis="y", which="both", alpha=0.3)
+        ax.tick_params(labelsize=7)
+    h, l = axes[0][0].get_legend_handles_labels()
+    uniq = dict(zip(l, h))
+    fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=3, fontsize=6.5, bbox_to_anchor=(0.5, 1.06), frameon=False)
+    _save(fig, "speed_bars")
 
 
 def ball_energy() -> None:
@@ -227,6 +282,7 @@ def scaling() -> None:
 
 if __name__ == "__main__":
     workprecision()
+    speed_bars()
     ball_energy()
     penetration()
     scaling()
