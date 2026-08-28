@@ -79,6 +79,54 @@ radius 5 cm.
   object radius) in the 64-world run. The criterion is ours; the paper's
   Table I judged artifacts visually.
 
+## Captions (LaTeX, ICRA style — paste with the PDFs in `figures/`)
+
+```latex
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/workprecision.pdf}
+\caption{Work-precision plots (format of CENIC Fig.~10) for the paper's soft- and
+hard-clutter scenes, error control on positions ($\mathbf{S}=\mathbf{I}$).
+Wall time is normalized to one simulated second; top row a single world
+(N=1), bottom row N=1024 parallel worlds on one GPU. Dotted levels are the
+fixed-step arms at $\delta t = 10$\,ms and $1$\,ms. Maximum step
+$\delta t_{\max} = 10$\,ms in all arms (the control boundary).
+$\times$ marks a timeout ($>100$\,s per simulated second). Lower is better.}
+\end{figure}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/speed_bars.pdf}
+\caption{Simulator speed comparison (format of CENIC Fig.~11), single world:
+fixed step at $\delta t=10$\,ms / $1$\,ms and error control at
+$\varepsilon_{acc} = 10^{-1}, 10^{-3}, 10^{-5}$. Speed only, not quality;
+see Table~I and Fig.~\ref{fig:penetration} for artifacts.}
+\end{figure}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/ball_energy.pdf}
+\caption{Energy conservation (format of CENIC Fig.~8): percent change in total
+energy after 10\,s for a 0.1\,kg ball, $k=10^3$\,N/m, zero dissipation,
+dropped from 1\,m. Left: fixed step vs.\ $\delta t$; right: error control
+vs.\ $\varepsilon_{acc}$. ICF converges at first order; MuJoCo's contact
+dissipates the same fraction of the energy at every $\delta t$ down to
+$10\,\mu$s.}
+\end{figure}
+
+\begin{figure*}[t]\centering
+\includegraphics[width=\textwidth]{figures/penetration_hard-clutter.pdf}
+\caption{Ground penetration (mean, max) and bin ejections versus wall time on
+hard clutter, 64 worlds. Each point is labeled with its $\delta t$ (fixed
+step) or $\varepsilon_{acc}$ (error control); open markers are exactly zero.}
+\label{fig:penetration}
+\end{figure*}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/scaling_hard-clutter.pdf}
+\caption{Wall time per 10\,ms boundary versus number of parallel worlds
+($2^6$--$2^{13}$) on hard clutter; fixed step at $\delta t=10$\,ms, error
+control at $\varepsilon_{acc}=10^{-3}$; median with the p90 band.}
+\end{figure}
+```
+
 ## Results
 
 _(filled from the final CSVs — see `figures/` and `tables/`)_
