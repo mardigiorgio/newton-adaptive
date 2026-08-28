@@ -1,0 +1,26 @@
+\begin{tabular}{lcccc}\hline
+\multicolumn{5}{l}{\textbf{Soft clutter}}\\\hline
+Accuracy $\varepsilon_{acc}$ & $10^{-1}$ & $10^{-2}$ & $10^{-3}$ & $10^{-4}$\\\hline
+ICF real-time rate & 392% & 387% & 337% & 281%\\
+ICF artifacts & — & — & — & —\\
+MuJoCo real-time rate & 672% & 657% & 402% & 172%\\
+MuJoCo artifacts & — & — & — & —\\
+\hline Time step $\delta t$ & 10 ms & 5 ms & 2 ms & 1 ms\\\hline
+ICF real-time rate & 1493% & 808% & 348% & 181%\\
+ICF artifacts & — & — & — & —\\
+MuJoCo real-time rate & 1917% & 1094% & 480% & 272%\\
+MuJoCo artifacts & — & — & — & —\\
+\hline
+\multicolumn{5}{l}{\textbf{Hard clutter}}\\\hline
+Accuracy $\varepsilon_{acc}$ & $10^{-1}$ & $10^{-2}$ & $10^{-3}$ & $10^{-4}$\\\hline
+ICF real-time rate & 147% & 78% & 28% & 9%\\
+ICF artifacts & Yes & Yes & No & Yes\\
+MuJoCo real-time rate & 525% & 388% & 836% & 369%\\
+MuJoCo artifacts & Yes & Yes & Yes & Yes\\
+\hline Time step $\delta t$ & 10 ms & 5 ms & 2 ms & 1 ms\\\hline
+ICF real-time rate & 432% & 343% & 221% & 125%\\
+ICF artifacts & Yes & Yes & Yes & Yes\\
+MuJoCo real-time rate & 948% & 579% & 619% & 283%\\
+MuJoCo artifacts & Yes & Yes & Yes & Yes\\
+\hline
+\end{tabular}
