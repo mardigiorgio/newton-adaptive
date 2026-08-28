@@ -49,14 +49,25 @@ def _run(arm_name: str, knob) -> dict:
     tracker = ExhaustionTracker(arm) if not fixed else None
     s0, s1, ctrl = model.state(), model.state(), model.control()
     e0 = ball_initial_energy(model)
+    # The paper's stated fact for this scene -- "bounces 11 times in the 10
+    # second simulation" -- is an independent reference: count rebounds as
+    # boundary-sampled upward vertical-velocity sign flips (contact lasts
+    # ~pi*sqrt(m/k) = 31 ms, resolvable at 10 ms sampling).
+    bounces = 0
+    prev_vz = 0.0
     for _ in range(int(round(HORIZON_S / DT_OUTER))):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
+        vz = float(s0.joint_qd.numpy()[2])
+        if prev_vz < -0.05 and vz > 0.05:
+            bounces += 1
+        prev_vz = vz
     e_end = ball_energy(model, s0)[0]
     return {
         "energy_change_pct": 100.0 * (e_end - e0) / e0,
         "final_z": float(s0.body_q.numpy().reshape(-1, 7)[0, 2]),
+        "bounces": bounces,
         "exhausted_frac": tracker.fraction() if tracker else 0.0,
     }
 
@@ -86,6 +97,7 @@ def main() -> int:
             "max_substeps": "" if fixed else MAX_SUBSTEPS,
             "energy_change_pct": "",
             "final_z": "",
+            "bounces": "",
             "exhausted_frac": "",
             "status": "ok",
         }
