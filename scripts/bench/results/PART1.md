@@ -103,13 +103,13 @@ as `contact-overflow`, never as a data point.
   run. A few static depths is the model; tens of them is the step. The
   criterion is ours; the paper's Table I judged artifacts visually.
 
-## Captions (LaTeX, ICRA style — paste with the PDFs in `figures/`)
+## Captions (LaTeX, ICRA style — paste with the PDFs in `figures/`; `\cite{cenic}` = Kurtz & Castro, arXiv:2511.08771)
 
 ```latex
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/workprecision.pdf}
-\caption{Work-precision plots (format of CENIC Fig.~10) for the paper's soft- and
-hard-clutter scenes, error control on positions ($\mathbf{S}=\mathbf{I}$).
+\caption{Work-precision plots for the soft- and
+hard-clutter test cases of~\cite{cenic}, error control on positions ($\mathbf{S}=\mathbf{I}$).
 Wall time is normalized to one simulated second; top row a single world
 (N=1), bottom row N=1024 parallel worlds on one GPU. Dotted levels are the
 fixed-step arms at $\delta t = 10$\,ms and $1$\,ms. Maximum step
@@ -119,7 +119,7 @@ $\times$ marks a timeout ($>100$\,s per simulated second). Lower is better.}
 
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/speed_bars.pdf}
-\caption{Simulator speed comparison (format of CENIC Fig.~11), single world:
+\caption{Simulator speed comparison, single world:
 fixed step at $\delta t=10$\,ms / $1$\,ms and error control at
 $\varepsilon_{acc} = 10^{-1}, 10^{-3}, 10^{-5}$. Speed only, not quality;
 see Table~I and Fig.~\ref{fig:penetration} for artifacts.}
@@ -127,7 +127,7 @@ see Table~I and Fig.~\ref{fig:penetration} for artifacts.}
 
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/ball_energy.pdf}
-\caption{Energy conservation (format of CENIC Fig.~8): percent change in total
+\caption{Energy conservation: percent change in total
 energy after 10\,s for a 0.1\,kg ball, $k=10^3$\,N/m, zero dissipation,
 dropped from 1\,m. Left: fixed step vs.\ $\delta t$; right: error control
 vs.\ $\varepsilon_{acc}$. ICF converges at first order; MuJoCo's contact

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Part-1 figures from the committed CSVs, in the CENIC paper's conventions:
+"""Part-1 figures from the committed CSVs, with self-contained figure text:
 every point states its accuracy eps_acc (adaptive) or time step dt (fixed).
 CPU only; re-run after any sweep.
 
@@ -64,7 +64,7 @@ def _dt_label(dt: float) -> str:
 
 
 SCENE_TITLE = {"soft-clutter": "Soft Clutter", "hard-clutter": "Hard Clutter"}
-SCENE_ORDER = ("soft-clutter", "hard-clutter")  # the paper's order: least to most complex
+SCENE_ORDER = ("soft-clutter", "hard-clutter")  # least to most complex
 
 
 def _wp_rows(scene: str, n: int) -> list[dict]:
@@ -72,12 +72,11 @@ def _wp_rows(scene: str, n: int) -> list[dict]:
 
 
 def workprecision() -> None:
-    """CENIC Fig. 10 layout: one column per scene, one row per world count
-    (N=1 is the paper's single-scene semantics, N=1024 the GPU regime).
+    """One column per scene, one row per world count
+    (N=1 is the single-scene setting, N=1024 the GPU regime).
     x = requested accuracy, y = wall time per simulated second. A run that
     timed out (>100 s per simulated second) or exhausted its march budget
-    is a cross at the top edge -- the paper omits such points; we show
-    the gap and say why."""
+    is a cross at the top edge."""
     ns = [n for n in (1, 1024) if any(_wp_rows(sc, n) for sc in SCENE_ORDER)]
     scenes = [sc for sc in SCENE_ORDER if any(_wp_rows(sc, n) for n in ns)]
     if not ns or not scenes:
@@ -97,16 +96,16 @@ def workprecision() -> None:
             for arm in ("icf", "mujoco"):
                 for r in sorted((r for r in ok if r["arm"] == arm and r["dt_s"] != ""), key=lambda r: -r["dt_s"]):
                     if r["dt_s"] not in (1e-2, 1e-3):
-                        continue  # the paper's Fig. 11 reference steps: 10 ms and 1 ms
+                        continue  # reference steps: 10 ms and 1 ms
                     ax.axhline(r["wall_s_per_sim_s"], color=STYLE[arm]["color"], ls=":", lw=0.9, alpha=0.9)
                     ax.text(0.995, r["wall_s_per_sim_s"], f"{STYLE[arm]['label'].split(',')[0]} fixed {_dt_label(r['dt_s'])}",
                             fontsize=5.5, color=STYLE[arm]["color"], va="bottom", ha="right",
                             transform=ax.get_yaxis_transform())
             ax.set_xscale("log")
             ax.set_yscale("log")
-            if not ax.xaxis_inverted():  # shared x: invert exactly once (the paper tightens accuracy to the right)
+            if not ax.xaxis_inverted():  # shared x: invert exactly once (accuracy tightens to the right)
                 ax.invert_xaxis()
-            thresh = 100.0 * n  # the paper's timeout, per simulated second of one scene
+            thresh = 100.0 * n  # timeout: 100 s per simulated second of one scene
             top = max([r["wall_s_per_sim_s"] for r in ok if r["wall_s_per_sim_s"] != ""] + [1.0]) * 4.0
             if any(r["status"] == "timeout" for r in bad):
                 top = max(top, thresh * 2.5)
@@ -138,7 +137,7 @@ def workprecision() -> None:
 
 
 def speed_bars() -> None:
-    """CENIC Fig. 11 format: wall time per simulated second as bars, fixed
+    """Wall time per simulated second as bars, fixed
     step at δt = 10 ms / 1 ms and error control at ε = 1e-1 / 1e-3 / 1e-5,
     single scene (N=1). A missing bar is a timeout."""
     scenes = [sc for sc in SCENE_ORDER if _wp_rows(sc, 1)]
@@ -217,7 +216,7 @@ def ball_energy() -> None:
     axes[1].set_title("error control", fontsize=9)
     axes[1].legend(fontsize=7.5)
     axes[1].grid(True, which="both", alpha=0.3)
-    fig.suptitle(f"Energy conservation (CENIC Fig. 8 definition) — {SCENE_NOTE['ball']}", fontsize=9)
+    fig.suptitle(f"Energy conservation — {SCENE_NOTE['ball']}", fontsize=9)
     _save(fig, "ball_energy")
 
 
