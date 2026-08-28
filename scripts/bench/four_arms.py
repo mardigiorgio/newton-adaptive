@@ -18,6 +18,15 @@ with. Fixed arms subdivide the boundary into ``n_sub`` equal substeps —
 their accuracy knob; adaptive arms take ``tol`` — theirs. The ICF arms run
 Newton's CollisionPipeline per substep (fixed) or attached (adaptive); the
 MuJoCo arms collide internally exactly as in the existing benches.
+
+CUDA-graph parity: wall time is only comparable if every arm launches the
+same way. SolverMuJoCoAdaptive captures its march internally; the other
+three run eagerly when driven directly, paying per-kernel launch overhead
+the MuJoCo-adaptive arm does not (measured: a captured adaptive boundary
+timed BELOW one eager fixed substep on a small scene). So every boundary
+here replays a captured graph — the first call runs eagerly to load
+modules, the next captures, the rest replay — which is also how the
+IsaacLab manager drives both ICF arms in training.
 """
 
 from __future__ import annotations
@@ -25,8 +34,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Callable
 
+import warp as wp
+
 import newton
 
+from scripts.scenes.cenic_scenes import SCENES
 from scripts.scenes.contact_objects import (
     DT_INNER_MIN,
     DT_OUTER,
@@ -52,6 +64,32 @@ class Arm:
     iteration_count: Callable  # () -> int, inner iterations of the last boundary
 
 
+class _CapturedBoundary:
+    """Replay ``run(a, b, ctrl)`` as a captured CUDA graph, one graph per
+    starting buffer. ``run`` advances the state held in ``a`` using ``b`` as
+    scratch and leaves the result in ``b`` when ``ends_in_other`` else in
+    ``a``; the caller keeps the returned (current, other) order."""
+
+    def __init__(self, run: Callable, ends_in_other: bool):
+        self._run = run
+        self._ends_in_other = ends_in_other
+        self._graphs: dict[int, object] = {}
+        self._warm = False
+
+    def __call__(self, s0, s1, ctrl):
+        if not self._warm:
+            self._run(s0, s1, ctrl)  # eager: compiles and loads every module
+            self._warm = True
+        else:
+            graph = self._graphs.get(id(s0))
+            if graph is None:
+                with wp.ScopedCapture() as cap:
+                    self._run(s0, s1, ctrl)
+                graph = self._graphs[id(s0)] = cap.graph
+            wp.capture_launch(graph)
+        return (s1, s0) if self._ends_in_other else (s0, s1)
+
+
 def _make_mujoco(model: newton.Model, n_sub: int) -> Arm:
     solver = newton.solvers.SolverMuJoCo(
         model, separate_worlds=True, nconmax=NCONMAX, njmax=NJMAX
@@ -59,14 +97,13 @@ def _make_mujoco(model: newton.Model, n_sub: int) -> Arm:
     contacts = model.contacts()
     dt = DT_OUTER / n_sub
 
-    def boundary(s0, s1, ctrl):
-        # step() writes state_out in place and returns None
+    def run(a, b, ctrl):
+        # step() writes state_out in place and returns None; ping-pong
         for _ in range(n_sub):
-            solver.step(s0, s1, ctrl, contacts, dt)
-            s0, s1 = s1, s0
-        return s0, s1
+            solver.step(a, b, ctrl, contacts, dt)
+            a, b = b, a
 
-    return Arm("mujoco", solver, boundary, lambda: n_sub)
+    return Arm("mujoco", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
 
 
 def _make_mujoco_adaptive(model: newton.Model, tol: float) -> Arm:
@@ -107,31 +144,30 @@ def _icf():
     return icf_warp
 
 
-def _icf_params():
-    return replace(_icf().IcfParams(), max_rigid_contact=ICF_MAX_RIGID_CONTACT)
+def _icf_params(overrides: dict | None = None):
+    return replace(_icf().IcfParams(), max_rigid_contact=ICF_MAX_RIGID_CONTACT, **(overrides or {}))
 
 
-def _make_icf(model: newton.Model, n_sub: int) -> Arm:
-    solver = _icf().SolverICF(model, params=_icf_params())
+def _make_icf(model: newton.Model, n_sub: int, icf: dict | None = None) -> Arm:
+    solver = _icf().SolverICF(model, params=_icf_params(icf))
     pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
     dt = DT_OUTER / n_sub
 
-    def boundary(s0, s1, ctrl):
+    def run(a, b, ctrl):
         for _ in range(n_sub):
-            pipeline.collide(s0, contacts)
-            solver.step(s0, s1, ctrl, contacts, dt)
-            s0, s1 = s1, s0
-        return s0, s1
+            pipeline.collide(a, contacts)
+            solver.step(a, b, ctrl, contacts, dt)
+            a, b = b, a
 
-    return Arm("icf", solver, boundary, lambda: n_sub)
+    return Arm("icf", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub)
 
 
-def _make_icf_adaptive(model: newton.Model, tol: float) -> Arm:
+def _make_icf_adaptive(model: newton.Model, tol: float, icf_overrides: dict | None = None) -> Arm:
     icf = _icf()
     solver = icf.SolverICFAdaptive(
         model,
-        params=_icf_params(),
+        params=_icf_params(icf_overrides),
         adaptive=icf.IcfAdaptiveParams(
             tol=tol,
             dt_inner_init=DT_OUTER,
@@ -143,31 +179,41 @@ def _make_icf_adaptive(model: newton.Model, tol: float) -> Arm:
     contacts = pipeline.contacts()
     solver.attach_collision_pipeline(pipeline)
 
-    def boundary(s0, s1, ctrl):
-        pipeline.collide(s0, contacts)
-        solver.step(s0, s1, ctrl, contacts, DT_OUTER)
-        return s1, s0
+    def run(a, b, ctrl):
+        # under the outer capture the march records as a conditional
+        # while-node (the manager's mode); eagerly on the warm-up call
+        pipeline.collide(a, contacts)
+        solver.step(a, b, ctrl, contacts, DT_OUTER)
 
     def iterations() -> int:
         count = getattr(solver, "iteration_count", None)
         return int(count.numpy()[0]) if count is not None else -1
 
-    return Arm("icf-adaptive", solver, boundary, iterations)
+    return Arm("icf-adaptive", solver, _CapturedBoundary(run, True), iterations)
 
 
-def make_arm(model: newton.Model, name: str, *, n_sub: int = 1, tol: float = 1e-3) -> Arm:
-    """Build one arm on ``model``. Fixed arms take ``n_sub``, adaptive ``tol``."""
+def make_arm(
+    model: newton.Model, name: str, *, n_sub: int = 1, tol: float = 1e-3, scene: str | None = None
+) -> Arm:
+    """Build one arm on ``model``. Fixed arms take ``n_sub`` (dt = DT_OUTER /
+    n_sub), adaptive arms ``tol`` (the paper's accuracy eps_acc). ``scene``
+    selects the ICF material overrides the scene declares (MuJoCo reads its
+    materials from the shapes)."""
+    icf = SCENES[scene].icf if scene in SCENES else None
     if name == "mujoco":
         return _make_mujoco(model, n_sub)
     if name == "mujoco-adaptive":
         return _make_mujoco_adaptive(model, tol)
     if name == "icf":
-        return _make_icf(model, n_sub)
+        return _make_icf(model, n_sub, icf)
     if name == "icf-adaptive":
-        return _make_icf_adaptive(model, tol)
+        return _make_icf_adaptive(model, tol, icf)
     raise ValueError(f"unknown arm {name!r}; choose from {ARMS}")
 
 
-def build_model(n: int, seed: int = 42) -> newton.Model:
-    """The shared benchmark scene at ``n`` worlds (randomized, fixed seed)."""
-    return build_model_randomized(n, seed=seed)
+def build_model(n: int, seed: int = 42, scene: str = "contact-objects") -> newton.Model:
+    """A benchmark scene at ``n`` worlds: one of the CENIC paper's scenes
+    (``SCENES``) or the repo's randomized ``contact-objects`` pile."""
+    if scene == "contact-objects":
+        return build_model_randomized(n, seed=seed)
+    return SCENES[scene].build(n)

@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Penetration vs wall time, four solver arms.
+"""Ground penetration vs wall time, four solver arms, on a CENIC scene
+(default: hard clutter). Every row states its accuracy (adaptive) or
+time step (fixed); ejections past the bin walls are counted as the
+paper's passthrough artifact class.
 
-Each configuration (arm x accuracy knob) runs the shared contact scene
+Each configuration (arm x accuracy knob) runs the scene
 twice from identical initial states: a TIMED pass with no readbacks
 (per-boundary median wall-clock, synced each boundary), and a METRIC pass that reads the
 state back every boundary and measures ground-plane penetration
@@ -39,15 +42,15 @@ import numpy as np
 import warp as wp
 
 from scripts.bench.four_arms import ARMS, build_model, make_arm
-from scripts.scenes.contact_objects import BOX_HALF, SPHERE_RADIUS
+from scripts.scenes.cenic_scenes import BIN_HALF, BIN_WALL_H, DT_OUTER, SCENES
 
-FIXED_SUBS = [1, 2, 4, 8, 16]
-ADAPTIVE_TOLS = [1e-2, 1e-3, 1e-4]
+FIXED_SUBS = [1, 2, 5, 10]  # dt = 10, 5, 2, 1 ms
+ADAPTIVE_TOLS = [1e-1, 1e-2, 1e-3, 1e-4]
 
-_CORNERS = np.array(
+_UNIT_CORNERS = np.array(
     [[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
     dtype=np.float32,
-) * BOX_HALF
+)
 
 
 def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -59,32 +62,64 @@ def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     return v[None, :, :] + 2.0 * (w[:, :, None] * uv + uuv)
 
 
+class _Geometry:
+    """Per-body collision geometry read from the MODEL (not assumed): sphere
+    radius or box half-extents, one shape per dynamic body at its origin."""
+
+    def __init__(self, model):
+        from newton._src.geometry.types import GeoType
+
+        st = model.shape_type.numpy()
+        sb = model.shape_body.numpy()
+        sc = model.shape_scale.numpy()
+        sx = model.shape_transform.numpy()
+        n = model.body_count
+        self.radius = np.full(n, np.nan, dtype=np.float32)
+        self.half = np.full((n, 3), np.nan, dtype=np.float32)
+        for i, b in enumerate(sb):
+            if b < 0:
+                continue
+            assert np.abs(sx[i][:3]).max() < 1e-7, "shape offset from body origin: geometry read would be wrong"
+            if GeoType(int(st[i])) == GeoType.SPHERE:
+                self.radius[b] = sc[i][0]
+            elif GeoType(int(st[i])) == GeoType.BOX:
+                self.half[b] = sc[i]
+            else:
+                raise ValueError(f"unsupported dynamic shape {GeoType(int(st[i])).name}")
+        self.is_sphere = ~np.isnan(self.radius)
+        self.is_box = ~np.isnan(self.half[:, 0])
+
+    def penetrations(self, state) -> np.ndarray:
+        """Per-body ground-plane (z = 0) penetration [m]; zero where separated."""
+        bq = state.body_q.numpy().reshape(-1, 7)
+        pos, quat = bq[:, :3], bq[:, 3:]
+        pen = np.zeros(bq.shape[0], dtype=np.float32)
+        sp = self.is_sphere
+        pen[sp] = np.maximum(0.0, self.radius[sp] - pos[sp, 2])
+        bx = self.is_box
+        if bx.any():
+            corners = _quat_rotate(quat[bx], _UNIT_CORNERS) * self.half[bx][:, None, :] + pos[bx, None, :]
+            pen[bx] = np.maximum(0.0, -corners[:, :, 2].min(axis=1))
+        return pen
+
+    @staticmethod
+    def out_of_bin(state) -> np.ndarray:
+        """Bool per body: ejected past the bin's inner walls or over them
+        (the paper's passthrough/ejection artifact class)."""
+        bq = state.body_q.numpy().reshape(-1, 7)
+        return (np.abs(bq[:, 0]) > BIN_HALF) | (np.abs(bq[:, 1]) > BIN_HALF) | (bq[:, 2] > BIN_WALL_H)
+
+
 def _penetrations(model, state) -> np.ndarray:
-    """Per-body ground penetration [m] from body_q; zeros where separated.
-
-    Bodies alternate 9 spheres then 9 boxes per world (the scene's build
-    order). The ground plane is z = 0.
-    """
-    body_q = state.body_q.numpy().reshape(-1, 7)
-    n_bodies = body_q.shape[0]
-    per_world = 18
-    pos = body_q[:, :3]
-    quat = body_q[:, 3:]
-    is_sphere = (np.arange(n_bodies) % per_world) < 9
-    pen = np.zeros(n_bodies, dtype=np.float32)
-    pen[is_sphere] = np.maximum(0.0, SPHERE_RADIUS - pos[is_sphere, 2])
-    box_idx = ~is_sphere
-    corners = _quat_rotate(quat[box_idx], _CORNERS) + pos[box_idx, None, :]
-    pen[box_idx] = np.maximum(0.0, -corners[:, :, 2].min(axis=1))
-    return pen
+    return _Geometry(model).penetrations(state)
 
 
-def _run_pass(arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, which: str) -> dict:
+def _run_pass(scene: str, arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, which: str) -> dict:
     """One measurement pass — ONE model build per process (a second build
     in-process reproduces the CUDA 700 on the MuJoCo arms)."""
     kwargs = {"n_sub": knob} if arm_name in ("mujoco", "icf") else {"tol": knob}
-    model = build_model(n, seed=seed)
-    arm = make_arm(model, arm_name, **kwargs)
+    model = build_model(n, seed=seed, scene=scene)
+    arm = make_arm(model, arm_name, scene=scene, **kwargs)
     s0, s1, ctrl = model.state(), model.state(), model.control()
     if which == "timed":
         for _ in range(warmup):
@@ -100,33 +135,38 @@ def _run_pass(arm_name: str, knob, n: int, steps: int, warmup: int, seed: int, w
             wp.synchronize()
             times.append(time.perf_counter() - t0)
         return {"wall_ms_per_boundary": round(float(np.median(times)) * 1e3, 4)}
-    pens = []
+    geom = _Geometry(model)
+    pens, outs = [], []
     for _ in range(warmup + steps):
         s0, s1 = arm.boundary(s0, s1, ctrl)
-        pens.append(_penetrations(model, s0))
+        pens.append(geom.penetrations(s0))
+        outs.append(geom.out_of_bin(s0))
     pen = np.concatenate(pens[warmup:])
     return {
         "pen_mean_m": float(pen.mean()),
         "pen_max_m": float(pen.max()),
         "pen_p95_m": float(np.quantile(pen, 0.95)),
+        "out_of_bin_frac": float(outs[-1].mean()),
     }
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--scene", default="hard-clutter", choices=sorted(SCENES))
     p.add_argument("--n", type=int, default=64)
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", nargs="*", default=list(ARMS))
-    p.add_argument("--out", type=str, default="scripts/bench/results/part1_penetration.csv")
+    p.add_argument("--out", type=str, default=None)
     p.add_argument("--single", nargs=3, metavar=("ARM", "KNOB", "PASS"), default=None)
     args = p.parse_args()
+    out = args.out or f"scripts/bench/results/part1_penetration_{args.scene}.csv"
 
     if args.single is not None:
         arm_name, knob_s, which = args.single
         knob = int(knob_s) if arm_name in ("mujoco", "icf") else float(knob_s)
-        row = _run_pass(arm_name, knob, args.n, args.steps, args.warmup, args.seed, which)
+        row = _run_pass(args.scene, arm_name, knob, args.n, args.steps, args.warmup, args.seed, which)
         print("ROW " + json.dumps(row), flush=True)
         return 0
 
@@ -134,7 +174,7 @@ def main() -> int:
         r = subprocess.run(
             [
                 sys.executable, "-m", "scripts.bench.benchmarks.part1_penetration",
-                "--single", arm_name, str(knob), which,
+                "--scene", args.scene, "--single", arm_name, str(knob), which,
                 "--n", str(args.n), "--steps", str(args.steps),
                 "--warmup", str(args.warmup), "--seed", str(args.seed),
             ],
@@ -154,16 +194,25 @@ def main() -> int:
             metric = run_pass(arm_name, knob, "metric")
             if timed is None or metric is None:
                 continue
-            row = {"arm": arm_name, "knob": knob, **timed, **metric}
+            fixed = arm_name in ("mujoco", "icf")
+            row = {
+                "scene": args.scene,
+                "arm": arm_name,
+                "accuracy": "" if fixed else knob,
+                "dt_s": DT_OUTER / knob if fixed else "",
+                "n_worlds": args.n,
+                **timed,
+                **metric,
+            }
             rows.append(row)
             print(row, flush=True)
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", newline="") as f:
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
-    print(f"wrote {args.out}")
+    print(f"wrote {out}")
     return 0
 
 
