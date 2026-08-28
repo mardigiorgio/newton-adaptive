@@ -188,7 +188,7 @@ All numbers are generated from the committed CSVs into
 `tables/results_tables.md` (work-precision, fixed-step levels, penetration
 and ejections, wall vs worlds, ball energy), `tables/part1_table1.md` (Table I
 analog) and `tables/march_cost.md`; the prose below reads them. Every clutter
-number comes from one rerun under the paper's hyperparameters (δt_max = 0.1 s,
+number comes from one rerun under the hyperparameters of \cite{cenic} (δt_max = 0.1 s,
 k_Init = 0.1, the Newton-tolerance rule, point contact, the perturbed drop,
 contact budgets ≥ 2× measured demand).
 
