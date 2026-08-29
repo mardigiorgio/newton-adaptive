@@ -350,7 +350,8 @@ def realtime_trace() -> None:
             ax.grid(True, which="both", alpha=0.3)
             ax.tick_params(labelsize=7)
         axes[0].set_title(f"Hard clutter drop, N = {n}", fontsize=9)
-        axes[2].legend(fontsize=6.5, ncol=2)
+        h, l = axes[2].get_legend_handles_labels()
+        fig.legend(h, l, fontsize=6.5, ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.06), frameon=False)
         _save(fig, f"realtime_trace_n{n}")
 
 
