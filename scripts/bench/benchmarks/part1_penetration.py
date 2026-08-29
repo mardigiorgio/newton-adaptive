@@ -188,7 +188,7 @@ def main() -> int:
     p.add_argument("--scene", default="hard-clutter", choices=sorted(SCENES))
     p.add_argument("--n", type=int, default=64)
     p.add_argument("--sim-s", type=float, default=2.0, help="timed / measured simulated seconds after warm-up")
-    p.add_argument("--warmup-s", type=float, default=0.2)
+    p.add_argument("--warmup-s", type=float, default=0.0)
     p.add_argument("--margin", type=float, default=None, help="collision margin [m] (default: the scene's, 0 = point contact)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", nargs="*", default=list(ARMS))

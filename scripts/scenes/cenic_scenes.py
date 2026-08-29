@@ -182,7 +182,7 @@ SCENES: dict[str, SceneSpec] = {
         icf={"contact_stiffness": 1.0e3, "contact_stiction_tolerance": 1.0e-2, "contact_hc_dissipation": CLUTTER_HC_DISSIPATION},
         note="20 spheres in a bin, k=1e3 N/m, v_s=1 cm/s",
         dt_outer=0.1,
-        mujoco_solref=(MUJOCO_TAU_K1E5 * 10.0, 1.0),  # k = 1e3: tau scales as 1/sqrt(k)
+        mujoco_solref=(MUJOCO_TAU_K1E3, 1.0),
     ),
     "hard-clutter": SceneSpec(
         "hard-clutter",
