@@ -321,6 +321,9 @@ def realtime_trace() -> None:
             st = dict(STYLE[arm]); st["marker"] = None
             lab = f"{st['label']}, " + (f"ε = {knob:g}" if arm.endswith("adaptive") else _dt_label(knob))
             st["label"] = lab
+            # two settings per arm share a color: the coarser / looser one is dotted, the finer solid/dashed
+            settings = sorted({k for (a2, k) in series if a2 == arm}, reverse=True)
+            st["ls"] = (":" if knob == settings[0] else "--") if not arm.endswith("adaptive") else ("-" if knob == settings[-1] else "-.")
             # smooth the rate over 10 boundaries (0.1 s) for legibility; cumulative is exact
             k = 10
             w_s = np.convolve(w, np.ones(k) / k, mode="same")
@@ -338,7 +341,7 @@ def realtime_trace() -> None:
             ax.tick_params(labelsize=7)
         axes[0].set_title(f"Hard clutter drop, N = {n}", fontsize=9)
         h, l = axes[2].get_legend_handles_labels()
-        fig.legend(h, l, fontsize=6.5, ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.06), frameon=False)
+        fig.legend(h, l, fontsize=6.5, ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.11), frameon=False)
         _save(fig, f"realtime_trace_n{n}")
 
 
@@ -469,8 +472,15 @@ def ball_workprecision() -> None:
         if not pts:
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
-        for x, y, lab in pts:
-            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
+        moves = max(p[1] for p in pts) / max(min(p[1] for p in pts), 1e-9) > 1.5
+        if moves:
+            for x, y, lab in pts:
+                ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
+        else:
+            x, y, _ = pts[-1]
+            first, last = pts[0][2], pts[-1][2]
+            ax.annotate(f"{first} … {last}: all ≈ 100 % lost", (x, y), textcoords="offset points",
+                        xytext=(4, {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": -22}.get(arm, 0)), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("|energy change after 10 s| (%)")
     ax.set_title("Bouncing ball — energy error vs cost: ICF buys accuracy with resolution, MuJoCo cannot", fontsize=8)
