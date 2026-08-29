@@ -57,7 +57,7 @@ BALL_MASS = 0.1
 BALL_DROP = 1.0
 LATTICE_SEED = 7
 MUJOCO_TAU_K1E5 = 0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
-MUJOCO_BALL_DAMPRATIO = 0.0  # zero dissipation
+MUJOCO_BALL_DAMPRATIO = 0.05  # smallest damping ratio MuJoCo runs stably (0 is not admissible); the model asked for zero
 
 
 @dataclass
