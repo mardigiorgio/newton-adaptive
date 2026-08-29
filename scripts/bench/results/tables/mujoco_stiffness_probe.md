@@ -20,8 +20,17 @@ Newton's `convert_solref(ke, kd, 1, 1)` gives (timeconst, dampratio) = (1 ms, 3.
 
 Resting penetration scales as timeconst²: 2 ms → 4.4 µm, so timeconst 2.4 ms realizes k = 1e5 at rest once dt ≤ 1.2 ms (24 ms for k = 1e3). Adopted per scene as `SceneSpec.mujoco_solref`, dampratio 1 on the clutters, 0 for the ball.
 
-## Ball with explicit solref
+## Ball with explicit solref (τ = 31.6 ms)
 
 ```
   converted                      dt= 1.0 ms: energy change -100.04 %  rebounds  0  (solref now [0.02 1.  ])
+  converted                      dt= 0.1 ms: energy change -100.04 %  rebounds  1  (solref now [0.02 1.  ])
+  explicit tau=31.6ms zeta=0     dt= 1.0 ms: energy change    +nan %  rebounds  0  (solref now [0.0316 0.    ])
+  explicit tau=31.6ms zeta=0     dt= 0.1 ms: energy change    +nan %  rebounds  0  (solref now [0.0316 0.    ])
+  explicit tau=31.6ms zeta=0.05  dt= 1.0 ms: energy change -100.00 %  rebounds 25  (solref now [0.0316 0.05  ])
+  explicit tau=31.6ms zeta=0.05  dt= 0.1 ms: energy change -100.00 %  rebounds 25  (solref now [0.0316 0.05  ])
+  explicit tau=10ms zeta=0       dt= 1.0 ms: energy change    +nan %  rebounds  0  (solref now [0.01 0.  ])
+  explicit tau=10ms zeta=0       dt= 0.1 ms: energy change    +nan %  rebounds  0  (solref now [0.01 0.  ])
 ```
+
+MuJoCo admits no zero damping ratio (ζ = 0 diverges to NaN); with the smallest stable ζ the ball rebounds 25 times in 10 s but still loses all of its energy — MuJoCo's soft-constraint contact dissipates at every impact regardless of solref, so a conservative contact cannot be represented.

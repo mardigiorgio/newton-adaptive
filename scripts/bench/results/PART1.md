@@ -52,8 +52,12 @@ the requested k and critically damped the ball — our configuration, not
 MuJoCo. Each scene therefore carries `mujoco_solref`: τ = 2.4 ms at
 k = 10⁵ N/m and 24 ms at k = 10³ N/m (calibrated so a resting sphere sinks
 by the model's m·g/k, `tables/mujoco_stiffness_probe.md`), ζ = 1 on the
-clutters, 0 for the ball. At δt > τ/2 MuJoCo's contact is softer by its own
-design.
+clutters and the smallest ζ MuJoCo runs stably with for the ball — MuJoCo
+admits no zero damping ratio (ζ = 0 diverges), and with ζ = 0.05 the ball
+rebounds 25 times yet still loses all its energy: a conservative contact
+cannot be represented in MuJoCo's soft-constraint model, which is the
+finding of the energy figure stated fairly. At δt > τ/2 MuJoCo's contact is
+softer by its own design.
 
 Object and bin sizes, μ, dissipation and the initial arrangement are not
 specified in~\cite{cenic}; the values above are this work's definition.
