@@ -27,6 +27,8 @@ import os
 import subprocess
 import sys
 
+import time
+
 import numpy as np
 import warp as wp
 
@@ -86,18 +88,26 @@ def _run(scene, backend, kind, knob, n):
     arm = _arm(model, scene, backend, kind, knob)
     per_piece = int(round(PIECE_S / BOUNDARY_S))
     starts = sorted(snaps)
-    devs = []
+    devs, walls = [], []
+    s0, s1, c = model.state(), model.state(), model.control()
+    _restore(s0, snaps[starts[0]])
+    for _ in range(2):  # eager load + graph capture on the first buffers, untimed
+        s0, s1 = arm.boundary(s0, s1, c)
     for i in range(len(starts) - 1):
-        s0, s1, c = model.state(), model.state(), model.control()
         _restore(s0, snaps[starts[i]])
+        wp.synchronize()
+        t0 = time.perf_counter()
         for _ in range(per_piece):
             s0, s1 = arm.boundary(s0, s1, c)
+        wp.synchronize()
+        walls.append(time.perf_counter() - t0)
         x = s0.body_q.numpy().reshape(-1, 7)[:, :3]
         xr = snaps[starts[i + 1]]["body_q"].reshape(-1, 7)[:, :3]
         d = np.linalg.norm(x - xr, axis=1)
         devs.append(float(d.max()) if np.isfinite(d).all() else float("nan"))
     devs = np.array(devs)
-    return {"dev_mean_m": float(np.nanmean(devs)), "dev_max_m": float(np.nanmax(devs)), "pieces": int(np.isfinite(devs).sum())}
+    return {"dev_mean_m": float(np.nanmean(devs)), "dev_max_m": float(np.nanmax(devs)), "pieces": int(np.isfinite(devs).sum()),
+            "wall_s_per_sim_s": float(np.median(walls) / PIECE_S)}
 
 
 def main() -> int:
