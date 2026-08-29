@@ -49,15 +49,20 @@ scene. MuJoCo's contact is a soft constraint whose stiffness scales as
 → solref conversion sets ζ from kd (3.16 for the clutters' kd = 0.02 k; 1.0
 for the ball that asked for kd = 0), which made MuJoCo ~100× softer than
 the requested k and critically damped the ball — our configuration, not
-MuJoCo. Each scene therefore carries `mujoco_solref`: τ = 2.4 ms at
-k = 10⁵ N/m and 24 ms at k = 10³ N/m (calibrated so a resting sphere sinks
-by the model's m·g/k, `tables/mujoco_stiffness_probe.md`), ζ = 1 on the
-clutters and the smallest ζ MuJoCo runs stably with for the ball — MuJoCo
-admits no zero damping ratio (ζ = 0 diverges), and with ζ = 0.05 the ball
-rebounds 25 times yet still loses all its energy: a conservative contact
-cannot be represented in MuJoCo's soft-constraint model, which is the
-finding of the energy figure stated fairly. At δt > τ/2 MuJoCo's contact is
-softer by its own design.
+MuJoCo. Each scene therefore carries `mujoco_solref`. The clutters use
+the reference format (τ, ζ): τ = 2.4 ms at k = 10⁵ N/m (calibrated so a
+resting sphere sinks by the model's m·g/k) and 24 ms at k = 10³ N/m (scaled
+as 1/√k; the realized stiffness there is 1.37× the model — the reference
+format's impedance is not exactly ∝ 1/τ² — and is reported as such), ζ = 1,
+and MuJoCo's refsafe clamp τ ≥ 2δt, so at δt > τ/2 the contact is softer by
+MuJoCo's own design. The reference format admits no zero damping ratio
+(ζ = 0 diverges), so the ball — which asks for zero dissipation — uses
+MuJoCo's direct format (−stiffness, −damping) = (−2.24·10³, 0), calibrated
+to the same resting depth: an undamped soft constraint that conserves the
+ball's energy to 0.2 % at δt ≤ 1 ms. The direct format has no clamp and is
+stable only while ω·δt ≲ 2 (ω = √(k/m_eff)): at k = 10⁵ it launches bodies
+for δt ≥ 5 ms, which is why the clutters keep the reference format
+(`tables/mujoco_stiffness_probe.md`).
 
 Object and bin sizes, μ, dissipation and the initial arrangement are not
 specified in~\cite{cenic}; the values above are this work's definition.
@@ -220,15 +225,57 @@ spread.}
 \end{figure}
 ```
 
-## Open: the actuated test case
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/stiffness_sweep.pdf}
+\caption{Realized contact stiffness: resting penetration of one 65\,g sphere
+over the model's $m g / k$ as the requested $k$ rises. ICF realizes the model
+up to $10^7$\,N/m at $\delta t = 10$\,ms, 1\,ms and under error control at
+$\varepsilon_{acc} = 10^{-3}$ alike; MuJoCo's soft constraint is clamped to
+$\tau \ge 2\delta t$ and floors at $k \approx 10^3$\,N/m (10\,ms) and
+$10^5$\,N/m (1\,ms), and its error control at $\varepsilon_{acc} = 10^{-3}$
+does not recover the clamp.}
+\label{fig:stiffness}
+\end{figure}
+
+\begin{figure*}[t]\centering
+\includegraphics[width=\textwidth]{figures/consistency.pdf}
+\caption{Measured error versus cost on the clutter scenes: mean position
+deviation from a $\delta t = 0.1$\,ms reference of the same model over
+0.1\,s windows restarted from the reference, against wall time per simulated
+second (8 scenes). Every point states its $\delta t$ or
+$\varepsilon_{acc}$.}
+\label{fig:consistency}
+\end{figure*}
+
+\begin{figure*}[t]\centering
+\includegraphics[width=\textwidth]{figures/actuated.pdf}
+\caption{Actuated stiff contact: a PD gantry with gain $K_p$ ($K_d = 2\sqrt{K_p m}$)
+pushes a 1\,kg box across the table at 300\,mm/s, $k = 10^5$\,N/m, $\mu = 0.5$.
+Left to right: fingertip penetration into the box over the quasi-static push
+depth $\mu m g / k$, box vertical velocity RMS during the push, tip--box
+relative velocity RMS in the cruise, tracking RMS; fixed step at
+$\delta t = 1$\,ms and error control at $\varepsilon_{acc} = 10^{-3}$.}
+\label{fig:actuated}
+\end{figure*}
+
+## The actuated test case (`scripts/scenes/actuated_press.py`, `part1_actuated.py`)
 
 The clutter cases have no actuator. The regime in which MuJoCo error control
 took ~10× longer per iteration than ICF error control in training — a stiff
 PD-driven arm on objects — is the "Franka with box" case of~\cite{cenic}
-(high-gain controller → short time scales), which Part 1 does not yet
-reproduce. That case, built on Newton with a PD-driven arm pushing a box, is
-the figure that would show MuJoCo error control's step count and MuJoCo fixed
-step's artifacts under actuation.
+(high-gain controller → short time scales). Part 1 reproduces it with the
+smallest scene that has the ingredients (`PART1_LITERATURE.md`, Theme E): a
+PD-driven prismatic gantry (x, z) carrying a 0.1 kg fingertip (r = 1 cm)
+pushes a 1 kg, 10 cm box across the table from the side on a trapezoidal
+profile (300 mm/s, 0.1 s ramps, 0.3 m), k = 10⁵ N/m, μ = 0.5, the gain K_p
+swept from 10² to 10⁶ N/m with K_d = 2√(K_p m). Per world, from the state
+only: tip penetration into the box face against the quasi-static push depth
+μ·m·g/k, box vertical velocity RMS during the push (chatter), tip–box
+relative velocity RMS in the cruise (a steady push has none), tracking RMS,
+final box displacement against the commanded 0.28 m, instability (non-finite
+or |v| > 10 m/s), and wall time. Fixed δt ∈ {10, 5, 2, 1} ms and
+ε ∈ {10⁻¹ … 10⁻⁴}, one world (the scene is deterministic).
 
 ## Results
 
@@ -291,51 +338,25 @@ about half of fixed ICF at 1 ms.
 
 ### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
 
-* Fixed ICF converges at first order once the impact is resolved (δt ≤
-  0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
-  11 times in 10 s at δt ≤ 0.1 ms, the count \cite{cenic} states for this
-  scene.
-* MuJoCo with the lightest damping it runs with (ζ = 0.05; ζ = 0 diverges)
-  **gains** energy at δt ≥ 5 ms (+500× — a fixed-step instability of the
-  soft constraint) and loses all of it at δt ≤ 1 ms at every finer step:
-  its soft-constraint contact cannot represent a conservative impact at any
-  resolution. Its error control does not catch the instability either
-  (+15–50× at ε ≥ 10⁻³): the position-only error norm does not see energy.
-* ICF error control on positions likewise does not see the energy a soft
-  impact loses: it resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where
-  the 4096-substep march budget exhausts and the point is marked.
-
-### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
-
-Median of three independent runs per point (spread as the band), fixed step
-at δt = 10 ms, error control at ε = 10⁻³, 2 s timed window; no exhaustion.
-
-* Cost per world falls with batch size until the GPU saturates. At 2¹³
-  worlds on hard clutter, per 100 ms step: MuJoCo fixed 11 µs per world,
-  MuJoCo error control 270 µs, fixed ICF 620 µs, ICF error control 1.5 ms.
-* Under point contact our ICF step costs 40–60× MuJoCo's per world at
-  ≥ 2¹⁰ worlds. Not the Newton tolerance (10⁻⁵…10⁻⁸ changes wall by < 5 %,
-  `tables/newton_tolerance_probe.md`): it is the cost of resolving stiff
-  point contact to the model's compliance with a convex Newton solve, and a
-  batch pays for its slowest world.
-* Reproducibility: ICF's run-to-run spread is < 1 % at every N; MuJoCo error
-  control's narrows with N.
-
-### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
+_(MuJoCo rows regenerating with the direct undamped solref — the prose
+below states the ladder probe; the bench numbers replace it when the rerun
+lands.)_
 
 * Fixed ICF converges at first order once the impact is resolved (δt ≤
   0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
-  11 times in 10 s at δt ≤ 0.1 ms, the count \cite{cenic} states for this
+  11 times in 10 s at δt ≤ 0.1 ms, the count~\cite{cenic} states for this
   scene.
-* MuJoCo with the lightest damping it runs with (ζ = 0.05; ζ = 0 diverges)
-  **gains** energy at δt ≥ 5 ms (+500× — a fixed-step instability of the
-  soft constraint) and loses all of it at δt ≤ 1 ms at every finer step:
-  its soft-constraint contact cannot represent a conservative impact at any
-  resolution. Its error control does not catch the instability either
-  (+15–50× at ε ≥ 10⁻³): the position-only error norm does not see energy.
-* ICF error control on positions likewise does not see the energy a soft
-  impact loses: it resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where
-  the 4096-substep march budget exhausts and the point is marked.
+* MuJoCo's undamped direct-format constraint conserves the ball's energy at
+  every fixed step it is stable at: −3 % at δt = 10 ms, +0.5 % at 2 ms,
+  −0.16 % at 1 ms, −0.01 % at 0.1 ms (the 5 ms row loses everything and is
+  reported as measured). Its implicit velocity update is second-order on
+  this problem where step-doubling ICF is first-order — the same ordering
+  as Fig. 8 of~\cite{cenic} between its own schemes.
+* Error control on positions does not see the energy a soft impact loses:
+  ICF resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where the
+  4096-substep march budget exhausts and the point is marked. A property of
+  the position-only norm of Sec. V-E in~\cite{cenic} on a soft bounce,
+  stated as such.
 
 ### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
 
@@ -343,38 +364,49 @@ Median of three independent runs per point (spread as the band), fixed step
 at δt = 10 ms, error control at ε = 10⁻³, 2 s timed window; no exhaustion;
 tables in `tables/results_tables.md`.
 
-* Cost per world falls with batch size until the GPU saturates: on hard
-  clutter at 2¹³ worlds MuJoCo fixed step costs 17 µs per world per 100 ms
-  step, MuJoCo error control 370 µs, fixed ICF 610 µs, ICF error control
+* Cost per world falls with batch size until the GPU saturates. At 2¹³
+  worlds on hard clutter, per 100 ms boundary: MuJoCo fixed 11 µs per
+  world, MuJoCo error control 270 µs, fixed ICF 620 µs, ICF error control
   1.5 ms; fixed ICF and ICF error control saturate from 2¹⁰ worlds.
-* Under point contact and the hyperparameters of~\cite{cenic}, our ICF
-  step costs ~40× MuJoCo's per world at ≥ 2¹⁰ worlds on hard clutter. This
-  is not the Newton tolerance: sweeping it from 10⁻⁵ to 10⁻⁸ changes wall
-  by < 5 % at 64, 1024 and 4096 worlds and penetration not at all
-  (`tables/newton_tolerance_probe.md`). It is the cost of resolving stiff
-  point contact to the model's compliance (the fidelity row of
-  `figures/artifacts.pdf`) — a hardened impact needs many Newton iterations,
-  and a batch pays for its slowest world.
+* Under point contact our ICF step costs ~55× MuJoCo's per world at 2¹³
+  worlds (fixed step) and ~6× under error control. Not the Newton tolerance
+  (10⁻⁵…10⁻⁸ changes wall by < 5 %, `tables/newton_tolerance_probe.md`): it
+  is the cost of resolving stiff point contact to the model's compliance
+  with a convex Newton solve, and a batch pays for its slowest world.
 * Reproducibility: ICF's run-to-run spread is < 1 % at every N; MuJoCo error
   control's is wide at small N and narrows with N.
 
-### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
+### Realized stiffness (`figures/stiffness_sweep.pdf`)
 
-* Fixed ICF converges at first order once the impact is resolved (δt ≤
-  0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
-  11 times in 10 s at δt ≤ 0.1 ms, the count~\cite{cenic} states for this
-  scene. MuJoCo loses 99.5 % at every δt down to 10 µs and never rebounds
-  more than once: its dissipation is in the contact model.
-* Error control on positions does not see the energy a soft impact loses:
-  both arms lose ~100 % at ε ≥ 10⁻⁴; ICF resolves the bounce (11 rebounds,
-  −52 %) only at ε = 10⁻⁵, where the 4096-substep march budget is exhausted
-  and the point is marked. A property of the position-only norm of
-  Sec. V-E in~\cite{cenic} on a soft bounce, stated as such.
+One 65 g sphere at rest, k requested from 10³ to 10⁸ N/m, penetration over
+the model's m·g/k (1 = the model), the axis of Fig. 18 in the ICF paper.
 
-### Wall vs worlds (`figures/scaling_*.pdf`)
+* ICF realizes the requested stiffness up to 10⁷ N/m (ratio 0.99) at
+  δt = 10 ms, at 1 ms and under ε = 10⁻³ alike — the curves coincide — and
+  reads 0.87 at 10⁸, the float32 floor of the Newton solve. The stiffness
+  is a property of the model, not of the step.
+* MuJoCo realizes k only while τ(k) ≥ 2δt: up to ~10³ N/m at δt = 10 ms and
+  10⁵ N/m at 1 ms; beyond, penetration floors at the clamp (57× the model
+  at k = 10⁵ and 10 ms) and grows ∝ k. Error control at ε = 10⁻³ does not
+  recover it (17× at k = 10⁵): the controller sizes steps by position error,
+  the clamped contact is self-consistent at those steps, and the softening
+  is invisible to the norm. At ε = 10⁻⁵ it recovers k = 10⁵ (1.2×) and then
+  floors where fixed 1 ms does — tighter tolerance buys back stiffness only
+  as far as the steps it drives the solver to.
 
-_(prose from the final CSVs — pending the rerun)_
+### Momentum (`tables/momentum_probe.md`)
 
-### Energy convergence (`figures/ball_energy.pdf`)
+Two spheres collide head-on with gravity off: every arm conserves the pair's
+linear momentum to ≤ 10⁻⁵ (ICF ≤ 10⁻⁷, exactly under error control) — the
+per-world step controller injects none.
 
-_(prose from the final CSVs — pending the rerun)_
+### Self-consistency (`figures/consistency.pdf`)
+
+_(running — mean position deviation from a δt = 0.1 ms reference of the
+same model over 0.1 s windows restarted from the reference, against wall
+time, both clutters; prose from the CSVs when the run lands.)_
+
+### Actuated push (`figures/actuated.pdf`)
+
+_(running — the K_p sweep of the actuated case; prose from the CSV when the
+run lands.)_

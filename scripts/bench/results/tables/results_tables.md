@@ -61,7 +61,7 @@
 | hard | MuJoCo fixed step | δt = 2 ms | 17.00 | 0.866 | 40.6 | 0.0% | 56.99 |
 | hard | MuJoCo fixed step | δt = 1 ms | 6.55 | 0.719 | 8.4 | 0.0% | 115.21 |
 
-## Wall time per 10 ms boundary [ms] vs parallel worlds — median of 3 runs (spread in brackets)
+## Wall time per boundary [ms] (δt_max = 100 ms on the clutters) vs parallel worlds — median of 3 runs (spread in brackets)
 
 **soft-clutter**
 

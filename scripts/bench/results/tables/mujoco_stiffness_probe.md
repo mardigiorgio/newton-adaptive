@@ -71,7 +71,10 @@ interpolated for the resting depth m g / k = 0.98 mm (measured 1.01 mm at
     1.00            -0.16        10
     0.50            -0.08        10
     0.20            -0.03        10
+    0.10            -0.01         9
 ```
+(rebounds counted by the probe's 10 ms sampler, which undercounts the fast
+late bounces; the bench's own counter is the one reported in the results)
 
 ω δt = 100 × 0.01 = 1 at δt = 10 ms, inside the stable range: the undamped
 soft constraint conserves the ball's energy to 0.2 % at δt ≤ 1 ms (the

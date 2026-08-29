@@ -291,3 +291,23 @@ re-anchored to the reference (Erez) or statistical/invariant outputs.
    in the sources found (Isaac Gym, MuJoCo/MJX, Brax fixed-step; DiffMJX
    adapts for gradients; RL-picks-the-step papers invert the relation) —
    stated with that evidence.
+
+
+## Refinements adopted (2026-08-29) and what they measured
+
+| refinement | source | instrument | finding |
+|---|---|---|---|
+| Momentum conservation as a solver certificate | Erez 2015, SimBenchmark (Theme A) | `probe_momentum.py`, `tables/momentum_probe.md` | every arm ≤ 1e-5 drift; the step controller injects no momentum |
+| Realized stiffness vs requested k | ICF paper Fig. 18, Castro 2022 (Theme B) | `part1_stiffness_sweep.py`, `figures/stiffness_sweep.pdf` | ICF realizes k to 1e7 at 10 ms/1 ms/ε=1e-3; MuJoCo caps at ~1e3 (10 ms), 1e5 (1 ms); EC ε=1e-3 does not recover the clamp |
+| Contact parameters in MuJoCo's own formats, calibrated | Todorov 2014; MuJoCo docs (Theme B) | `tables/mujoco_stiffness_probe.md` | reference (τ, ζ) format: clamp-softened at coarse δt, no ζ = 0; direct format: exact compliance at δt ≤ 2 ms for k = 1e5, launches at ≥ 5 ms (ω δt ≲ 2), undamped ball conserves energy to 0.2 % — ball arm switched to it |
+| Measured error vs cost (not requested ε) | Hairer–Wanner; Erez 2015 short-window consistency (Themes A, C) | `part1_consistency.py`, `figures/consistency.pdf` | running |
+| Actuated stiff contact with the controller gain as the axis | CENIC Fig. 12; Drake #14694; pushing datasets (Theme E) | `actuated_press.py`, `part1_actuated.py`, `figures/actuated.pdf` | running (smoke: both backends push the box the commanded 0.28 m at K_p = 1e4, δt = 1 ms; MuJoCo's box chatters vertically at 59 mm/s RMS vs ICF 0.1 mm/s) |
+| Timeout and budget statuses per point; missing points explained | CENIC Fig. 9/10 (Theme C) | all benches | adopted earlier (`ok/timeout/budget-exhausted/contact-overflow`) |
+| Wall claims only at matched artifact-free accuracy | CLAUDE.md rule; Theme D | `artifacts.pdf` starred settings | adopted earlier |
+
+Not adopted, with reason: hydroelastic/pressure-field contact (Theme B) —
+not available in either backend on Newton; the CENIC gripper/peg wedge case
+— ICF's contact pipeline drops the 0.01 mm gap under point contact without a
+margin (the standing no-margin ruling); a Franka articulation — the gantry
+carries the same ingredients (stiff PD, light tip, μ) with none of the
+model-import variance.

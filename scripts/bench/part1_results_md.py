@@ -86,7 +86,7 @@ def penetration():
 
 
 def scaling():
-    out = ["\n## Wall time per 10 ms boundary [ms] vs parallel worlds — median of 3 runs (spread in brackets)\n"]
+    out = ["\n## Wall time per boundary [ms] (δt_max = 100 ms on the clutters) vs parallel worlds — median of 3 runs (spread in brackets)\n"]
     for scene in ("soft-clutter", "hard-clutter"):
         rs = rows(f"part1_scaling_{scene}.csv")
         if not rs:

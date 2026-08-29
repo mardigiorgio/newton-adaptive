@@ -708,7 +708,7 @@ def stiffness_sweep() -> None:
         pts.sort()
         st = dict(STYLE[arm])
         st["label"] = f"{STYLE[arm]['label']}, {lab}"
-        if arm in ("icf", "mujoco") and "10 ms" in lab:
+        if "10 ms" in lab or "0.001" in lab:  # the coarser setting of each pair is hollow
             st["mfc"] = "none"
         ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **st)
     ax.axhline(1.0, color="k", lw=0.8, ls=":")
