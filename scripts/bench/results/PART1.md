@@ -422,6 +422,16 @@ and the artifact rows). The reference carries its own error and the 20-body
 pile is chaotic, so the ~1 mm floor at the tight end is the reference's
 uncertainty, not the solvers'.
 
+_Validity (2026-08-29): the bench's restart oracle — a fixed run at the
+reference step, restarted from the reference, must reproduce it — FAILS on
+hard clutter (max deviation 8 mm after 0.1 s for both backends), so on that
+scene the measured deviation floor is the solvers' own run-to-run noise
+amplified by the pile, and only the coarse end of the hard-clutter panel
+(deviations well above ~8 mm) is a step-size measurement. The determinism
+probe (`probe_determinism.py`) and the soft-clutter/ball oracles are
+running; the hard-clutter numbers below stand only where they exceed the
+oracle's floor._
+
 * Hard clutter, fixed step: both solvers converge at about O(δt^0.65) over
   the ladder (ICF 21 mm at 10 ms → 3.0 mm at 0.5 ms; MuJoCo 8.8 → 1.3 mm),
   MuJoCo at 3–4× lower cost for the same δt.
