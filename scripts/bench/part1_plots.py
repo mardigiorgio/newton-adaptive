@@ -744,12 +744,23 @@ def consistency() -> None:
         any_data = True
         for arm in STYLE:
             pts = sorted(
-                (r["wall_s_per_sim_s"], r["dev_mean_m"] * 1e3, _knob_label(r)) for r in rows if r["arm"] == arm
+                (
+                    r["wall_s_per_sim_s"],
+                    r["dev_mean_m"] * 1e3,
+                    _knob_label(r),
+                    r.get("dt_s", "") != "" and abs(r["dt_s"] - 1e-4) < 1e-12,
+                )
+                for r in rows
+                if r["arm"] == arm
             )
             if not pts:
                 continue
-            ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
-            for x, y, lab in pts:
+            ax.plot([p[0] for p in pts if not p[3]], [p[1] for p in pts if not p[3]], ms=5, **STYLE[arm])
+            for x, y, lab, is_floor in pts:
+                if is_floor:  # the reference restarted against itself: the instrument's floor
+                    ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6)
+                    ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.7)
+                    lab = f"{lab} = reference vs itself (floor)"
                 ax.annotate(
                     lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"]
                 )
