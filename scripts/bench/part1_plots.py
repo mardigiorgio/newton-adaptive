@@ -679,7 +679,7 @@ def ball_workprecision() -> None:
                 f"{first} … {last}: all ≈ 100 % lost",
                 (x, y),
                 textcoords="offset points",
-                xytext=({"icf-adaptive": -150}.get(arm, 4), {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": 8}.get(arm, 0)),
+                xytext=({"icf-adaptive": -60}.get(arm, 4), {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": -14}.get(arm, 0)),
                 fontsize=5.5,
                 color=STYLE[arm]["color"],
             )

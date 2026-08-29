@@ -404,6 +404,17 @@ the model's m·g/k (1 = the model), the axis of Fig. 18 in the ICF paper.
   floors where fixed 1 ms does — tighter tolerance buys back stiffness only
   as far as the steps it drives the solver to.
 
+### Determinism (`tables/determinism_probe.md`)
+
+Two identical arms from the same state: the ball reproduces bit for bit on
+every arm; on clutter neither contact solver does — GPU reduction order in
+the contact solve differs run to run and the pile amplifies it, to
+millimetres within 0.3 s on soft clutter for ICF (micrometres for MuJoCo)
+and to centimetres within 0.5 s on hard clutter for both. Two training runs
+with the same seed are therefore not the same run under clutter contact on
+either backend, and any comparison against a reference trajectory has this
+noise as its floor.
+
 ### Momentum (`tables/momentum_probe.md`)
 
 Two spheres collide head-on with gravity off: every arm conserves the pair's
@@ -423,15 +434,13 @@ and the artifact rows). The reference carries its own error and the 20-body
 pile is chaotic, so the ~1 mm floor at the tight end is the reference's
 uncertainty, not the solvers'.
 
-_Validity (2026-08-29): the bench's restart oracle — a fixed run at the
-reference step, restarted from the reference, must reproduce it — FAILS on
-hard clutter (max deviation 8 mm after 0.1 s for both backends), so on that
-scene the measured deviation floor is the solvers' own run-to-run noise
-amplified by the pile, and only the coarse end of the hard-clutter panel
-(deviations well above ~8 mm) is a step-size measurement. The determinism
-probe (`probe_determinism.py`) and the soft-clutter/ball oracles are
-running; the hard-clutter numbers below stand only where they exceed the
-oracle's floor._
+_Floor: the reference restarted against itself (the δt = 0.1 ms row,
+hollow marker and dotted line) is the instrument's floor — the solvers'
+run-to-run noise amplified over the window (`tables/determinism_probe.md`).
+A deviation at or below it is noise, not step error; on hard clutter that
+floor is millimetres and only the coarse end of the panel is a step-size
+measurement. Both panels are being regenerated with the floor rows on an
+idle GPU; the numbers below are from the first run._
 
 * Hard clutter, fixed step: both solvers converge at about O(δt^0.65) over
   the ladder (ICF 21 mm at 10 ms → 3.0 mm at 0.5 ms; MuJoCo 8.8 → 1.3 mm),

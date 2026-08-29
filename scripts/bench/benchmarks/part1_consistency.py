@@ -40,7 +40,11 @@ BOUNDARY_S = 0.01
 N_PIECES = 20
 T_START = 0.2  # skip the initial free fall
 REF_DT = 1e-4
-FIXED_DTS = [1e-2, 5e-3, 2e-3, 1e-3, 5e-4]
+# The last fixed dt IS the reference step: that row is the reference restarted
+# against itself and measures the floor of the instrument (the solvers are
+# not bit-reproducible on clutter, scripts/bench/probe_determinism.py), below
+# which a deviation is noise, not step error.
+FIXED_DTS = [1e-2, 5e-3, 2e-3, 1e-3, 5e-4, 1e-4]
 ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
 
 
