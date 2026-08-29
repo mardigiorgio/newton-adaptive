@@ -232,8 +232,6 @@ step's artifacts under actuation.
 
 ## Results
 
-> **Re-measurement in progress:** every MuJoCo number below predates the
-> explicit, calibrated contact solref and is superseded by the overnight rerun.
 
 All numbers are generated from the committed CSVs into
 `tables/results_tables.md` (work-precision, fixed-step levels, penetration
@@ -245,79 +243,99 @@ contact budgets ≥ 2× measured demand).
 
 ### Contact artifacts vs cost (`figures/artifacts.pdf`; data in `tables/results_tables.md`)
 
-The claim of Part 1 in one figure. Top row: max penetration relative to the
-contact model's own impact depth v·√(m/k) — above 1 the step made the depth,
-not the model. Bottom row: mean penetration relative to the resting depth
-m·g/k.
+Top row: max penetration relative to the contact model's own impact depth
+v·√(m/k) — above 1 the step made the depth, not the model. Bottom row: mean
+penetration relative to the resting depth m·g/k. With MuJoCo's contact
+specified as the scene's k (calibrated solref), **both models converge to
+the same resting compliance**: at δt = 1 ms fixed MuJoCo and fixed ICF both
+sit at the model's 6.4 µm on hard clutter, and ICF error control does so from
+ε = 10⁻² on.
 
-* **MuJoCo is never artifact-free**, at any δt or ε, on either scene: on hard
-  clutter its max penetration is 1.7–5× the impact depth and its mean
-  penetration 50–300× the resting depth; on soft clutter 1.2–1.6× and 2.3–3×.
-  Refining δt from 10 ms to 1 ms changes neither, because MuJoCo's contact is
-  a soft constraint whose stiffness is set by a time constant (solref τ), and
-  its resting penetration under load scales with τ², not with δt. The solref
-  MuJoCo receives here is Newton's conversion of the scene's k and kd
-  (`tables/mujoco_stiffness_probe.md` checks that this conversion, and not
-  MuJoCo itself, is not what sets the floor).
-* **Fixed ICF is artifact-free only by choosing δt.** On hard clutter it needs
-  δt = 1 ms (4.2 s per simulated second for 64 scenes); at 5 and 2 ms it is
-  clean of ejections but still 1.5–5× too deep; at 10 ms it ejects 1.4 % of
-  the bodies. The 10 ms ejection is the large-step passthrough failure: a
-  body falling at 2.8 m/s moves 2.8 cm per step, more than its 2.5 cm radius,
-  so with point contact the first contact it sees is already buried past its
-  centre and the lagged spring launches it. It is absent at δt ≤ 5 ms and
-  under error control at every ε. On soft clutter every δt is clean.
-* **ICF error control is artifact-free at ε ≤ 10⁻² on hard clutter (2 s per
-  simulated second, half the cost of the cheapest clean fixed step) and at
-  every ε on soft clutter**, and its mean penetration sits at the model's
-  resting depth (ratio 1.0 for ε ≤ 10⁻²).
-* With a 5 mm collision margin (`figures/penetration_*_margin5mm.pdf`) the
-  picture shifts by the skin: ICF rests on the margin and reads zero
-  penetration by construction; reported for comparison, not used for the
-  claims above.
+* **Cheapest artifact-free setting, hard clutter:** MuJoCo fixed δt = 2 ms
+  (0.57 s per simulated second, 64 scenes), MuJoCo error control ε = 10⁻³
+  (1.9 s), ICF error control ε = 10⁻² (2.3 s), fixed ICF δt = 1 ms (4.1 s).
+  On soft clutter every setting of every arm is artifact-free.
+* **Fixed ICF at δt = 10 ms ejects 1.6 % of the bodies** — the large-step
+  passthrough failure: at 2.8 m/s a body moves 2.8 cm per step, more than its
+  2.5 cm radius, so with point contact the first contact it sees is already
+  buried past its centre and the lagged spring launches it. MuJoCo's soft
+  constraint at 10 ms is 3× too deep but does not launch. Neither happens at
+  δt ≤ 5 ms, nor under error control at any ε.
+* **Coarse steps are soft in both models, for different reasons:** MuJoCo
+  clamps its contact time constant to ≥ 2δt (50× the resting depth at 10 ms,
+  15× at 5 ms); first-order ICF under-resolves the impact (35× at 10 ms).
+  Both recover the model as δt shrinks; error control recovers it as ε
+  tightens.
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
 Wall time per simulated second vs requested accuracy, δt_max = 0.1 s;
-N = 1 rows are 3-trial medians. No configuration timed out; one
-(MuJoCo error control, ε = 10⁻⁶, N = 1024) exhausted its march budget in
-1 of 1024 worlds and is marked.
+N = 1 rows are 3-trial medians; no timeouts, no budget exhaustion.
 
-* Single scene: on hard clutter ICF error control is cheaper than MuJoCo
-  error control for every ε ≤ 10⁻³ (0.89 vs 1.02 s at 10⁻³; 13.8 vs 22.9 s at
-  10⁻⁶) and faster than real time for ε ≥ 10⁻³. On soft clutter MuJoCo
-  error control is cheaper throughout (0.05–4.4 s vs 0.11–8.6 s).
-* 1024 scenes: MuJoCo error control is 10–30× cheaper per batch on both
-  scenes (its per-step batch cost is lower); ICF error control at ε = 10⁻³
-  costs 50 s per batch-second on hard clutter, i.e. 49 ms per scene-second.
-* Mechanism (`tables/march_cost.md`): both controllers take one step per
-  boundary at loose ε and grow as ε^(-1/2); MuJoCo error control takes more
-  steps at tight ε on hard clutter (its local error on stiff contact is
-  larger) but each step is cheaper.
+* MuJoCo error control is cheaper than ICF error control at every ε on both
+  scenes: 1.5–4× for a single hard-clutter scene (equal at ε = 10⁻⁴), 5–30×
+  at 1024 scenes. Per march iteration ICF costs 2.7–6.9 ms against MuJoCo's
+  1.6–2.1 ms (three convex solves vs one soft-constraint solve per attempt),
+  and both take comparable step counts (`tables/march_cost.md`).
+* Error control reaches any requested ε at a cost growing as ε^(-1/2); the
+  fixed-step levels show what the same solver costs at 10 ms and 1 ms.
 
 ### Error control pays only when something happens (`figures/realtime_trace_n64.pdf`)
 
 Real-time rate, solver steps per boundary and cumulative wall along a 5 s
 hard-clutter drop, 64 scenes. Fixed step's rate is flat by construction;
-error control at ε = 10⁻² starts at 10 % real time during the impacts and
+error control at ε = 10⁻² starts at ~10 % real time during the impacts and
 climbs past 100 % once the pile settles, taking ~10 steps per 100 ms where
-fixed 1 ms takes 100. Over the 5 s, ε = 10⁻² costs 10.8 s of wall against
-19.8 s for fixed 1 ms — the cheapest artifact-free fixed step — and 4.0 s
-for fixed 10 ms, which is not artifact-free. ε = 10⁻³ costs the same as
-fixed 1 ms over this horizon and is still rising in rate at its end.
+fixed 1 ms takes 100. Over the 5 s, ICF error control at ε = 10⁻² costs
+about half of fixed ICF at 1 ms.
 
 ### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
 
 * Fixed ICF converges at first order once the impact is resolved (δt ≤
   0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
-  11 times in 10 s at δt ≤ 0.1 ms, the count~\cite{cenic} states for this
-  scene. MuJoCo loses 99.5 % at every δt down to 10 µs and never rebounds
-  more than once: its dissipation is in the contact model.
-* Error control on positions does not see the energy a soft impact loses:
-  both arms lose ~100 % at ε ≥ 10⁻⁴; ICF resolves the bounce (11 rebounds,
-  −52 %) only at ε = 10⁻⁵, where the 4096-substep march budget is exhausted
-  and the point is marked. A property of the position-only norm of
-  Sec. V-E in~\cite{cenic} on a soft bounce, stated as such.
+  11 times in 10 s at δt ≤ 0.1 ms, the count \cite{cenic} states for this
+  scene.
+* MuJoCo with the lightest damping it runs with (ζ = 0.05; ζ = 0 diverges)
+  **gains** energy at δt ≥ 5 ms (+500× — a fixed-step instability of the
+  soft constraint) and loses all of it at δt ≤ 1 ms at every finer step:
+  its soft-constraint contact cannot represent a conservative impact at any
+  resolution. Its error control does not catch the instability either
+  (+15–50× at ε ≥ 10⁻³): the position-only error norm does not see energy.
+* ICF error control on positions likewise does not see the energy a soft
+  impact loses: it resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where
+  the 4096-substep march budget exhausts and the point is marked.
+
+### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
+
+Median of three independent runs per point (spread as the band), fixed step
+at δt = 10 ms, error control at ε = 10⁻³, 2 s timed window; no exhaustion.
+
+* Cost per world falls with batch size until the GPU saturates. At 2¹³
+  worlds on hard clutter, per 100 ms step: MuJoCo fixed 11 µs per world,
+  MuJoCo error control 270 µs, fixed ICF 620 µs, ICF error control 1.5 ms.
+* Under point contact our ICF step costs 40–60× MuJoCo's per world at
+  ≥ 2¹⁰ worlds. Not the Newton tolerance (10⁻⁵…10⁻⁸ changes wall by < 5 %,
+  `tables/newton_tolerance_probe.md`): it is the cost of resolving stiff
+  point contact to the model's compliance with a convex Newton solve, and a
+  batch pays for its slowest world.
+* Reproducibility: ICF's run-to-run spread is < 1 % at every N; MuJoCo error
+  control's narrows with N.
+
+### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
+
+* Fixed ICF converges at first order once the impact is resolved (δt ≤
+  0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
+  11 times in 10 s at δt ≤ 0.1 ms, the count \cite{cenic} states for this
+  scene.
+* MuJoCo with the lightest damping it runs with (ζ = 0.05; ζ = 0 diverges)
+  **gains** energy at δt ≥ 5 ms (+500× — a fixed-step instability of the
+  soft constraint) and loses all of it at δt ≤ 1 ms at every finer step:
+  its soft-constraint contact cannot represent a conservative impact at any
+  resolution. Its error control does not catch the instability either
+  (+15–50× at ε ≥ 10⁻³): the position-only error norm does not see energy.
+* ICF error control on positions likewise does not see the energy a soft
+  impact loses: it resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where
+  the 4096-substep march budget exhausts and the point is marked.
 
 ### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
 

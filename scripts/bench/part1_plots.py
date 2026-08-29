@@ -204,7 +204,7 @@ def ball_energy() -> None:
             ax.plot(dts, [d / dts[-1] * ref[0] for d in dts], color="gray", ls=":", label="O(δt)")
     ax.set_xscale("log"); ax.set_yscale("log"); ax.invert_xaxis()
     ax.set_xlabel("Time Step δt (s)"); ax.set_ylabel("Change in energy (%)")
-    ax.set_title("Bouncing ball, zero dissipation — ICF converges, MuJoCo cannot", fontsize=9)
+    ax.set_title("Bouncing ball — ICF converges at first order; MuJoCo gains energy at coarse δt, loses all of it at fine δt", fontsize=8)
     ax.legend(fontsize=7.5); ax.grid(True, which="both", alpha=0.3)
     _save(fig, "ball_energy")
 
@@ -485,7 +485,7 @@ def ball_workprecision() -> None:
                         xytext=(4, {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": -22}.get(arm, 0)), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("|energy change after 10 s| (%)")
-    ax.set_title("Bouncing ball — energy error vs cost: ICF buys accuracy with resolution, MuJoCo cannot", fontsize=8)
+    ax.set_title("Bouncing ball — energy error vs cost", fontsize=9)
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
     _save(fig, "ball_workprecision")
 
