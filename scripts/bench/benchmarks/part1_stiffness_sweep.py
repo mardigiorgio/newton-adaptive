@@ -6,7 +6,7 @@ Castro et al. T-RO 2025, Fig. 18): one 65 g sphere resting on the plane,
 k from 1e3 to 1e8 N/m, each arm at fixed dt = 10 ms and 1 ms and under
 error control at eps = 1e-3. Reported as penetration / (m*g/k): 1 means the
 arm realizes the requested model at rest. MuJoCo's solref is scaled from
-the calibrated tau at 1e5 as tau ~ 1/sqrt(k); refsafe clamps tau >= 2 dt,
+the two calibrated anchors (1e5, 1e3) as tau ~ k^-0.56; refsafe clamps tau >= 2 dt,
 so its representable stiffness is capped at fixed dt (MuJoCo docs).
 
     uv run python -m scripts.bench.benchmarks.part1_stiffness_sweep
@@ -27,7 +27,7 @@ import warp as wp
 import newton
 
 from scripts.bench.four_arms import _make_icf, _make_icf_adaptive, _make_mujoco, _make_mujoco_adaptive
-from scripts.scenes.cenic_scenes import MUJOCO_TAU_K1E5
+from scripts.scenes.cenic_scenes import MUJOCO_TAU_K1E3, MUJOCO_TAU_K1E5
 
 KS = [1e3, 1e4, 1e5, 1e6, 1e7, 1e8]
 R = 0.025
@@ -48,7 +48,9 @@ def _model(k):
 def _run(backend, kind, knob, k):
     m = _model(k)
     icf = {"contact_stiffness": k, "contact_stiction_tolerance": 1e-4}
-    solref = (MUJOCO_TAU_K1E5 * math.sqrt(1e5 / k), 1.0)
+    # tau(k) through the two calibrated anchors (2.4 ms at 1e5, 31.8 ms at 1e3): tau ~ k^b with b = -0.56, not the naive -0.5
+    b = math.log(MUJOCO_TAU_K1E3 / MUJOCO_TAU_K1E5) / math.log(1e3 / 1e5)
+    solref = (MUJOCO_TAU_K1E5 * (k / 1e5) ** b, 1.0)
     if backend == "icf":
         a = _make_icf(m, int(round(BOUNDARY_S / knob)), BOUNDARY_S, icf) if kind == "fixed" else _make_icf_adaptive(m, knob, BOUNDARY_S, icf, 4096)
     else:
