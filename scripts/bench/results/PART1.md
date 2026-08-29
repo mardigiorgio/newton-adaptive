@@ -429,7 +429,18 @@ uncertainty, not the solvers'.
   1.9 s). Over the impact-dominated 2 s the controller has to take small
   steps everywhere, which is the fixed-step regime; its saving is in the
   settled phase (`figures/realtime_trace_n64.pdf`).
-* _(soft clutter: running)_
+* Soft clutter is not chaotic and the picture is clean: both fixed-step
+  solvers converge at first order (ICF 3.3 mm at 10 ms → 0.12 mm at 0.5 ms,
+  MuJoCo 2.3 → 0.08 mm; O(δt^1.1)), and the requested ε now bounds the
+  measured deviation (0.4 mm at ε = 10⁻³, 43 µm at 10⁻⁵ — errors do not
+  amplify in a settling pile). ICF error control beats fixed ICF across the
+  range, about 2× less deviation at the same cost (ε = 10⁻³: 0.39 mm at
+  0.50 s vs 0.74 mm at 0.57 s for fixed 2 ms; ε = 10⁻⁵: 43 µm at 3.1 s vs
+  0.12 mm at 1.9 s for fixed 0.5 ms). MuJoCo error control lands on its
+  fixed-step line (ε = 10⁻⁴: 0.10 mm at 0.60 s between fixed 1 ms, 0.15 mm
+  at 0.42 s, and 0.5 ms, 0.08 mm at 0.80 s) — a wash. Where error control
+  pays is therefore the solver whose per-step cost is high and whose error
+  falls fastest with the step, not the cheap one.
 
 ### Actuated push (`figures/actuated.pdf`)
 
