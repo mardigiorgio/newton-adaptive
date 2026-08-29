@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import warp as wp
 
 import newton
-from scripts.scenes.cenic_scenes import CONTACT_MARGIN, MUJOCO_TAU_K1E5
+from scripts.scenes.cenic_scenes import CLUTTER_HC_DISSIPATION, CONTACT_MARGIN, MUJOCO_TAU_K1E5
 
 BOX_HALF = 0.05
 BOX_MASS = 1.0
@@ -54,7 +54,7 @@ class ActuatedSpec:
 
     @property
     def icf(self) -> dict:
-        return {"contact_stiffness": self.k, "contact_stiction_tolerance": 1e-4}
+        return {"contact_stiffness": self.k, "contact_stiction_tolerance": 1e-4, "contact_hc_dissipation": CLUTTER_HC_DISSIPATION}
 
     @property
     def mujoco_solref(self) -> tuple[float, float]:
