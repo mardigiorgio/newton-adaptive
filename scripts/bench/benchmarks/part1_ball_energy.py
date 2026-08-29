@@ -62,10 +62,12 @@ def _run(arm_name: str, knob) -> dict:
     prev_vz = 0.0
     # Energy after 10 s: the flight energy KE + m g (z - r) is constant between
     # impacts and dips during one (the contact's stored energy is not counted),
-    # so a readout that lands mid-impact would report a loss that is not there;
-    # take the maximum over the last second (at least one full flight).
-    e_last = float("-inf")
-    t = 0.0
+    # so a readout that lands mid-impact would report a loss that is not
+    # there, and a maximum over a window would pick up an earlier, higher
+    # flight. Read it at the last apex (upward-to-downward sign change of
+    # vz, KE ~ 0 there); a ball that never leaves the ground has no apex and
+    # is read at the end.
+    e_apex = None
     # wall time per simulated second: the loop syncs once per boundary for
     # the rebound count, the same for every arm (a ~50 us floor per 10 ms)
     for _ in range(2):  # eager load + capture, untimed
@@ -82,13 +84,12 @@ def _run(arm_name: str, knob) -> dict:
         vz = float(s0.joint_qd.numpy()[2])
         if prev_vz < -0.05 and vz > 0.05:
             bounces += 1
+        if prev_vz > 0.0 and vz <= 0.0:
+            e_apex = ball_energy(model, s0)[0]
         prev_vz = vz
-        t += DT_OUTER
-        if t >= HORIZON_S - 1.0:
-            e_last = max(e_last, ball_energy(model, s0)[0])
     wp.synchronize()
     wall = time.perf_counter() - t0
-    e_end = e_last
+    e_end = e_apex if e_apex is not None else ball_energy(model, s0)[0]
     return {
         "energy_change_pct": 100.0 * (e_end - e0) / e0,
         "final_z": float(s0.body_q.numpy().reshape(-1, 7)[0, 2]),
