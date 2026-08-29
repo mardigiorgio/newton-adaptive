@@ -279,7 +279,7 @@ def ball_energy() -> None:
     ax.set_xlabel("Time Step δt (s)")
     ax.set_ylabel("Change in energy (%)")
     ax.set_title(
-        "Bouncing ball — ICF converges at first order; MuJoCo's undamped constraint conserves to < 0.5 % at δt ≤ 2 ms",
+        "Bouncing ball — ICF converges at first order; MuJoCo's undamped constraint holds energy within 0.03 % at δt ≤ 1 ms",
         fontsize=8,
     )
     ax.legend(fontsize=7.5)

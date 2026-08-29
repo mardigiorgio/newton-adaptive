@@ -168,9 +168,9 @@ $\delta t = 10$\,ms and $1$\,ms, error control at $\varepsilon_{acc} =
 \caption{Energy conservation error (percent of energy lost after 10\,s) for
 a 0.1\,kg bouncing ball with zero dissipation, $k = 10^3$\,N/m. Left: fixed
 step versus $\delta t$; right: error control versus $\varepsilon_{acc}$.
-ICF converges at first order; MuJoCo's undamped direct-format constraint
-conserves the ball's energy to $<0.5$\,\% at $\delta t \le 2$\,ms and
-converges at about $O(\delta t^{1.2})$.}
+Energy is read at the last apex. ICF converges at first order; MuJoCo's
+undamped direct-format constraint keeps the energy within 0.03\,\% at
+$\delta t \le 1$\,ms and loses 7\,\% at 10\,ms.}
 \end{figure}
 
 \begin{figure*}[t]\centering
@@ -340,32 +340,33 @@ about half of fixed ICF at 1 ms.
 
 ### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
 
-_(MuJoCo rows regenerating with the direct undamped solref — the prose
-below states the ladder probe; the bench numbers replace it when the rerun
-lands.)_
+Energy is read at the last apex of the 10 s run (the flight energy of the
+final flight; a ball that never leaves the ground is read at the end), so
+neither a mid-impact instant nor an earlier flight enters the number.
 
-* Fixed ICF converges at first order once the impact is resolved (δt ≤
-  0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
-  11 times in 10 s at δt ≤ 0.1 ms, the count~\cite{cenic} states for this
-  scene.
-* MuJoCo's undamped direct-format constraint conserves the ball's energy at
-  every fixed step it is stable at: −3 % at δt = 10 ms, +0.5 % at 2 ms,
-  −0.16 % at 1 ms, −0.01 % at 0.1 ms (the 5 ms row loses everything and is
-  reported as measured). It converges at about O(δt^1.2) over the ladder
-  (0.5 % at 2 ms → 0.002 % at 20 µs) where step-doubling ICF is
-  first-order.
+* Fixed ICF converges at first order once the impact is resolved (from
+  δt = 0.1 ms each halving of δt halves the loss: −30 %, −16 %, −6.2 %,
+  −3.2 % at 100, 50, 20, 10 µs) and rebounds 11 times in 10 s at δt ≤
+  0.1 ms, the count~\cite{cenic} states for this scene. At δt ≥ 1 ms the
+  ball comes to rest within the run.
+* MuJoCo's undamped direct-format constraint keeps the ball's energy to
+  within 0.03 % at every δt ≤ 1 ms (−0.02 % at 1 ms, −0.004 % at 0.5 ms,
+  ≤ 0.002 % below) with 10 rebounds; at coarse steps it loses 7 % (10 and
+  5 ms) and gains 0.8 % at 2 ms. On a conservative single impact the
+  implicit soft constraint is the better integrator, and the figure says
+  so.
 * Error control on positions does not see the energy a soft impact loses:
   ICF resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where the
   4096-substep march budget exhausts and the point is marked. A property of
   the position-only norm of Sec. V-E in~\cite{cenic} on a soft bounce,
   stated as such.
-* MuJoCo error control at ε ≥ 10⁻² stays at δt_max = 10 ms and conserves
-  like fixed 10 ms (−0.04 %). At ε ≤ 10⁻³ it **gains** energy, about 5 %
-  per impact (+4.7 % after the first bounce, +58 % after ten at ε = 10⁻³;
-  +26 %, +13 %, +3.9 % at 10⁻⁴, 10⁻⁵, 10⁻⁶), while fixed MuJoCo at the
-  same steps conserves: the gain is in our adaptive wrapper's step changes
-  through the undamped constraint, not in MuJoCo's step. Open defect of the
-  `SolverMuJoCoAdaptive` arm, reported as measured.
+* MuJoCo error control at ε ≥ 10⁻² stays at δt_max = 10 ms (+0.8 %, 9
+  rebounds). At ε ≤ 10⁻³ it **gains** energy, about 5 % per impact (+57 %
+  after ten bounces at ε = 10⁻³; +22 %, +13 %, +4.0 % at 10⁻⁴, 10⁻⁵,
+  10⁻⁶), while fixed MuJoCo at the same steps conserves: the gain is in our
+  adaptive wrapper's step changes through the undamped constraint, not in
+  MuJoCo's step. Open defect of the `SolverMuJoCoAdaptive` arm, reported as
+  measured.
 
 ### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
 
