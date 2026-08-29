@@ -46,7 +46,7 @@ import time
 
 import warp as wp
 
-from scripts.bench.four_arms import ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.bench.four_arms import ExhaustionTracker, IterationTracker, build_model, make_arm, scene_dt_outer
 from scripts.scenes.cenic_scenes import SCENES
 
 ACCURACIES = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
@@ -67,17 +67,21 @@ def _run(scene: str, arm_name: str, knob, n: int, horizon: float, max_substeps: 
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
+    iters = IterationTracker(arm) if not fixed else None
     wp.synchronize()
     t0 = time.perf_counter()
     for _ in range(boundaries - 2):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
+        if iters:
+            iters.tick()
     wp.synchronize()
     wall = time.perf_counter() - t0
     sim_s = (boundaries - 2) * dt_outer
     return {
         "wall_s_per_sim_s": wall / sim_s,
+        "iters_per_boundary": (iters.total() / (boundaries - 2)) if iters else kwargs.get("n_sub", ""),
         "exhausted_frac": tracker.fraction() if tracker else 0.0,
     }
 
@@ -121,6 +125,7 @@ def main() -> int:
             "trials": args.trials,
             "wall_s_per_sim_s": "",
             "wall_s_per_world_sim_s": "",
+            "iters_per_boundary": "",
             "exhausted_frac": "",
             "status": "ok",
         }
@@ -153,6 +158,7 @@ def main() -> int:
                 break
             walls.append(got["wall_s_per_sim_s"])
             exhausted.append(got["exhausted_frac"])
+            row["iters_per_boundary"] = got.get("iters_per_boundary", "")
         if walls and row["status"] == "ok":
             row["wall_s_per_sim_s"] = statistics.median(walls)
             row["wall_s_per_world_sim_s"] = row["wall_s_per_sim_s"] / args.n

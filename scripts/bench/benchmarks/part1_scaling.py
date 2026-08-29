@@ -26,7 +26,7 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.bench.four_arms import ARMS, ExhaustionTracker, build_model, make_arm, scene_dt_outer
+from scripts.bench.four_arms import ARMS, ExhaustionTracker, IterationTracker, build_model, make_arm, scene_dt_outer
 from scripts.scenes.cenic_scenes import SCENES
 
 
@@ -48,6 +48,7 @@ def _run(scene: str, arm_name: str, n: int, sim_s: float, warmup_s: float, seed:
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
+    iters = IterationTracker(arm) if not fixed else None
     wp.synchronize()
     times = []
     for _ in range(steps):
@@ -55,9 +56,12 @@ def _run(scene: str, arm_name: str, n: int, sim_s: float, warmup_s: float, seed:
         s0, s1 = arm.boundary(s0, s1, ctrl)
         if tracker:
             tracker.tick()
+        if iters:
+            iters.tick()
         wp.synchronize()
         times.append(time.perf_counter() - t0)
     return {
+        "iters_per_boundary": (iters.total() / steps) if iters else n_sub,
         "scene": scene,
         "arm": arm_name,
         "accuracy": "" if fixed else tol,

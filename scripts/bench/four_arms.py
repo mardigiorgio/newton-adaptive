@@ -273,6 +273,35 @@ def _or_int_kernel(src: wp.array(dtype=wp.int32), acc: wp.array(dtype=wp.int32))
         acc[i] = 1
 
 
+@wp.kernel
+def _add_int_kernel(src: wp.array(dtype=wp.int32), acc: wp.array(dtype=wp.int32)):
+    i = wp.tid()
+    acc[i] = acc[i] + src[i]
+
+
+class IterationTracker:
+    """Counts an error-controlled arm's inner march iterations without a
+    host sync: ICF exposes a cumulative device counter (read once at the
+    end); MuJoCo-adaptive exposes a per-boundary count, accumulated on the
+    device by ``tick()``. ``per_boundary(n)`` is the mean over n boundaries
+    -- the "mean inner steps per outer step" that throughput reports carry."""
+
+    def __init__(self, arm: Arm):
+        self._cum = getattr(arm.solver, "_march_iters", None)
+        self._per = getattr(arm.solver, "iteration_count", None) if self._cum is None else None
+        self._acc = wp.zeros(1, dtype=wp.int32, device=self._per.device) if self._per is not None else None
+        self._start = int(self._cum.numpy()[0]) if self._cum is not None else 0
+
+    def tick(self) -> None:
+        if self._per is not None:
+            wp.launch(_add_int_kernel, dim=1, inputs=[self._per, self._acc], device=self._per.device)
+
+    def total(self) -> int:
+        if self._cum is not None:
+            return int(self._cum.numpy()[0]) - self._start
+        return int(self._acc.numpy()[0]) if self._acc is not None else 0
+
+
 class ExhaustionTracker:
     """Accumulates, on the device, whether an adaptive arm ever latched a
     world as diverged / exhausted its march budget — the paper's "solver
