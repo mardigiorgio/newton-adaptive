@@ -1,40 +1,38 @@
-# March cost vs requested accuracy (probe_march_cost.py, one world, idle GPU)
-
-iters = march iterations (step-doubling attempts) per simulated second; wall per simulated second; µs per iteration; exhausted fraction.
+# March cost vs requested accuracy (probe_march_cost.py, one world, idle GPU, dt_max 0.1 s on clutter)
 
 ## hard-clutter
 
 ```
 arm                 eps iters/sim_s wall_s/sim_s  us/iter exhausted
-icf-adaptive      1e-01         100         0.24     2433      0.00
-icf-adaptive      1e-02         100         0.25     2480      0.00
-icf-adaptive      1e-03         100         0.25     2474      0.00
-icf-adaptive      1e-04         171         0.39     2255      0.00
-icf-adaptive      1e-05         342         0.65     1903      0.00
-icf-adaptive      1e-06        1027         1.62     1580      0.00
-mujoco-adaptive   1e-01         100         0.15     1510      0.00
-mujoco-adaptive   1e-02         118         0.18     1549      0.00
-mujoco-adaptive   1e-03         127         0.14     1125      0.00
-mujoco-adaptive   1e-04         239         0.29     1216      0.00
-mujoco-adaptive   1e-05        1220         1.74     1424      0.00
-mujoco-adaptive   1e-06        3812         4.97     1304      0.00
+icf-adaptive      1e-01          90         0.58     6414      0.00
+icf-adaptive      1e-02         271         1.13     4162      0.00
+icf-adaptive      1e-03         696         2.19     3150      0.00
+icf-adaptive      1e-04        1732         4.49     2590      0.00
+icf-adaptive      1e-05        4662        12.79     2743      0.00
+icf-adaptive      1e-06       14970        43.28     2891      0.00
+mujoco-adaptive   1e-01          61         0.15     2464      0.00
+mujoco-adaptive   1e-02         244         0.55     2268      0.00
+mujoco-adaptive   1e-03         876         1.72     1957      0.00
+mujoco-adaptive   1e-04        2095         3.92     1871      0.00
+mujoco-adaptive   1e-05        7016        13.55     1932      0.00
+mujoco-adaptive   1e-06       15059        26.08     1732      0.00
 ```
 
 ## soft-clutter
 
 ```
 arm                 eps iters/sim_s wall_s/sim_s  us/iter exhausted
-icf-adaptive      1e-01         100         0.18     1802      0.00
-icf-adaptive      1e-02         100         0.18     1839      0.00
-icf-adaptive      1e-03         128         0.24     1858      0.00
-icf-adaptive      1e-04         166         0.28     1658      0.00
-icf-adaptive      1e-05         359         0.51     1414      0.00
-icf-adaptive      1e-06         908         1.15     1261      0.00
-mujoco-adaptive   1e-01         100         0.11     1114      0.00
-mujoco-adaptive   1e-02         100         0.11     1115      0.00
-mujoco-adaptive   1e-03         130         0.13     1010      0.00
-mujoco-adaptive   1e-04         296         0.26      874      0.00
-mujoco-adaptive   1e-05         841         0.63      751      0.00
-mujoco-adaptive   1e-06        2509         1.79      713      0.00
+icf-adaptive      1e-01          26         0.18     6933      0.00
+icf-adaptive      1e-02         126         0.40     3143      0.00
+icf-adaptive      1e-03         360         0.82     2275      0.00
+icf-adaptive      1e-04         979         1.91     1951      0.00
+icf-adaptive      1e-05        2848         6.39     2246      0.00
+icf-adaptive      1e-06        8680        21.96     2531      0.00
+mujoco-adaptive   1e-01          40         0.08     2056      0.00
+mujoco-adaptive   1e-02         122         0.23     1916      0.00
+mujoco-adaptive   1e-03         289         0.49     1695      0.00
+mujoco-adaptive   1e-04         809         1.15     1427      0.00
+mujoco-adaptive   1e-05        2389         2.60     1088      0.00
+mujoco-adaptive   1e-06        7579         6.48      854      0.00
 ```
 
