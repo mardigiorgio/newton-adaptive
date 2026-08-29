@@ -57,7 +57,7 @@ def story_step() -> None:
     pen = [r for r in P._rows("part1_penetration_hard-clutter.csv") if r.get("status") == "ok"]
     impact = P._impact_pen("hard-clutter")
     cells = [("mujoco", "dt_s", 1e-2, "10 ms"), ("icf", "dt_s", 1e-2, "10 ms"), ("mujoco-adaptive", "accuracy", 1e-2, "ε=1e-2"), ("icf-adaptive", "accuracy", 1e-2, "ε=1e-2"),
-             ("mujoco", "dt_s", 2e-3, "2 ms"), ("icf", "dt_s", 1e-3, "1 ms")]
+             ("mujoco", "dt_s", 2e-3, "2 ms"), ("icf", "dt_s", 2e-3, "2 ms")]
     xs, hs, cs, labs, ej = [], [], [], [], []
     for i, (arm, col, val, lab) in enumerate(cells):
         r = next((r for r in pen if _is(r, arm, col, val)), None)

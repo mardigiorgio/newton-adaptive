@@ -288,8 +288,8 @@ constraint is clamped to $\tau \ge 2\delta t$ and floors at $k \approx
 recover. (b) Hard clutter, 64 scenes: maximum ground penetration over the
 model's impact depth $v\sqrt{m/k}$ at the learner's step (10\,ms), under
 error control at $\varepsilon_{acc} = 10^{-2}$, and at the cheapest
-artifact-free fixed step of each solver; fixed ICF at 10\,ms passes through
-the ground and ejects 1.6\,\% of the bodies. (c) A PD gantry pushing a
+artifact-free fixed step of each solver; at 10\,ms both fixed arms exceed
+the impact depth and MuJoCo rests 20$\times$ deeper than ICF. (c) A PD gantry pushing a
 1\,kg box from the side ($k = 10^5$\,N/m, $\mu = 0.5$, targets held at
 100\,Hz): MuJoCo's box lifts off the table by the millimetres shown and
 its explicit joint gain diverges ($\times$) at $K_p \ge 10^5$\,N/m for
@@ -364,29 +364,30 @@ contact budgets ≥ 2× measured demand).
 
 ### Contact artifacts vs cost (`figures/artifacts.pdf`; data in `tables/results_tables.md`)
 
+Scene as of b333592c: bin walls through the floor and the stated clutter
+dissipation d = 1 s/m (`tables/hard_clutter_forensics.md` records the two
+authoring faults the earlier numbers carried — a wall face coincident with
+the floor that Newton's box–box SAT turned into a wedge, and an assumed
+d = 10 s/m that let a pile push bodies through a wall at a coarse step).
+
 Top row: max penetration relative to the contact model's own impact depth
 v·√(m/k) — above 1 the step made the depth, not the model. Bottom row: mean
-penetration relative to the resting depth m·g/k. With MuJoCo's contact
-specified as the scene's k (calibrated solref), **both models converge to
-the same resting compliance**: at δt = 1 ms fixed MuJoCo and fixed ICF both
-sit at the model's 6.4 µm on hard clutter, and ICF error control does so from
-ε = 10⁻² on.
+penetration relative to the resting depth m·g/k. Hard clutter, 64 scenes:
 
-* **Cheapest artifact-free setting, hard clutter:** MuJoCo fixed δt = 2 ms
-  (0.57 s per simulated second, 64 scenes), MuJoCo error control ε = 10⁻³
-  (1.9 s), ICF error control ε = 10⁻² (2.3 s), fixed ICF δt = 1 ms (4.1 s).
-  On soft clutter every setting of every arm is artifact-free.
-* **Fixed ICF at δt = 10 ms ejects 1.6 % of the bodies** — the large-step
-  passthrough failure: at 2.8 m/s a body moves 2.8 cm per step, more than its
-  2.5 cm radius, so with point contact the first contact it sees is already
-  buried past its centre and the lagged spring launches it. MuJoCo's soft
-  constraint at 10 ms is 3× too deep but does not launch. Neither happens at
-  δt ≤ 5 ms, nor under error control at any ε.
-* **Coarse steps are soft in both models, for different reasons:** MuJoCo
-  clamps its contact time constant to ≥ 2δt (50× the resting depth at 10 ms,
-  15× at 5 ms); first-order ICF under-resolves the impact (35× at 10 ms).
-  Both recover the model as δt shrinks; error control recovers it as ε
-  tightens.
+* **No ejections at any setting of any arm.**
+* **At the learner's step (10 ms) both fixed arms exceed the impact depth**
+  (MuJoCo 6.8 mm = 3.0×, ICF 4.5 mm = 2.0×) and MuJoCo rests 20× deeper
+  (mean 336 µm vs 17 µm; the clamp τ ≥ 2δt). Error control at ε = 10⁻¹
+  is above it for both (10.1 mm MuJoCo, 2.6 mm ICF).
+* **Artifact-free from δt = 2 ms (both fixed arms) and from ε = 10⁻² (both
+  error-controlled arms).** Wall per simulated second at those cheapest
+  artifact-free settings: MuJoCo fixed 2 ms 0.57 s; MuJoCo EC ε = 10⁻²
+  0.61 s; ICF fixed 2 ms 2.37 s; ICF EC ε = 10⁻² 2.47 s.
+* **Both models converge to the same resting compliance**: at δt = 1 ms
+  6.5 µm (MuJoCo) and 6.1 µm (ICF) against the model's 6.4 µm; ICF error
+  control sits at 5.7–6.9 µm from ε = 10⁻² on, MuJoCo error control needs
+  ε = 10⁻⁴ (6.8 µm; 20 µm at 10⁻³, 143 µm at 10⁻²).
+* Soft clutter: _(rerun pending)_.
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
