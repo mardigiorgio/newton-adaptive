@@ -99,10 +99,24 @@ class _CapturedBoundary:
         return (s1, s0) if self._ends_in_other else (s0, s1)
 
 
-def _make_mujoco(model: newton.Model, n_sub: int, dt_outer: float) -> Arm:
+def _apply_solref(solver, solref) -> None:
+    """Set every geom's contact solref explicitly (scene-calibrated), replacing
+    Newton's ke/kd conversion whose damping ratio follows kd rather than the
+    requested model."""
+    if solref is None:
+        return
+    import numpy as np
+
+    arr = solver.mjw_model.geom_solref.numpy()
+    arr[...] = np.array(solref, dtype=arr.dtype)
+    solver.mjw_model.geom_solref.assign(arr)
+
+
+def _make_mujoco(model: newton.Model, n_sub: int, dt_outer: float, solref=None) -> Arm:
     solver = newton.solvers.SolverMuJoCo(
         model, separate_worlds=True, nconmax=NCONMAX, njmax=NJMAX
     )
+    _apply_solref(solver, solref)
     contacts = model.contacts()
     dt = dt_outer / n_sub
 
@@ -115,7 +129,9 @@ def _make_mujoco(model: newton.Model, n_sub: int, dt_outer: float) -> Arm:
     return Arm("mujoco", solver, _CapturedBoundary(run, n_sub % 2 == 1), lambda: n_sub, dt_outer)
 
 
-def _make_mujoco_adaptive(model: newton.Model, tol: float, dt_outer: float, max_substeps: int | None = None) -> Arm:
+def _make_mujoco_adaptive(
+    model: newton.Model, tol: float, dt_outer: float, max_substeps: int | None = None, solref=None
+) -> Arm:
     extra = {"max_substeps": int(max_substeps)} if max_substeps else {}
     solver = newton.solvers.SolverMuJoCoAdaptive(
         model,
@@ -128,6 +144,7 @@ def _make_mujoco_adaptive(model: newton.Model, tol: float, dt_outer: float, max_
         njmax=NJMAX,
         **extra,
     )
+    _apply_solref(solver, solref)
 
     def boundary(s0, s1, ctrl):
         return solver.step_dt(dt_outer, s0, s1, ctrl)
@@ -229,11 +246,12 @@ def make_arm(
     (= dt_max) and the ICF material overrides the scene declares (MuJoCo
     reads its materials from the shapes)."""
     icf = SCENES[scene].icf if scene in SCENES else None
+    solref = SCENES[scene].mujoco_solref if scene in SCENES else None
     dt_outer = scene_dt_outer(scene)
     if name == "mujoco":
-        return _make_mujoco(model, n_sub, dt_outer)
+        return _make_mujoco(model, n_sub, dt_outer, solref)
     if name == "mujoco-adaptive":
-        return _make_mujoco_adaptive(model, tol, dt_outer, max_substeps)
+        return _make_mujoco_adaptive(model, tol, dt_outer, max_substeps, solref)
     if name == "icf":
         return _make_icf(model, n_sub, dt_outer, icf)
     if name == "icf-adaptive":

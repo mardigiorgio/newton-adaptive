@@ -56,6 +56,8 @@ BALL_R = 0.05
 BALL_MASS = 0.1
 BALL_DROP = 1.0
 LATTICE_SEED = 7
+MUJOCO_TAU_K1E5 = 0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
+MUJOCO_BALL_DAMPRATIO = 0.0  # zero dissipation
 
 
 @dataclass
@@ -66,6 +68,14 @@ class SceneSpec:
     horizon_s: float = 2.0  # simulated seconds for work-precision runs
     note: str = ""
     dt_outer: float = DT_OUTER  # boundary = maximum step dt_max [s]
+    # MuJoCo contact solref (timeconst [s], dampratio): MuJoCo's contact is a
+    # soft constraint whose stiffness is set by a time constant, and Newton's
+    # ke/kd conversion hands it a damping ratio that follows kd (3.16 for
+    # kd = 0.02 k; 1.0 for kd = 0) -- not the requested model. These values
+    # are calibrated so one resting sphere penetrates the model's m*g/k
+    # (scripts/bench/results/tables/mujoco_stiffness_probe.md); MuJoCo clamps
+    # timeconst >= 2 dt, so at coarse dt the contact is softer by design.
+    mujoco_solref: tuple[float, float] | None = None
 
 
 def _finish(builder: newton.ModelBuilder) -> newton.Model:
@@ -151,6 +161,7 @@ SCENES: dict[str, SceneSpec] = {
         icf={"contact_stiffness": 1.0e3, "contact_stiction_tolerance": 1.0e-2},
         note="20 spheres in a bin, k=1e3 N/m, v_s=1 cm/s",
         dt_outer=0.1,
+        mujoco_solref=(MUJOCO_TAU_K1E5 * 10.0, 1.0),  # k = 1e3: tau scales as 1/sqrt(k)
     ),
     "hard-clutter": SceneSpec(
         "hard-clutter",
@@ -158,6 +169,7 @@ SCENES: dict[str, SceneSpec] = {
         icf={"contact_stiffness": 1.0e5, "contact_stiction_tolerance": 1.0e-4},
         note="10 spheres + 10 cubes in a bin, k=1e5 N/m, v_s=0.1 mm/s",
         dt_outer=0.1,
+        mujoco_solref=(MUJOCO_TAU_K1E5, 1.0),
     ),
     "ball": SceneSpec(
         "ball",
@@ -165,6 +177,7 @@ SCENES: dict[str, SceneSpec] = {
         icf={"contact_stiffness": 1.0e3, "contact_hc_dissipation": 0.0},
         horizon_s=10.0,
         note="0.1 kg ball, k=1e3 N/m, zero dissipation, 1 m drop",
+        mujoco_solref=(MUJOCO_TAU_K1E5 * 10.0, MUJOCO_BALL_DAMPRATIO),
     ),
 }
 
