@@ -183,40 +183,27 @@ def speed_bars() -> None:
 
 
 def ball_energy() -> None:
+    """Fig. 8: percent energy change after 10 s vs fixed time step. Error
+    control is reported in the text and in ball_workprecision (position-only
+    error control does not see the energy a soft impact loses until eps is
+    very tight)."""
     rows = [r for r in _rows("part1_ball_energy.csv") if r["status"] == "ok"]
     if not rows:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.8), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(5.4, 3.8), constrained_layout=True)
     for arm in ("icf", "mujoco"):
         pts = sorted((r["dt_s"], abs(r["energy_change_pct"])) for r in rows if r["arm"] == arm and r["dt_s"] != "")
         if pts:
-            axes[0].plot([p[0] for p in pts], [max(p[1], 1e-4) for p in pts], **STYLE[arm])
+            ax.plot([p[0] for p in pts], [max(p[1], 1e-4) for p in pts], **STYLE[arm])
     dts = sorted({r["dt_s"] for r in rows if r["dt_s"] != ""})
     if dts:
         ref = [abs(r["energy_change_pct"]) for r in rows if r["arm"] == "icf" and r["dt_s"] == dts[-1]]
         if ref:
-            axes[0].plot(dts, [d / dts[-1] * ref[0] for d in dts], color="gray", ls=":", label="O(δt)")
-    axes[0].set_xscale("log")
-    axes[0].set_yscale("log")
-    axes[0].invert_xaxis()
-    axes[0].set_xlabel("Time Step δt (s)")
-    axes[0].set_ylabel("Change in energy (%)")
-    axes[0].set_title("fixed step", fontsize=9)
-    axes[0].legend(fontsize=7.5)
-    axes[0].grid(True, which="both", alpha=0.3)
-    for arm in ("icf-adaptive", "mujoco-adaptive"):
-        pts = sorted((r["accuracy"], abs(r["energy_change_pct"])) for r in rows if r["arm"] == arm and r["accuracy"] != "")
-        if pts:
-            axes[1].plot([p[0] for p in pts], [max(p[1], 1e-4) for p in pts], **STYLE[arm])
-    axes[1].set_xscale("log")
-    axes[1].set_yscale("log")
-    axes[1].invert_xaxis()
-    axes[1].set_xlabel("Accuracy")
-    axes[1].set_ylabel("Change in energy (%)")
-    axes[1].set_title("error control", fontsize=9)
-    axes[1].legend(fontsize=7.5)
-    axes[1].grid(True, which="both", alpha=0.3)
-    fig.suptitle("Bouncing ball, zero dissipation", fontsize=9)
+            ax.plot(dts, [d / dts[-1] * ref[0] for d in dts], color="gray", ls=":", label="O(δt)")
+    ax.set_xscale("log"); ax.set_yscale("log"); ax.invert_xaxis()
+    ax.set_xlabel("Time Step δt (s)"); ax.set_ylabel("Change in energy (%)")
+    ax.set_title("Bouncing ball, zero dissipation — ICF converges, MuJoCo cannot", fontsize=9)
+    ax.legend(fontsize=7.5); ax.grid(True, which="both", alpha=0.3)
     _save(fig, "ball_energy")
 
 
