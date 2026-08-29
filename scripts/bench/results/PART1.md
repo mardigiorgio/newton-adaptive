@@ -253,13 +253,28 @@ $\varepsilon_{acc}$.}
 \begin{figure*}[t]\centering
 \includegraphics[width=\textwidth]{figures/actuated.pdf}
 \caption{Actuated stiff contact: a PD gantry with gain $K_p$ ($K_d = 2\sqrt{K_p m}$)
-pushes a 1\,kg box across the table at 300\,mm/s, $k = 10^5$\,N/m, $\mu = 0.5$.
-Left to right: fingertip penetration into the box over the quasi-static push
-depth $\mu m g / k$, box vertical velocity RMS during the push, tip--box
-relative velocity RMS in the cruise, tracking RMS; fixed step at
-$\delta t = 1$\,ms and error control at $\varepsilon_{acc} = 10^{-3}$.}
+pushes a 1\,kg box from the side at 300\,mm/s, $k = 10^5$\,N/m, $\mu = 0.5$,
+targets held at the 100\,Hz boundary. Left to right: box lift during the
+push (ICF's box never leaves its resting depth; drawn at the floor), box
+pitch rate, fingertip penetration into the box face (MuJoCo's reading at
+$K_p \le 10^3$ is the overlap with a lifted, pitched box), tip--box relative
+velocity in the cruise; fixed step at $\delta t = 1$\,ms and error control
+at $\varepsilon_{acc} = 10^{-3}$. MuJoCo is unstable at $K_p = 10^5$ for
+$\delta t \ge 5$\,ms and at $10^6$ for $\delta t \ge 2$\,ms; ICF is stable
+in every cell.}
 \label{fig:actuated}
 \end{figure*}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{figures/actuated_chatter.pdf}
+\caption{Actuated push at $K_p = 10^5$\,N/m: tip--box relative velocity in
+the cruise against cost. With targets held at the 100\,Hz boundary each
+3\,mm target step is a 300\,N kick on the 0.1\,kg fingertip; the chatter
+it excites appears as the step is refined and a 10\,ms step integrates it
+away entirely. Every point states its $\delta t$ or $\varepsilon_{acc}$.}
+\label{fig:actuated_chatter}
+\end{figure}
+
 
 ## The actuated test case (`scripts/scenes/actuated_press.py`, `part1_actuated.py`)
 
@@ -473,7 +488,45 @@ idle GPU; the numbers below are from the first run._
   pays is therefore the solver whose per-step cost is high and whose error
   falls fastest with the step, not the cheap one.
 
-### Actuated push (`figures/actuated.pdf`)
+### Actuated push (`figures/actuated.pdf`, `figures/actuated_chatter.pdf`; trace in `tables/actuated_trace.md`)
 
-_(running — the K_p sweep of the actuated case; prose from the CSV when the
-run lands.)_
+One world, k = 10⁵ N/m, μ = 0.5, 300 mm/s; targets held at the 100 Hz
+boundary as a policy's would be. Data in `part1_actuated.csv` (80 cells:
+5 gains × 2 backends × 4 fixed steps and 4 tolerances).
+
+* **Stability.** ICF is stable in all 40 cells. MuJoCo blows up in 6:
+  K_p = 10⁵ at δt = 10 and 5 ms, K_p = 10⁶ at 10, 5 and 2 ms and under
+  error control at ε = 10⁻¹ — the joint gain is explicit in MuJoCo's step
+  (√(K_p/m)·δt ≳ 2 diverges: 10⁵ needs δt ≤ 2 ms, 10⁶ δt ≤ 1 ms). Error
+  control at ε = 10⁻¹ on K_p = 10⁵ survives but throws the box 1.6 m
+  (lift 19 cm).
+* **The pushed box.** ICF slides it flat at every gain, step and tolerance:
+  lift ≤ 0 (it stays at its 25 µm resting depth, m·g/(4k) exactly), pitch
+  rate ≤ 0.02 rad/s, vertical velocity ≤ 0.2 mm/s, displacement 0.280 m as
+  commanded for K_p ≥ 10³ (0.235 m at K_p = 10², where the 100 N/m
+  controller cannot exceed friction until it lags 5 cm). MuJoCo's box rocks
+  and hops in every stable cell — lift 2–21 mm and pitch rate 0.7–3.4 rad/s
+  at K_p ≤ 10⁴, 4–9 mm at 10⁵, 10–58 mm at 10⁶, with the tip climbing onto
+  the box at K_p = 10² (δt = 5, 2 ms) — and error control does not remove
+  it (ε = 10⁻⁴: 1.7–10 mm). A 10 cm cube pushed at mid-height with μ = 0.5
+  slides flat (tipping needs the push above its top face); the hop is a
+  sliding-contact behaviour of the soft constraint (`tables/actuated_trace.md`:
+  with the push frozen neither backend moves the box).
+* **Tip penetration.** ICF ≤ 0.25 mm at every cell against a quasi-static
+  push depth of 49 µm (the maximum is the ramming impact, 0.3 m/s into a
+  1 kg box). MuJoCo ≤ 0.6 mm where its box stays near flat (K_p ≥ 10⁴,
+  δt ≤ 2 ms); at K_p ≤ 10³ the reading (up to 11 mm) is the horizontal
+  overlap of the tip with a pitched, lifted box, not a compliance.
+* **Resolved chatter under held targets.** At K_p ≥ 10⁵ each 3 mm target
+  step is a ≥ 300 N kick on the 0.1 kg tip. Both solvers resolve the
+  resulting tip–box chatter as the step shrinks — ICF 0 at 10 ms, 0.08 m/s
+  RMS at 5 ms, 0.20 at 2 ms, 0.27 at 1 ms for K_p = 10⁵ (0.36 at 10⁶);
+  MuJoCo 0.36 at 1 ms — and the 10 ms step integrates it away entirely:
+  a policy trained at 10 ms never sees the contact its own gains excite.
+  ICF error control at ε ≤ 10⁻³ sits at the 5 ms level (0.08) and resolves
+  it only at ε = 10⁻⁴ (0.26): a position norm does not see the velocity
+  chatter of a light tip.
+* **Cost.** One world, 0.06–0.5 s per simulated second in every cell — the
+  launch-latency floor; this scene does not reproduce the 2048-environment,
+  7-DoF regime in which MuJoCo error control took ~10× longer per iteration
+  than ICF error control in training, and makes no claim about it.

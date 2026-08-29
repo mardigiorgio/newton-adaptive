@@ -775,7 +775,7 @@ def actuated() -> None:
     if not rows or "box_lift_max_m" not in rows[0]:
         return
     picks = {"icf": ("dt_s", 1e-3), "mujoco": ("dt_s", 1e-3), "icf-adaptive": ("accuracy", 1e-3), "mujoco-adaptive": ("accuracy", 1e-3)}
-    metrics = [("box_lift_max_m", 1e3, "Box lift during the push, max (mm)"), ("box_pitch_rate_rms", 1.0, "Box pitch rate RMS during the push (rad/s)"),
+    metrics = [("box_lift_max_m", 1e3, "Box lift during the push, max (mm; ≤ 0 drawn at the floor)"), ("box_pitch_rate_rms", 1.0, "Box pitch rate RMS during the push (rad/s)"),
                ("pen_tip_max_m", 1e3, "Tip penetration into the box face, max (mm)"), ("rel_vx_rms_m_s", 1.0, "Tip–box relative velocity RMS in the cruise (m/s)")]
     fig, axes = plt.subplots(1, 4, figsize=(14, 3.6), constrained_layout=True)
     for ax, (key, scale, ylab) in zip(axes, metrics):
@@ -797,6 +797,29 @@ def actuated() -> None:
     _save(fig, "actuated")
 
 
+
+def actuated_chatter() -> None:
+    """Tip-box relative velocity in the cruise vs cost at K_p = 1e5: the
+    chatter a held 100 Hz target excites in a stiff PD on a light tip
+    appears as the step is refined; every point labeled."""
+    rows = [r for r in _rows("part1_actuated.csv") if r.get("unstable") in (False, "False") and abs(r["kp"] - 1e5) < 1.0 and r.get("rel_vx_rms_m_s", "") != ""]
+    if not rows:
+        return
+    fig, ax = plt.subplots(figsize=(5.4, 3.9), constrained_layout=True)
+    for arm in STYLE:
+        pts = sorted((r["wall_s_per_sim_s"], max(r["rel_vx_rms_m_s"], 1e-4), _knob_label(r)) for r in rows if r["arm"] == arm)
+        if not pts:
+            continue
+        ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
+        for x, y, lab in pts:
+            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("Tip–box relative velocity RMS in the cruise (m/s)")
+    ax.set_title("K_p = 10⁵ N/m: the held 100 Hz target kicks the 0.1 kg tip 300 N per step;\nthe chatter appears as the step is refined", fontsize=8)
+    ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
+    _save(fig, "actuated_chatter")
+
+
 if __name__ == "__main__":
     workprecision()
     speed_bars()
@@ -810,3 +833,4 @@ if __name__ == "__main__":
     stiffness_sweep()
     consistency()
     actuated()
+    actuated_chatter()
