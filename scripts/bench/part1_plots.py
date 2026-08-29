@@ -822,6 +822,27 @@ def actuated_chatter() -> None:
     _save(fig, "actuated_chatter")
 
 
+
+def actuated_scaling() -> None:
+    """Throughput in the actuated regime: wall per world per boundary and
+    inner attempts per world per boundary vs number of heterogeneous worlds."""
+    rows = [r for r in _rows("part1_actuated_scaling.csv") if r.get("unstable") in (False, "False")]
+    if not rows:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.6), constrained_layout=True)
+    for arm in STYLE:
+        pts = sorted((r["n_worlds"], r["wall_ms_per_boundary"] / r["n_worlds"] * 1e3, r["steps_per_boundary"]) for r in rows if r["arm"] == arm)
+        if not pts:
+            continue
+        axes[0].plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
+        axes[1].plot([p[0] for p in pts], [p[2] for p in pts], ms=5, **STYLE[arm])
+    for ax in axes:
+        ax.set_xscale("log", base=2); ax.set_yscale("log"); ax.set_xlabel("Worlds"); ax.grid(True, which="both", alpha=0.3)
+    axes[0].set_ylabel("Wall Time per world (µs)"); axes[1].set_ylabel("Inner steps per boundary")
+    axes[0].set_title("(a)", loc="left", fontsize=10); axes[1].set_title("(b)", loc="left", fontsize=10); axes[0].legend(fontsize=7)
+    _save(fig, "actuated_scaling")
+
+
 if __name__ == "__main__":
     workprecision()
     speed_bars()
@@ -836,3 +857,4 @@ if __name__ == "__main__":
     consistency()
     actuated()
     actuated_chatter()
+    actuated_scaling()
