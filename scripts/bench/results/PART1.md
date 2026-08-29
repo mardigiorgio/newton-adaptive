@@ -315,10 +315,14 @@ $\delta t_{\max}$ once the pile settles.}
 
 \begin{figure*}[!t]\centering
 \includegraphics[width=\textwidth]{figures/story_convergence.pdf}
-\caption{Both solvers converge. (a) Bouncing ball with zero dissipation,
-energy read at the last apex after 10\,s: ICF converges at first order;
-MuJoCo's undamped direct-format constraint keeps the energy within
-0.03\,\% at $\delta t \le 1$\,ms. (b) Soft clutter, measured error against
+\caption{Both solvers converge. (a) Bouncing ball, energy read at the last
+apex after 10\,s, with the contact model's dissipation set to zero in both
+solvers (ICF: Hunt--Crossley $d = 0$; MuJoCo: direct-format solref with the
+damping entry zero) so that any change in energy is the integrator's
+numerical dissipation: ICF's first-order scheme converges at first order;
+MuJoCo's soft constraint keeps the energy within 0.03\,\% at $\delta t
+\le 1$\,ms. In MuJoCo's default (reference) solref format the contact is
+damped by design and the test does not apply. (b) Soft clutter, measured error against
 cost: position deviation from a $\delta t = 0.1$\,ms reference of the same
 model after 0.1\,s windows restarted from the reference ($\ell_\infty$ over
 bodies, mean over 20 windows, 8 scenes); hollow markers are the reference
