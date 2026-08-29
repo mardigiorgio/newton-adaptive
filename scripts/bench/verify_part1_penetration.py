@@ -133,6 +133,9 @@ def verify_evolution(arm_name: str, knob, n: int = 8, sim_s: float = 1.2) -> Non
     s0, s1, ctrl = model.state(), model.state(), model.control()
     geom = _Geometry(model)
     mins_sphere, mins_corner, pens = [], [], []
+    # the drop is judged from the initial state, not the first boundary (0.1 s of fall)
+    bq0 = s0.body_q.numpy().reshape(-1, 7)
+    mins_sphere.append(float(bq0[geom.is_sphere][:, 2].min()))
     for _ in range(int(round(sim_s / dt_outer))):
         s0, s1 = arm.boundary(s0, s1, ctrl)
         bq = s0.body_q.numpy().reshape(-1, 7)
