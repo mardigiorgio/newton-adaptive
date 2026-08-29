@@ -243,3 +243,51 @@ implicit and its failure mode under stiff gains is refsafe contact
 softening, not explosion; the ICF arms must couple `joint_target_ke/kd`
 implicitly (CENIC Sec. V-C) for the K_p sweep to discriminate — checked
 below and stated in the caption either way.
+
+## Theme C — Error-controlled stepping and work-precision reporting
+
+**Sources.** Hairer, Nørsett & Wanner (ODEs I/II; `dopri5.f` defaults: scaled
+RMS local error, safety 0.9, ratio bounds 0.2–10, Lund-stabilized PI);
+Gustafsson/Söderlind PI and digital-filter controllers (BIT 1988; TOMS
+1991/2003; PI42/PI33/H211b constants via Ranocha et al. 2021); the Bari IVP
+test set (work-precision format after Hairer & Wanner: x = CPU time, y =
+significant correct digits vs a stored reference, one point per tolerance);
+Drake (`IntegratorBase`: ∞-norm over q, v, z with quasi-coordinate weights,
+accuracy as digits, safety 0.9, shrink floor 0.1, growth cap 5, hysteresis
+0.9–1.2; RK3 and step-doubling implicit Euler; real-time rate); CENIC
+(position-only L∞, Drake's constants verbatim, Fig. 10 = requested ε vs
+wall among error-controlled methods, no RTR-vs-time traces); Studer 2008/9
+and Acary 2012 (Moreau–Jean error estimates and adaptive attempts); Potra
+et al. 2006 (convergence vs a 2⁻²⁰ reference; second order lost at impacts);
+Zapolsky & Drumwright 2015 (kinetic-energy proxy); Riley et al. 2025 (RL
+chooses steps); Erez 2015 short-window consistency; DiffMJX (adaptive only
+for gradients); "variable time step RL" papers vary action duration, not
+integrator error.
+
+**What the standard is.** Work-precision = measured global error vs cost
+against a reference solution, one point per tolerance or step, curves per
+method on the same axes; requested tolerance vs cost is acceptable only
+under tolerance proportionality and only among error-controlled methods.
+Chaotic systems: pointwise end-time error is meaningless; use short windows
+re-anchored to the reference (Erez) or statistical/invariant outputs.
+
+**Refinements adopted from Theme C.**
+1. *Measured work-precision on the same axes for all four arms*: the
+   self-consistency bench (Theme A) gains per-window wall time, so its
+   output is error (position ∞-norm vs the backend's tiny-step reference)
+   versus wall per simulated second — fixed arms parametrised by δt,
+   error-controlled arms by ε — the Hairer–Wanner/Erez diagram. CENIC's
+   requested-ε figure stays as the comparison among error-controlled arms,
+   labelled as requested accuracy.
+2. *Controllers are the standard ones*: both adaptive arms use Drake's
+   constants (safety 0.9, shrink 0.1, growth 5, hysteresis 0.9–1.2, k_Init
+   0.1) — cite Drake and CENIC; state the position-only norm and its known
+   blind spot (impact energy), which our ball results exhibit.
+3. *RTR-vs-time and cumulative-wall traces* have no precedent in CENIC,
+   Drake, Erez or SimBenchmark (the ODE analogue is the step-size sequence
+   h(t)); presented as a per-world cost trace fixed-step arms cannot
+   produce, and said to be new.
+4. *Per-world error control on a GPU during RL training* is unprecedented
+   in the sources found (Isaac Gym, MuJoCo/MJX, Brax fixed-step; DiffMJX
+   adapts for gradients; RL-picks-the-step papers invert the relation) —
+   stated with that evidence.
