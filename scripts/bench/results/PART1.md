@@ -402,9 +402,32 @@ per-world step controller injects none.
 
 ### Self-consistency (`figures/consistency.pdf`)
 
-_(running — mean position deviation from a δt = 0.1 ms reference of the
-same model over 0.1 s windows restarted from the reference, against wall
-time, both clutters; prose from the CSVs when the run lands.)_
+Mean position deviation from a δt = 0.1 ms reference of the same model over
+0.1 s windows restarted from the reference (20 windows over the 2 s drop,
+8 scenes), against wall time per simulated second — the measured error, on
+the same axes as the cost, with every point labeled. Each arm is compared
+with its own model's reference, so the figure ranks convergence and cost,
+not fidelity to the physical model (that is `figures/stiffness_sweep.pdf`
+and the artifact rows). The reference carries its own error and the 20-body
+pile is chaotic, so the ~1 mm floor at the tight end is the reference's
+uncertainty, not the solvers'.
+
+* Hard clutter, fixed step: both solvers converge at about O(δt^0.65) over
+  the ladder (ICF 21 mm at 10 ms → 3.0 mm at 0.5 ms; MuJoCo 8.8 → 1.3 mm),
+  MuJoCo at 3–4× lower cost for the same δt.
+* ICF error control sits below fixed ICF at matched cost through the
+  middle of the range (ε = 10⁻³: 4.2 mm at 2.3 s where fixed 1 ms gives
+  7.5 mm at 1.9 s; ε = 10⁻⁴: 1.9 mm at 4.7 s vs 3.0 mm at 3.8 s for fixed
+  0.5 ms) and the requested per-step ε is not the measured deviation
+  (4× at 10⁻³, 130× at 10⁻⁵ after 0.1 s of chaotic contact). At ε = 10⁻⁵
+  the cost jumps 3.4× (16 s) for 1.3 mm, the reference floor.
+* MuJoCo error control never beats fixed MuJoCo at matched deviation on this
+  window: its ε = 10⁻¹ and 10⁻² points cost 3–9× fixed 10 ms for the same
+  5–6 mm, and ε = 10⁻⁵ (1.2 mm, 6.0 s) sits right of fixed 0.5 ms (1.3 mm,
+  1.9 s). Over the impact-dominated 2 s the controller has to take small
+  steps everywhere, which is the fixed-step regime; its saving is in the
+  settled phase (`figures/realtime_trace_n64.pdf`).
+* _(soft clutter: running)_
 
 ### Actuated push (`figures/actuated.pdf`)
 
