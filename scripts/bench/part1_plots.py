@@ -811,7 +811,13 @@ def actuated_chatter() -> None:
         if not pts:
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
+        merged = []  # coincident points (same result at several settings) share one label
         for x, y, lab in pts:
+            if merged and abs(merged[-1][1] - y) < 1e-12 and abs(merged[-1][0] - x) / x < 0.2:
+                merged[-1] = (merged[-1][0], y, merged[-1][2].split(" … ")[0] + " … " + lab)
+            else:
+                merged.append((x, y, lab))
+        for x, y, lab in merged:
             ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("Tip–box relative velocity RMS in the cruise (m/s)")
