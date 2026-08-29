@@ -194,3 +194,52 @@ Embedded IPC (arXiv:2409.16385); Tallec et al., ICML 2019; MPGOS.
 4. *Citations for the motivation*: Cheney/Lehman, Factory, DeXtreme,
    Embedded IPC, CENIC Table I; and the explicit statement of the gap the
    killer experiment fills.
+
+## Theme E — Stiff, actuated contact: test cases and metrics
+
+**Sources.** CENIC Franka-with-box (Fig. 6c, Fig. 12: steps for 10 s vs
+controller stiffness 10¹–10⁷ at ε = 10⁻²; implicit coupling flat, explicit
+must shrink δt) and dishrack Table I. TAMSI (Castro et al., RA-L 2020,
+arXiv:1909.05700): regularized friction time scale ~10⁻⁵ s forces explicit
+error control to sub-µs steps. SAP; ICF (Franka-hand grasp time-to-failure;
+belt force spikes). Drake docs and issue #14694 ("high PD gains + small
+finger masses == instability"; implicit PD via `set_controller_gains`;
+fixed-step instability above ~1/10 of the contact time scale).
+ManipulationStation defaults (time_step 2 ms; iiwa k_p = 100, k_d = 2√k_p;
+WSG k_p = 200). Acosta 2022 (passive tosses; MuJoCo "insensitive to
+stiffness"). MuJoCo docs (Euler implicit only in joint damping; `implicit` /
+`implicitfast` recommended with actuator `kv`; refsafe softening). Isaac Gym
+FrankaCabinet (arm PD 400/80, fingers 10⁶/10²) and Isaac Lab defaults;
+Factory (RSS 2022; SDF contacts, 20 position iterations, no penetration
+metric); Beltran-Hernandez 2020; NIST ATB; Yu et al. 2016 and Bauza &
+Rodriguez 2017 (pushing datasets: quasi-static ≤ 50–80 mm/s, dynamic to
+500 mm/s, μ_pusher ≈ 0.25).
+
+**What is and isn't measured in prior work.** CENIC's own stiff-actuation
+evidence is a step-count curve with unstated gains, mass, tracking and
+penetration; Factory and Isaac Lab handle artifacts by tuning knobs
+(iterations, contact offset ≥ 10·v·δt/n) without reporting them; no source
+reports penetration, chatter, energy and tracking together across δt and ε
+for an actuated contact. That is the gap the actuated Part-1 scene fills.
+
+**Design adopted (Theme E proposal).** *PD press-and-slide*: a prismatic
+gantry (x, z) carrying a 0.1 kg fingertip above a 1 kg, 10 cm box on a
+table; μ = 0.5; contact k ∈ {10⁵, 10⁷} N/m with dissipation as in the
+clutter scenes (MuJoCo solref calibrated, never converted); joint PD with
+K_d = 2√(K_p·m) and K_p ∈ {10², 10³, 10⁴, 10⁵, 10⁶} N/m (CENIC Fig. 12's
+axis); program: press to 5 mm below the box top, slide 0.3 m on a
+trapezoidal profile at 50 mm/s (quasi-static) and 300 mm/s (dynamic), stop,
+settle 1 s. Grid: fixed δt ∈ {10, 5, 2, 1} ms × ε ∈ {10⁻¹…10⁻⁴}; reference
+ICF at ε = 10⁻⁶. Metrics per world, device-side: max/mean penetration vs
+m·g/k; contact-force chatter (high-pass RMS above 2× the controller
+bandwidth, slide→stick spike count); energy injection over the settle
+window (must be ≤ 0); instability rate (NaN, |v| > 10 m/s, budget
+exhaustion); tracking RMS and box displacement error vs reference; wall
+time reported only on artifact-free cells (matched accuracy).
+
+**Caveats that must be verified in code before the sweep.** Newton's
+SolverMuJoCo integrates with `implicitfast`, so MuJoCo's PD damping is
+implicit and its failure mode under stiff gains is refsafe contact
+softening, not explosion; the ICF arms must couple `joint_target_ke/kd`
+implicitly (CENIC Sec. V-C) for the K_p sweep to discriminate — checked
+below and stated in the caption either way.
