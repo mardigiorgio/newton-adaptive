@@ -66,6 +66,7 @@ CLUTTER_HC_DISSIPATION = 1.0
 MUJOCO_TAU_K1E5 = (
     0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
 )
+MUJOCO_TAU_K1E3 = 0.0318  # same calibration at k = 1e3: a resting 65 g sphere sinks m g / k at 1 ms (1/sqrt(k) scaling read 0.73x)
 # The ball asks for zero dissipation. MuJoCo's reference solref (timeconst,
 # dampratio) cannot take dampratio = 0, but its direct format (-stiffness,
 # -damping) can: an undamped soft constraint. The stiffness is calibrated so
