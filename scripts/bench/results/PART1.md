@@ -286,6 +286,40 @@ fixed 1 ms over this horizon and is still rising in rate at its end.
   and the point is marked. A property of the position-only norm of
   Sec. V-E in~\cite{cenic} on a soft bounce, stated as such.
 
+### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
+
+Median of three independent runs per point (spread as the band), fixed step
+at δt = 10 ms, error control at ε = 10⁻³, 2 s timed window; no exhaustion;
+tables in `tables/results_tables.md`.
+
+* Cost per world falls with batch size until the GPU saturates: on hard
+  clutter at 2¹³ worlds MuJoCo fixed step costs 17 µs per world per 100 ms
+  step, MuJoCo error control 370 µs, fixed ICF 610 µs, ICF error control
+  1.5 ms; fixed ICF and ICF error control saturate from 2¹⁰ worlds.
+* Under point contact and the hyperparameters of~\cite{cenic}, our ICF
+  step costs ~40× MuJoCo's per world at ≥ 2¹⁰ worlds on hard clutter. This
+  is not the Newton tolerance: sweeping it from 10⁻⁵ to 10⁻⁸ changes wall
+  by < 5 % at 64, 1024 and 4096 worlds and penetration not at all
+  (`tables/newton_tolerance_probe.md`). It is the cost of resolving stiff
+  point contact to the model's compliance (the fidelity row of
+  `figures/artifacts.pdf`) — a hardened impact needs many Newton iterations,
+  and a batch pays for its slowest world.
+* Reproducibility: ICF's run-to-run spread is < 1 % at every N; MuJoCo error
+  control's is wide at small N and narrows with N.
+
+### Energy convergence (`figures/ball_energy.pdf`, `figures/ball_workprecision.pdf`)
+
+* Fixed ICF converges at first order once the impact is resolved (δt ≤
+  0.2 ms: each halving of δt halves the loss; 3.5 % at 10 µs) and rebounds
+  11 times in 10 s at δt ≤ 0.1 ms, the count~\cite{cenic} states for this
+  scene. MuJoCo loses 99.5 % at every δt down to 10 µs and never rebounds
+  more than once: its dissipation is in the contact model.
+* Error control on positions does not see the energy a soft impact loses:
+  both arms lose ~100 % at ε ≥ 10⁻⁴; ICF resolves the bounce (11 rebounds,
+  −52 %) only at ε = 10⁻⁵, where the 4096-substep march budget is exhausted
+  and the point is marked. A property of the position-only norm of
+  Sec. V-E in~\cite{cenic} on a soft bounce, stated as such.
+
 ### Wall vs worlds (`figures/scaling_*.pdf`)
 
 _(prose from the final CSVs — pending the rerun)_
