@@ -10,13 +10,19 @@ fixed dt in {10, 5, 2, 1} ms and eps in {1e-1 .. 1e-4} as in CENIC Table I.
 Per world, from the state only (no host sync in the loop except the
 per-boundary target update every arm shares):
 
-* penetration: box into the table (vs the resting depth m g / k) and
-  fingertip into the box face (vs the quasi-static push depth mu m g / k),
-  max and time-mean;
-* chatter: RMS of the box's vertical velocity during the push (a sliding
-  box should have none; ICF Fig. 2-3's normal-velocity artifact) and RMS of
-  the tip's velocity relative to the box during the cruise (a steady push
-  has none);
+* penetration: box into the table (vs the resting depth m g / (4 k), four
+  corner contacts) and fingertip into the box face while the tip is within
+  the face's height (vs the quasi-static push depth mu m g / k), max and
+  time-mean;
+* box lift and rocking during the push: max rise of the box centre above
+  its resting height and RMS pitch rate (a cube pushed at mid-height with
+  mu = 0.5 slides flat: tipping needs the push above the top face), RMS of
+  the box's vertical velocity (ICF Fig. 2-3's normal-velocity artifact);
+* tip over the box: fraction of push boundaries with the tip centre above
+  the box's top face (the tip climbed onto the box);
+* RMS of the tip's velocity relative to the box during the cruise (a steady
+  push has none; targets are held at the 100 Hz boundary as a policy's
+  would be, so at high gain each target step is a kick);
 * instability: non-finite state or |v| > 10 m/s at any boundary;
 * tracking: RMS fingertip error against the commanded x target during the
   push; box displacement at the end vs the commanded push.
@@ -96,9 +102,10 @@ def _run(backend, kind, knob, kp, k, speed, n):
     assert per_world_target_stride in (8, 9), per_world_target_stride
     box_ids = np.arange(n) * 3  # bodies per world: box, carriage, tip
     tip_ids = np.arange(n) * 3 + 2
-    static_box = BOX_MASS * 9.81 / k
+    static_box = BOX_MASS * 9.81 / (4 * k)
     static_tip = MU * BOX_MASS * 9.81 / k
     pen_box, pen_tip, chatter, rel, track, unstable = [], [], [], [], [], False
+    lift, pitch, over = [], [], []
     t_slide0 = 0.5 + 0.2
     t_slide1 = t_slide0 + SLIDE_LEN / speed + 0.2
     t_cruise0, t_cruise1 = t_slide0 + 0.1 + GAP / speed + 0.1, t_slide1 - 0.2 - 0.1
@@ -121,11 +128,14 @@ def _run(backend, kind, knob, kp, k, speed, n):
             break
         zb = bq[box_ids, 2]
         pen_box.append(np.maximum(0.0, BOX_HALF - zb))
-        beside = np.abs(bq[tip_ids, 2] - zb) < BOX_HALF
+        beside = np.abs(bq[tip_ids, 2] - zb) < BOX_HALF - TIP_R
         pen_tip.append(np.where(beside, np.maximum(0.0, (bq[tip_ids, 0] + TIP_R) - (bq[box_ids, 0] - BOX_HALF)), 0.0))
         if t_slide0 <= t <= t_slide1:
             chatter.append(bqd[box_ids, 2])
             track.append(bq[tip_ids, 0] - (X0 + x_t))
+            lift.append(zb - BOX_HALF)
+            pitch.append(bqd[box_ids, 4])
+            over.append(bq[tip_ids, 2] > zb + BOX_HALF)
         if t_cruise0 <= t <= t_cruise1:
             rel.append(bqd[tip_ids, 0] - bqd[box_ids, 0])
     wp.synchronize()
@@ -146,6 +156,9 @@ def _run(backend, kind, knob, kp, k, speed, n):
                 "pen_tip_mean_over_static": float(pt.mean() / static_tip),
                 "pen_tip_max_m": float(pt.max()),
                 "chatter_vz_rms_m_s": float(np.sqrt(np.mean(np.concatenate(chatter) ** 2))) if chatter else "",
+            "box_lift_max_m": float(np.concatenate(lift).max()) if lift else "",
+            "box_pitch_rate_rms": float(np.sqrt(np.mean(np.concatenate(pitch) ** 2))) if pitch else "",
+            "tip_over_box_frac": float(np.mean(np.concatenate(over))) if over else "",
                 "rel_vx_rms_m_s": float(np.sqrt(np.mean(np.concatenate(rel) ** 2))) if rel else "",
                 "track_rms_m": float(np.sqrt(np.mean(np.concatenate(track) ** 2))) if track else "",
                 "box_displacement_m": float((bq[box_ids, 0]).mean()),

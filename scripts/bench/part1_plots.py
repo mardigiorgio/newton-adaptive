@@ -767,50 +767,33 @@ def consistency() -> None:
 
 
 def actuated() -> None:
-    """Actuated stiff contact: a PD gantry pushes a box; tip penetration,
-    box chatter, tip-box relative velocity and tracking vs the controller
-    gain K_p, per arm at one fixed dt and one accuracy."""
-    rows = [r for r in _rows("part1_actuated.csv") if r.get("unstable") in (False, "False")]
-    if not rows:
+    """Actuated push: box lift, box pitch rate, max tip penetration and
+    tip-box relative velocity vs the controller gain K_p, per arm at one
+    fixed dt and one accuracy; unstable cells are drawn as crosses on the
+    top edge."""
+    rows = _rows("part1_actuated.csv")
+    if not rows or "box_lift_max_m" not in rows[0]:
         return
-    picks = {
-        "icf": ("dt_s", 1e-3),
-        "mujoco": ("dt_s", 1e-3),
-        "icf-adaptive": ("accuracy", 1e-3),
-        "mujoco-adaptive": ("accuracy", 1e-3),
-    }
-    metrics = [
-        ("pen_tip_mean_over_static", "Tip penetration / (μ m g / k)", True),
-        ("chatter_vz_rms_m_s", "Box vertical velocity RMS (m/s)", True),
-        ("rel_vx_rms_m_s", "Tip–box relative velocity RMS (m/s)", True),
-        ("track_rms_m", "Tracking error RMS (m)", True),
-    ]
+    picks = {"icf": ("dt_s", 1e-3), "mujoco": ("dt_s", 1e-3), "icf-adaptive": ("accuracy", 1e-3), "mujoco-adaptive": ("accuracy", 1e-3)}
+    metrics = [("box_lift_max_m", 1e3, "Box lift during the push, max (mm)"), ("box_pitch_rate_rms", 1.0, "Box pitch rate RMS during the push (rad/s)"),
+               ("pen_tip_max_m", 1e3, "Tip penetration into the box face, max (mm)"), ("rel_vx_rms_m_s", 1.0, "Tip–box relative velocity RMS in the cruise (m/s)")]
     fig, axes = plt.subplots(1, 4, figsize=(14, 3.6), constrained_layout=True)
-    for ax, (key, ylab, logy) in zip(axes, metrics):
+    for ax, (key, scale, ylab) in zip(axes, metrics):
+        floor = 1e-3 if scale == 1e3 else 1e-4
         for arm, (col, val) in picks.items():
-            pts = sorted(
-                (r["kp"], r[key])
-                for r in rows
-                if r["arm"] == arm and r.get(col, "") != "" and abs(r[col] - val) < 1e-12 and r.get(key, "") != ""
-            )
-            if not pts:
-                continue
-            st = dict(STYLE[arm])
-            st["label"] = (
-                f"{STYLE[arm]['label']}, {_dt_label(val).replace('δt = ', '') if col == 'dt_s' else f'ε={val:g}'}"
-            )
-            ax.plot([p[0] for p in pts], [max(p[1], 1e-9) for p in pts], ms=5, **st)
-        ax.set_xscale("log")
-        if logy:
-            ax.set_yscale("log")
-        ax.set_xlabel("PD gain K_p (N/m), K_d = 2√(K_p m)")
-        ax.set_ylabel(ylab)
-        ax.grid(True, which="both", alpha=0.3)
-    axes[0].axhline(1.0, color="k", lw=0.8, ls=":")
+            sel = [r for r in rows if r["arm"] == arm and r.get(col, "") != "" and abs(r[col] - val) < 1e-12]
+            good = sorted((r["kp"], max(r[key] * scale, floor)) for r in sel if r.get("unstable") in (False, "False") and r.get(key, "") != "")
+            bad = sorted(r["kp"] for r in sel if r.get("unstable") in (True, "True"))
+            st = dict(STYLE[arm]); st["label"] = f"{STYLE[arm]['label']}, {_dt_label(val).replace('δt = ', '') if col == 'dt_s' else f'ε={val:g}'}"
+            if good:
+                ax.plot([p[0] for p in good], [p[1] for p in good], ms=5, **st)
+            if bad:
+                ax.plot(bad, [1.0] * len(bad), ls="none", marker="x", ms=8, mew=2, color=STYLE[arm]["color"], transform=ax.get_xaxis_transform(), clip_on=False)
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("PD gain K_p (N/m), K_d = 2√(K_p m)"); ax.set_ylabel(ylab); ax.grid(True, which="both", alpha=0.3)
     axes[0].legend(fontsize=6)
-    k = rows[0]["k"]
-    v = rows[0]["slide_speed"]
-    fig.suptitle(f"PD gantry pushing a 1 kg box, k = {k:g} N/m, μ = 0.5, push at {v * 1e3:g} mm/s", fontsize=9)
+    k = rows[0]["k"]; v = rows[0]["slide_speed"]
+    fig.suptitle(f"PD gantry pushing a 1 kg box from the side, k = {k:g} N/m, μ = 0.5, {v * 1e3:g} mm/s; × = unstable (non-finite or |v| > 10 m/s)", fontsize=9)
     _save(fig, "actuated")
 
 
