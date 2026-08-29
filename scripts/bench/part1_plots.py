@@ -137,33 +137,36 @@ def workprecision() -> None:
 
 
 def speed_bars() -> None:
-    """Wall time per simulated second as bars, fixed
-    step at δt = 10 ms / 1 ms and error control at ε = 1e-1 / 1e-3 / 1e-5,
-    single scene (N=1). A missing bar is a timeout."""
+    """Wall time per simulated second as bars, single scene: fixed step at
+    dt = 10 ms / 1 ms and error control at eps = 1e-1 / 1e-3 / 1e-5, in the
+    SAME arm colors as every other figure (settings differ by lightness)."""
+    import matplotlib.colors as mcolors
+
     scenes = [sc for sc in SCENE_ORDER if _wp_rows(sc, 1)]
     if not scenes:
         return
     fig, axes = plt.subplots(len(scenes), 1, figsize=(6.4, 2.6 * len(scenes)), constrained_layout=True, squeeze=False)
-    settings = [("fixed", 1e-2, "#1f77b4", "Fixed Step, δt = 10 ms"), ("fixed", 1e-3, "#ff7f0e", "Fixed Step, δt = 1 ms"),
-                ("ec", 1e-1, "#2ca02c", "Error Control, ε = 10⁻¹"), ("ec", 1e-3, "#d62728", "Error Control, ε = 10⁻³"),
-                ("ec", 1e-5, "#9467bd", "Error Control, ε = 10⁻⁵")]
-    groups = [("icf-adaptive", "ICF\n(error control)", "ec"), ("icf", "ICF\n(fixed step)", "fixed"),
-              ("mujoco-adaptive", "MuJoCo\n(error control)", "ec"), ("mujoco", "MuJoCo\n(fixed step)", "fixed")]
+    groups = [("icf", "ICF\nfixed step", [("dt_s", 1e-2, "δt = 10 ms"), ("dt_s", 1e-3, "δt = 1 ms")]),
+              ("icf-adaptive", "ICF\nerror control", [("accuracy", 1e-1, "ε = 10⁻¹"), ("accuracy", 1e-3, "ε = 10⁻³"), ("accuracy", 1e-5, "ε = 10⁻⁵")]),
+              ("mujoco", "MuJoCo\nfixed step", [("dt_s", 1e-2, "δt = 10 ms"), ("dt_s", 1e-3, "δt = 1 ms")]),
+              ("mujoco-adaptive", "MuJoCo\nerror control", [("accuracy", 1e-1, "ε = 10⁻¹"), ("accuracy", 1e-3, "ε = 10⁻³"), ("accuracy", 1e-5, "ε = 10⁻⁵")])]
     for ax, scene in zip(axes[:, 0], scenes):
         rows = _wp_rows(scene, 1)
         x = 0.0
         ticks, labels = [], []
-        for arm, name, kind in groups:
+        for arm, name, settings in groups:
+            base = mcolors.to_rgb(STYLE[arm]["color"])
             xs0 = x
-            for skind, val, color, lab in settings:
-                if skind != kind:
-                    continue
-                r = next((r for r in rows if r["arm"] == arm and (r["accuracy"] == val if kind == "ec" else r["dt_s"] == val)), None)
+            for i, (key, val, lab) in enumerate(settings):
+                shade = 1.0 - 0.28 * i  # coarser/looser setting lighter, finer/tighter darker
+                col = tuple(1 - (1 - c) * shade for c in base)
+                r = next((r for r in rows if r["arm"] == arm and r[key] == val), None)
                 if r is not None and r["status"] == "ok":
-                    ax.bar(x, r["wall_s_per_sim_s"], width=0.8, color=color, label=lab)
+                    ax.bar(x, r["wall_s_per_sim_s"], width=0.8, color=col, edgecolor=STYLE[arm]["color"], lw=0.8)
+                    ax.text(x, r["wall_s_per_sim_s"] * 1.08, lab, rotation=90, fontsize=5.5, ha="center", va="bottom", color=STYLE[arm]["color"])
                 else:
-                    ax.bar(x, 1e-3, width=0.8, color=color, alpha=0.25, hatch="//", label=lab)
-                    ax.text(x, 1.2e-3, r["status"] if r else "n/a", rotation=90, fontsize=5.5, ha="center", va="bottom", color=color)
+                    ax.bar(x, 1e-3, width=0.8, color=col, alpha=0.3, hatch="//", edgecolor=STYLE[arm]["color"])
+                    ax.text(x, 1.2e-3, f"{lab}: {r['status'] if r else 'n/a'}", rotation=90, fontsize=5.5, ha="center", va="bottom", color=STYLE[arm]["color"])
                 x += 1.0
             ticks.append((xs0 + x - 1.0) / 2.0)
             labels.append(name)
@@ -173,12 +176,11 @@ def speed_bars() -> None:
         ax.set_xticklabels(labels, fontsize=7)
         ax.set_ylabel("Wall Time (s)", fontsize=8)
         ax.axhline(1.0, color="k", lw=0.6, alpha=0.35)
+        ax.text(0.005, 1.0, "real time", fontsize=6, color="k", alpha=0.6, va="bottom", transform=ax.get_yaxis_transform())
         ax.set_title(SCENE_TITLE[scene], fontsize=9)
         ax.grid(True, axis="y", which="both", alpha=0.3)
         ax.tick_params(labelsize=7)
-    h, l = axes[0][0].get_legend_handles_labels()
-    uniq = dict(zip(l, h))
-    fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=3, fontsize=6.5, bbox_to_anchor=(0.5, 1.06), frameon=False)
+        ax.set_ylim(top=max([r["wall_s_per_sim_s"] for r in rows if r["wall_s_per_sim_s"] != ""] + [1.0]) * 6)
     _save(fig, "speed_bars")
 
 
