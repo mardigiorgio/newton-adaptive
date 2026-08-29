@@ -23,10 +23,10 @@ FIG = os.path.join(RES, "figures")
 os.makedirs(FIG, exist_ok=True)
 
 STYLE = {
-    "mujoco": dict(color="#c0392b", marker="s", ls="--", label="MuJoCo, fixed step"),
-    "mujoco-adaptive": dict(color="#e67e22", marker="^", ls="-", label="MuJoCo, error control"),
-    "icf": dict(color="#2980b9", marker="o", ls="--", label="ICF, fixed step"),
-    "icf-adaptive": dict(color="#27ae60", marker="D", ls="-", label="ICF, error control (CENIC)"),
+    "mujoco": dict(color="#c0392b", marker="s", ls="--", label="MuJoCo"),
+    "mujoco-adaptive": dict(color="#e67e22", marker="^", ls="-", label="MuJoCo EC"),
+    "icf": dict(color="#2980b9", marker="o", ls="--", label="ICF"),
+    "icf-adaptive": dict(color="#27ae60", marker="D", ls="-", label="ICF EC (CENIC)"),
 }
 SCENE_NOTE = {
     "hard-clutter": "hard clutter: 10 spheres + 10 cubes in a bin, k = 10⁵ N/m, v_s = 0.1 mm/s",
@@ -276,12 +276,8 @@ def ball_energy() -> None:
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.invert_xaxis()
-    ax.set_xlabel("Time Step δt (s)")
-    ax.set_ylabel("Change in energy (%)")
-    ax.set_title(
-        "Bouncing ball — ICF converges at first order; MuJoCo's undamped constraint holds energy within 0.03 % at δt ≤ 1 ms",
-        fontsize=8,
-    )
+    ax.set_xlabel("Time Step (s)")
+    ax.set_ylabel("Change in Energy (%)")
     ax.legend(fontsize=7.5)
     ax.grid(True, which="both", alpha=0.3)
     _save(fig, "ball_energy")
@@ -372,7 +368,7 @@ def penetration() -> None:
         n = int(rows[0]["n_worlds"])
         eject_note = "" if any_eject else "; no body left the bin in any configuration"
         margin_note = "; 5 mm collision margin" if suffix else ""
-        fig.suptitle(f"{SCENE_TITLE[scene]}, {n} worlds{margin_note}{eject_note}", fontsize=9)
+        fig.suptitle(SCENE_TITLE[scene], fontsize=9)
         _save(fig, f"penetration_{scene}{suffix}")
 
 
@@ -405,7 +401,7 @@ def scaling() -> None:
         trials = int(rows[0].get("trials", 1) or 1)
         band = f"band: spread of {trials} independent runs" if trials > 1 else "band: median → p90"
         ax.set_ylabel(f"Wall Time per {rows[0].get('dt_outer_s', 0.01) * 1e3:g} ms step (ms)")
-        ax.set_title(f"{SCENE_TITLE[scene]}  ({band})", fontsize=8.5)
+        ax.set_title(SCENE_TITLE[scene], fontsize=9)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
         _save(fig, f"scaling_{scene}")
@@ -461,7 +457,7 @@ def realtime_trace() -> None:
         for ax in axes:
             ax.grid(True, which="both", alpha=0.3)
             ax.tick_params(labelsize=7)
-        axes[0].set_title(f"Hard clutter drop, N = {n}", fontsize=9)
+        axes[0].set_title("Hard Clutter", fontsize=9)
         h, l = axes[2].get_legend_handles_labels()
         fig.legend(h, l, fontsize=6.5, ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.11), frameon=False)
         _save(fig, f"realtime_trace_n{n}")
@@ -511,7 +507,7 @@ def artifacts() -> None:
         ax.text(
             0.005,
             1.0,
-            f"impact depth of the model, v·√(m/k) = {d_imp * 1e3:.2g} mm",
+            "impact depth",
             fontsize=6.5,
             color="#c0392b",
             va="bottom",
@@ -573,16 +569,10 @@ def artifacts() -> None:
                 ("icf-adaptive", "ICF error control"),
             )
         ]
-        ax.set_title(
-            f"{SCENE_TITLE[scene]} — cheapest artifact-free setting\n"
-            + "\n".join(parts[:2])
-            + "\n"
-            + "\n".join(parts[2:]),
-            fontsize=7.5,
-        )
+        ax.set_title(SCENE_TITLE[scene], fontsize=9)
         if j == 0:
             ax.plot([], [], marker="*", ms=12, color="gray", mec="k", ls="none", label="cheapest artifact-free")
-            ax.plot([], [], marker="o", ms=10, mfc="none", mec="#c0392b", ls="none", label="ejects a body")
+            ax.plot([], [], marker="o", ms=10, mfc="none", mec="#c0392b", ls="none", label="ejection")
             ax.legend(fontsize=6.5, loc="upper right")
         # ---- bottom: fidelity at rest
         ax = axes[1][j]
@@ -590,7 +580,7 @@ def artifacts() -> None:
         ax.text(
             0.005,
             1.0,
-            f"resting depth of the model, m·g/k = {d_stat * 1e6:.2g} µm",
+            "resting depth",
             fontsize=6.5,
             color="gray",
             va="bottom",
@@ -615,7 +605,6 @@ def artifacts() -> None:
         ax.set_yscale("log")
         ax.set_xlabel(f"Wall Time (s) per simulated second, {n} scenes")
         ax.set_ylabel("mean penetration / resting depth")
-        ax.set_title("time-averaged penetration relative to the model at rest", fontsize=8)
         ax.grid(True, which="both", alpha=0.3)
     _save(fig, "artifacts")
 
@@ -644,7 +633,7 @@ def scaling_per_world() -> None:
         ax.set_yscale("log")
         ax.set_xlabel("Parallel worlds")
         ax.set_ylabel(f"Wall Time per world per {dto * 1e3:g} ms step (µs)")
-        ax.set_title(f"{SCENE_TITLE[scene]} — cost per world falls until the GPU saturates", fontsize=8.5)
+        ax.set_title(SCENE_TITLE[scene], fontsize=9)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
         _save(fig, f"scaling_per_world_{scene}")
@@ -687,7 +676,6 @@ def ball_workprecision() -> None:
     ax.set_yscale("log")
     ax.set_xlabel("Wall Time (s) per simulated second")
     ax.set_ylabel("|energy change after 10 s| (%)")
-    ax.set_title("Bouncing ball — energy error vs cost", fontsize=9)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=7)
     _save(fig, "ball_workprecision")
@@ -716,7 +704,6 @@ def stiffness_sweep() -> None:
     ax.set_yscale("log")
     ax.set_xlabel("Requested contact stiffness k (N/m)")
     ax.set_ylabel("Resting penetration / (m g / k)")
-    ax.set_title("Realized stiffness: one 65 g sphere at rest (1 = the model)", fontsize=9)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=6)
     _save(fig, "stiffness_sweep")
@@ -760,15 +747,15 @@ def consistency() -> None:
                 if is_floor:  # the reference restarted against itself: the instrument's floor
                     ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6)
                     ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.7)
-                    lab = f"{lab} = reference vs itself (floor)"
+                    lab = "floor"
                 ax.annotate(
                     lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"]
                 )
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Wall Time (s) per simulated second")
-        ax.set_ylabel("Position deviation after 0.1 s, max over bodies,\nmean over windows (mm)")
-        ax.set_title(f"{SCENE_TITLE[scene]} — measured error vs cost (reference δt = 0.1 ms, same model)", fontsize=8)
+        ax.set_ylabel("Deviation (mm)")
+        ax.set_title(SCENE_TITLE[scene], fontsize=9)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)
     if any_data:
@@ -786,8 +773,8 @@ def actuated() -> None:
     if not rows or "box_lift_max_m" not in rows[0]:
         return
     picks = {"icf": ("dt_s", 1e-3), "mujoco": ("dt_s", 1e-3), "icf-adaptive": ("accuracy", 1e-3), "mujoco-adaptive": ("accuracy", 1e-3)}
-    metrics = [("box_lift_max_m", 1e3, "Box lift during the push, max (mm; ≤ 0 drawn at the floor)"), ("box_pitch_rate_rms", 1.0, "Box pitch rate RMS during the push (rad/s)"),
-               ("pen_tip_max_m", 1e3, "Tip penetration into the box face, max (mm)"), ("rel_vx_rms_m_s", 1.0, "Tip–box relative velocity RMS in the cruise (m/s)")]
+    metrics = [("box_lift_max_m", 1e3, "Box lift (mm)"), ("box_pitch_rate_rms", 1.0, "Box pitch rate (rad/s)"),
+               ("pen_tip_max_m", 1e3, "Tip penetration (mm)"), ("rel_vx_rms_m_s", 1.0, "Tip–box relative velocity (m/s)")]
     fig, axes = plt.subplots(1, 4, figsize=(14, 3.6), constrained_layout=True)
     for ax, (key, scale, ylab) in zip(axes, metrics):
         floor = 1e-3 if scale == 1e3 else 1e-4
@@ -801,10 +788,9 @@ def actuated() -> None:
             if bad:
                 ax.plot(bad, [1.0] * len(bad), ls="none", marker="x", ms=8, mew=2, color=STYLE[arm]["color"], transform=ax.get_xaxis_transform(), clip_on=False)
         ax.set_xscale("log"); ax.set_yscale("log")
-        ax.set_xlabel("PD gain K_p (N/m), K_d = 2√(K_p m)"); ax.set_ylabel(ylab); ax.grid(True, which="both", alpha=0.3)
+        ax.set_xlabel("K_p (N/m)"); ax.set_ylabel(ylab); ax.grid(True, which="both", alpha=0.3)
     axes[0].legend(fontsize=6)
     k = rows[0]["k"]; v = rows[0]["slide_speed"]
-    fig.suptitle(f"PD gantry pushing a 1 kg box from the side, k = {k:g} N/m, μ = 0.5, {v * 1e3:g} mm/s; × = unstable (non-finite or |v| > 10 m/s)", fontsize=9)
     _save(fig, "actuated")
 
 
@@ -831,8 +817,7 @@ def actuated_chatter() -> None:
         for x, y, lab in merged:
             ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("Wall Time (s) per simulated second"); ax.set_ylabel("Tip–box relative velocity RMS in the cruise (m/s)")
-    ax.set_title("K_p = 10⁵ N/m: the held 100 Hz target kicks the 0.1 kg tip 300 N per step;\nthe chatter appears as the step is refined", fontsize=8)
+    ax.set_xlabel("Wall Time (s)"); ax.set_ylabel("Tip–box relative velocity (m/s)")
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
     _save(fig, "actuated_chatter")
 

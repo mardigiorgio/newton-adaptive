@@ -276,6 +276,59 @@ away entirely. Every point states its $\delta t$ or $\varepsilon_{acc}$.}
 \end{figure}
 
 
+
+\begin{figure*}[!t]\centering
+\includegraphics[width=\textwidth]{figures/story_step.pdf}
+\caption{At the step a learner uses, fixed stepping makes artifacts and
+error control removes them. (a) Resting penetration of one 65\,g sphere
+over the model's $mg/k$ as the requested stiffness rises: ICF realizes the
+model at $\delta t = 10$\,ms and under error control alike; MuJoCo's soft
+constraint is clamped to $\tau \ge 2\delta t$ and floors at $k \approx
+10^3$\,N/m at 10\,ms, which its position-only error control does not
+recover. (b) Hard clutter, 64 scenes: maximum ground penetration over the
+model's impact depth $v\sqrt{m/k}$ at the learner's step (10\,ms), under
+error control at $\varepsilon_{acc} = 10^{-2}$, and at the cheapest
+artifact-free fixed step of each solver; fixed ICF at 10\,ms passes through
+the ground and ejects 1.6\,\% of the bodies. (c) A PD gantry pushing a
+1\,kg box from the side ($k = 10^5$\,N/m, $\mu = 0.5$, targets held at
+100\,Hz): MuJoCo's box lifts off the table by the millimetres shown and
+its explicit joint gain diverges ($\times$) at $K_p \ge 10^5$\,N/m for
+$\delta t \ge 5$\,ms; ICF is stable in every cell and never lifts the box.
+(d) Tip--box relative velocity in the cruise at $K_p = 10^5$\,N/m: the
+chatter a held target excites appears as the step is refined and is
+integrated away entirely at 10\,ms.}
+\label{fig:story_step}
+\end{figure*}
+
+\begin{figure*}[!t]\centering
+\includegraphics[width=\textwidth]{figures/story_cost.pdf}
+\caption{Being artifact-free costs fixed stepping every step and error
+control only the impacts. (a) Hard clutter, 64 scenes: wall time per
+simulated second at the learner's coarse setting (hatched; an artifact by
+the criterion of Fig.~\ref{fig:story_step}b) and at the cheapest
+artifact-free setting of each arm (solid) -- the matched-accuracy cost.
+(b) Cumulative wall time along a 5\,s drop: fixed step pays the same at
+every step; error control pays during the impacts (shaded) and coasts at
+$\delta t_{\max}$ once the pile settles.}
+\label{fig:story_cost}
+\end{figure*}
+
+\begin{figure*}[!t]\centering
+\includegraphics[width=\textwidth]{figures/story_convergence.pdf}
+\caption{Both solvers converge. (a) Bouncing ball with zero dissipation,
+energy read at the last apex after 10\,s: ICF converges at first order;
+MuJoCo's undamped direct-format constraint keeps the energy within
+0.03\,\% at $\delta t \le 1$\,ms. (b) Soft clutter, measured error against
+cost: position deviation from a $\delta t = 0.1$\,ms reference of the same
+model after 0.1\,s windows restarted from the reference ($\ell_\infty$ over
+bodies, mean over 20 windows, 8 scenes); hollow markers are the reference
+restarted against itself, the instrument's floor. Both fixed arms converge
+at first order; ICF error control gives about half the deviation of fixed
+ICF at the same cost; MuJoCo error control lands on its own fixed-step
+line.}
+\label{fig:story_convergence}
+\end{figure*}
+
 ## The actuated test case (`scripts/scenes/actuated_press.py`, `part1_actuated.py`)
 
 The clutter cases have no actuator. The regime in which MuJoCo error control

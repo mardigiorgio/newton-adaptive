@@ -30,7 +30,7 @@ import part1_plots as P  # noqa: E402
 
 STYLE = P.STYLE
 ARMS = ("mujoco", "mujoco-adaptive", "icf", "icf-adaptive")
-SHORT = {"mujoco": "MuJoCo fixed", "mujoco-adaptive": "MuJoCo error ctrl", "icf": "ICF fixed", "icf-adaptive": "ICF error ctrl"}
+SHORT = {"mujoco": "MuJoCo", "mujoco-adaptive": "MuJoCo EC", "icf": "ICF", "icf-adaptive": "ICF EC"}
 
 
 def _is(r, arm, col, val):
@@ -38,7 +38,7 @@ def _is(r, arm, col, val):
 
 
 def story_step() -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7.4), constrained_layout=True)
     # (a) realized stiffness
     ax = axes[0, 0]
     rows = [r for r in P._rows("part1_stiffness_sweep.csv") if r.get("finite") in (True, "True")]
@@ -49,8 +49,8 @@ def story_step() -> None:
         ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **st)
     ax.axhline(1.0, color="k", lw=0.8, ls=":")
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("Requested contact stiffness k (N/m)"); ax.set_ylabel("Resting penetration / (m g / k)")
-    ax.set_title("(a) The stiffness each solver realizes: ICF the model at any step;\nMuJoCo capped by its step (τ ≥ 2δt), invisible to position error control", fontsize=9)
+    ax.set_xlabel("Requested stiffness k (N/m)"); ax.set_ylabel("Penetration / (mg/k)")
+    ax.set_title("(a)", fontsize=10, loc="left")
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
     # (b) hard clutter at the learner's step
     ax = axes[0, 1]
@@ -63,14 +63,14 @@ def story_step() -> None:
         r = next((r for r in pen if _is(r, arm, col, val)), None)
         if r is None:
             continue
-        xs.append(i); hs.append(r["pen_max_m"] / impact); cs.append(STYLE[arm]["color"]); labs.append(f"{SHORT[arm].replace(' error ctrl', chr(10) + 'error ctrl').replace(' fixed', chr(10) + 'fixed')}\n{lab}"); ej.append(r["out_of_bin_frac"])
+        xs.append(i); hs.append(r["pen_max_m"] / impact); cs.append(STYLE[arm]["color"]); labs.append(f"{SHORT[arm]}\n{lab}"); ej.append(r["out_of_bin_frac"])
     bars = ax.bar(xs, hs, color=cs, alpha=0.85)
     for b, e, h in zip(bars, ej, hs):
         ax.annotate(f"ejects {e*100:.1f} %" if e > 0 else "", (b.get_x() + b.get_width() / 2, h), ha="center", va="bottom", fontsize=7, color="k")
-    ax.axhline(1.0, color="k", lw=0.8, ls=":"); ax.text(len(xs) - 0.5, 1.05, "artifact-free below 1", ha="right", fontsize=7)
+    ax.axhline(1.0, color="k", lw=0.8, ls=":"); 
     ax.set_xticks(xs); ax.set_xticklabels(labs, fontsize=7); ax.set_yscale("log")
-    ax.set_ylabel("Max ground penetration / impact depth")
-    ax.set_title("(b) Hard clutter at the learner's step (10 ms): both fixed arms are artifacts\n(ICF passes through and ejects); error control at ε = 1e-2 is not; cheapest fixed fixes: 2 ms / 1 ms", fontsize=9)
+    ax.set_ylabel("Max penetration / impact depth")
+    ax.set_title("(b)", fontsize=10, loc="left")
     ax.grid(True, axis="y", which="both", alpha=0.3)
     # (c) actuated stability + box lift map (MuJoCo) vs ICF
     ax = axes[1, 0]
@@ -100,9 +100,9 @@ def story_step() -> None:
             elif not np.isnan(grid[i, j]):
                 ax.text(j, i, f"{grid[i, j]:.0f}" if grid[i, j] >= 1 else f"{grid[i, j]:.1f}", ha="center", va="center", fontsize=7, color="k")
     ax.set_xticks(range(len(cols))); ax.set_xticklabels([c[2] for c in cols], fontsize=7); ax.set_yticks(range(len(kps))); ax.set_yticklabels([f"{k:.0e}" for k in kps], fontsize=7)
-    ax.set_xlabel("MuJoCo fixed step  |  MuJoCo error control"); ax.set_ylabel("PD gain K_p (N/m)")
-    cb = fig.colorbar(im, ax=ax, fraction=0.04); cb.set_label("box lift during the push, log10(mm)", fontsize=7)
-    ax.set_title(f"(c) A PD gantry pushing a 1 kg box: MuJoCo's box hops (mm) and its joint gain diverges (✗)\nat the learner's steps; ICF: stable in all 40 cells, lift ≤ 0 (stays at its resting depth)", fontsize=9)
+    ax.set_xlabel("MuJoCo: δt  |  ε"); ax.set_ylabel("K_p (N/m)")
+    cb = fig.colorbar(im, ax=ax, fraction=0.04); cb.set_label("box lift, log10(mm)", fontsize=7)
+    ax.set_title("(c)", fontsize=10, loc="left")
     # (d) hidden chatter at K_p = 1e5
     ax = axes[1, 1]
     xt = list(range(len(cols)))
@@ -116,21 +116,20 @@ def story_step() -> None:
             if r.get("unstable") in (True, "True"):
                 bad.append(j); continue
             xs_.append(j); ys.append(max(r["rel_vx_rms_m_s"], 1e-4))
-        st = dict(STYLE[arm_f]); st["label"] = f"{SHORT[arm_f]} / error ctrl"; st["ls"] = "-"
+        st = dict(STYLE[arm_f]); st["label"] = SHORT[arm_f]; st["ls"] = "-"
         ax.plot(xs_, ys, ms=6, **st)
         for j in bad:
             ax.text(j, 1.5, "✗", ha="center", color=STYLE[arm_f]["color"], fontsize=12, fontweight="bold")
     ax.axvline(3.5, color="k", lw=0.6, ls=":")
     ax.set_yscale("log"); ax.set_xticks(xt); ax.set_xticklabels([c[2] for c in cols], fontsize=7)
-    ax.set_ylabel("Tip–box relative velocity RMS in the cruise (m/s)")
-    ax.set_title("(d) The chatter a held 100 Hz target excites at K_p = 1e5 (300 N kicks on a 0.1 kg tip):\nresolved as the step shrinks, integrated away entirely at 10 ms — a policy never sees it", fontsize=9)
+    ax.set_ylabel("Tip–box relative velocity (m/s)")
+    ax.set_title("(d)", fontsize=10, loc="left")
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7, loc="lower right")
-    fig.suptitle("At the step a learner uses, fixed stepping makes artifacts; error control removes them", fontsize=12, fontweight="bold")
     P._save(fig, "story_step")
 
 
 def story_cost() -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), constrained_layout=True)
     # (a) cost at the learner's step vs cheapest artifact-free
     ax = axes[0]
     pen = [r for r in P._rows("part1_penetration_hard-clutter.csv") if r.get("status") == "ok"]
@@ -153,8 +152,8 @@ def story_cost() -> None:
             ax.text(x0 + 1, wall(cheapest) * 1.1, f"{P._knob_label(cheapest)}\n{wall(cheapest):.2f} s", ha="center", fontsize=6.5)
         xs.append(x0 + 0.5); labels.append(SHORT[arm])
     ax.set_xticks(xs); ax.set_xticklabels(labels, fontsize=8); ax.set_yscale("log"); ax.set_ylim(top=ax.get_ylim()[1] * 3)
-    ax.set_ylabel("Wall time (s) per simulated second, 64 scenes")
-    ax.set_title("(a) Hard clutter: the learner's coarse setting (hatched, artifacts) vs the cheapest\nartifact-free setting of each arm (solid) — the matched-accuracy cost", fontsize=9)
+    ax.set_ylabel("Wall Time (s)")
+    ax.set_title("(a)", fontsize=10, loc="left")
     ax.grid(True, axis="y", which="both", alpha=0.3)
     # (b) cumulative wall along a drop
     ax = axes[1]
@@ -169,18 +168,17 @@ def story_cost() -> None:
         if not pts:
             continue
         t = [p[0] for p in pts]; cum = np.cumsum([p[1] for p in pts]) / 1e3
-        st = dict(STYLE[arm]); st["marker"] = None; st["label"] = f"{SHORT[arm]}, {P._knob_label({'dt_s': knob} if 'adaptive' not in arm else {'accuracy': knob})}"
+        st = dict(STYLE[arm]); st["marker"] = None; st["label"] = f"{SHORT[arm]} {P._knob_label({'dt_s': knob} if 'adaptive' not in arm else {'accuracy': knob})}"
         ax.plot(t, cum, lw=1.8, **st)
-    ax.axvspan(0, 1.0, color="gray", alpha=0.12); ax.text(0.5, ax.get_ylim()[1] * 0.93, "impacts", ha="center", fontsize=7)
-    ax.set_xlabel("Simulated time (s) along a 5 s hard-clutter drop"); ax.set_ylabel("Cumulative wall time (s), 64 scenes")
-    ax.set_title("(b) Where the cost goes: fixed step pays the same every step; error control\npays during the impacts and coasts at δt_max once the pile settles", fontsize=9)
+    ax.axvspan(0, 1.0, color="gray", alpha=0.12); 
+    ax.set_xlabel("Simulated time (s)"); ax.set_ylabel("Cumulative Wall Time (s)")
+    ax.set_title("(b)", fontsize=10, loc="left")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
-    fig.suptitle("Being artifact-free costs fixed stepping every step, and error control only the impacts", fontsize=12, fontweight="bold")
     P._save(fig, "story_cost")
 
 
 def story_convergence() -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), constrained_layout=True)
     ax = axes[0]
     rows = [r for r in P._rows("part1_ball_energy.csv") if r["status"] == "ok" and r["dt_s"] != ""]
     for arm in ("icf", "mujoco"):
@@ -188,8 +186,8 @@ def story_convergence() -> None:
         ax.plot([p[0] for p in pts], [p[1] for p in pts], ms=5, **STYLE[arm])
     d = np.array([2e-4, 1e-5]); ax.plot(d, 100 * d / 1e-4 * 0.3, color="gray", ls=":", label="O(δt)")
     ax.invert_xaxis(); ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("Time step δt (s)"); ax.set_ylabel("|Change in energy after 10 s| (%)")
-    ax.set_title("(a) Bouncing ball, zero dissipation: ICF converges at first order;\nMuJoCo's undamped soft constraint holds the energy within 0.03 % at δt ≤ 1 ms", fontsize=9)
+    ax.set_xlabel("Time Step (s)"); ax.set_ylabel("Change in Energy (%)")
+    ax.set_title("(a)", fontsize=10, loc="left")
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
     ax = axes[1]
     rows = [r for r in P._rows("part1_consistency_soft-clutter.csv") if r.get("wall_s_per_sim_s", "") != ""]
@@ -200,13 +198,12 @@ def story_convergence() -> None:
         ax.plot([p[0] for p in pts if not p[3]], [p[1] for p in pts if not p[3]], ms=5, **STYLE[arm])
         for x, y, lab, fl in pts:
             if fl:
-                ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6); ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.6); lab += " (floor)"
+                ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6); ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.6); lab = "floor"
             ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("Wall time (s) per simulated second"); ax.set_ylabel("Deviation after 0.1 s vs a 0.1 ms reference (mm)")
-    ax.set_title("(b) Soft clutter, measured error vs cost: first order for both; ICF error control\n~2× less deviation than fixed ICF at the same cost; hollow = the reference vs itself", fontsize=9)
+    ax.set_xlabel("Wall Time (s)"); ax.set_ylabel("Deviation (mm)")
+    ax.set_title("(b)", fontsize=10, loc="left")
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=7)
-    fig.suptitle("Both solvers converge; ICF realizes the model at any step, MuJoCo's constraint conserves an impact", fontsize=12, fontweight="bold")
     P._save(fig, "story_convergence")
 
 
