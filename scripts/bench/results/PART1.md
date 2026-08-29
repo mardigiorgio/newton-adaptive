@@ -88,6 +88,10 @@ specified in~\cite{cenic}; the values above are this work's definition.
   does to ICF's law, `distance − margin`) is reported for the penetration
   and ejection metrics so the two can be compared.
 
+## Every constant and its source
+
+`tables/part1_hyperparameters.md` lists every hyperparameter of every arm, bench and scene with its source (paper / MuJoCo default / icf_warp default / ours / assumed) and the known asymmetries between the two solvers.
+
 ## Contact budgets (validity precondition)
 
 A contact the collision pipeline generates but the solver cannot scan is
