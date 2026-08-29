@@ -207,6 +207,16 @@ spread.}
 \end{figure}
 ```
 
+## Open: the actuated test case
+
+The clutter cases have no actuator. The regime in which MuJoCo error control
+took ~10× longer per iteration than ICF error control in training — a stiff
+PD-driven arm on objects — is the "Franka with box" case of~\cite{cenic}
+(high-gain controller → short time scales), which Part 1 does not yet
+reproduce. That case, built on Newton with a PD-driven arm pushing a box, is
+the figure that would show MuJoCo error control's step count and MuJoCo fixed
+step's artifacts under actuation.
+
 ## Results
 
 All numbers are generated from the committed CSVs into
@@ -227,13 +237,20 @@ m·g/k.
 * **MuJoCo is never artifact-free**, at any δt or ε, on either scene: on hard
   clutter its max penetration is 1.7–5× the impact depth and its mean
   penetration 50–300× the resting depth; on soft clutter 1.2–1.6× and 2.3–3×.
-  Refining δt from 10 ms to 1 ms changes neither. Its compliance is in the
-  model, not the step.
+  Refining δt from 10 ms to 1 ms changes neither, because MuJoCo's contact is
+  a soft constraint whose stiffness is set by a time constant (solref τ), and
+  its resting penetration under load scales with τ², not with δt. The solref
+  MuJoCo receives here is Newton's conversion of the scene's k and kd
+  (`tables/mujoco_stiffness_probe.md` checks that this conversion, and not
+  MuJoCo itself, is not what sets the floor).
 * **Fixed ICF is artifact-free only by choosing δt.** On hard clutter it needs
-  δt = 1 ms (4.2 s per simulated second for 64 scenes); at 10 ms it ejects
-  1.4 % of the bodies and penetrates 12× the impact depth; at 5 and 2 ms it
-  is clean of ejections but still 1.5–5× too deep. On soft clutter every δt
-  is clean.
+  δt = 1 ms (4.2 s per simulated second for 64 scenes); at 5 and 2 ms it is
+  clean of ejections but still 1.5–5× too deep; at 10 ms it ejects 1.4 % of
+  the bodies. The 10 ms ejection is the large-step passthrough failure: a
+  body falling at 2.8 m/s moves 2.8 cm per step, more than its 2.5 cm radius,
+  so with point contact the first contact it sees is already buried past its
+  centre and the lagged spring launches it. It is absent at δt ≤ 5 ms and
+  under error control at every ε. On soft clutter every δt is clean.
 * **ICF error control is artifact-free at ε ≤ 10⁻² on hard clutter (2 s per
   simulated second, half the cost of the cheapest clean fixed step) and at
   every ε on soft clutter**, and its mean penetration sits at the model's
