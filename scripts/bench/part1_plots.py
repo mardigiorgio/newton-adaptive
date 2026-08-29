@@ -279,7 +279,7 @@ def ball_energy() -> None:
     ax.set_xlabel("Time Step δt (s)")
     ax.set_ylabel("Change in energy (%)")
     ax.set_title(
-        "Bouncing ball — ICF converges at first order; MuJoCo gains energy at coarse δt, loses all of it at fine δt",
+        "Bouncing ball — ICF converges at first order; MuJoCo's undamped constraint conserves to < 0.5 % at δt ≤ 2 ms",
         fontsize=8,
     )
     ax.legend(fontsize=7.5)
@@ -679,7 +679,7 @@ def ball_workprecision() -> None:
                 f"{first} … {last}: all ≈ 100 % lost",
                 (x, y),
                 textcoords="offset points",
-                xytext=(4, {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": -22}.get(arm, 0)),
+                xytext=({"icf-adaptive": -150}.get(arm, 4), {"mujoco": 10, "mujoco-adaptive": -12, "icf-adaptive": 8}.get(arm, 0)),
                 fontsize=5.5,
                 color=STYLE[arm]["color"],
             )

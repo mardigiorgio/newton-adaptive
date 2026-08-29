@@ -168,8 +168,9 @@ $\delta t = 10$\,ms and $1$\,ms, error control at $\varepsilon_{acc} =
 \caption{Energy conservation error (percent of energy lost after 10\,s) for
 a 0.1\,kg bouncing ball with zero dissipation, $k = 10^3$\,N/m. Left: fixed
 step versus $\delta t$; right: error control versus $\varepsilon_{acc}$.
-ICF converges at first order; MuJoCo's contact dissipates the same energy
-at every $\delta t$.}
+ICF converges at first order; MuJoCo's undamped direct-format constraint
+conserves the ball's energy to $<0.5$\,\% at $\delta t \le 2$\,ms and
+converges at about $O(\delta t^{1.2})$.}
 \end{figure}
 
 \begin{figure*}[t]\centering
@@ -350,14 +351,21 @@ lands.)_
 * MuJoCo's undamped direct-format constraint conserves the ball's energy at
   every fixed step it is stable at: −3 % at δt = 10 ms, +0.5 % at 2 ms,
   −0.16 % at 1 ms, −0.01 % at 0.1 ms (the 5 ms row loses everything and is
-  reported as measured). Its implicit velocity update is second-order on
-  this problem where step-doubling ICF is first-order — the same ordering
-  as Fig. 8 of~\cite{cenic} between its own schemes.
+  reported as measured). It converges at about O(δt^1.2) over the ladder
+  (0.5 % at 2 ms → 0.002 % at 20 µs) where step-doubling ICF is
+  first-order.
 * Error control on positions does not see the energy a soft impact loses:
   ICF resolves the bounce (11 rebounds) only at ε ≤ 10⁻⁵, where the
   4096-substep march budget exhausts and the point is marked. A property of
   the position-only norm of Sec. V-E in~\cite{cenic} on a soft bounce,
   stated as such.
+* MuJoCo error control at ε ≥ 10⁻² stays at δt_max = 10 ms and conserves
+  like fixed 10 ms (−0.04 %). At ε ≤ 10⁻³ it **gains** energy, about 5 %
+  per impact (+4.7 % after the first bounce, +58 % after ten at ε = 10⁻³;
+  +26 %, +13 %, +3.9 % at 10⁻⁴, 10⁻⁵, 10⁻⁶), while fixed MuJoCo at the
+  same steps conserves: the gain is in our adaptive wrapper's step changes
+  through the undamped constraint, not in MuJoCo's step. Open defect of the
+  `SolverMuJoCoAdaptive` arm, reported as measured.
 
 ### Wall vs worlds (`figures/scaling_per_world_*.pdf`, `figures/scaling_*.pdf`)
 
