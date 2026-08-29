@@ -19,3 +19,20 @@ NOT bit-reproducible
 ```
 
 Reading: the ball (one body) is bit-reproducible on every arm; both contact solvers are not on clutter — the order of the GPU reductions in the contact solve differs run to run, and the pile amplifies the difference to millimetres within 0.3 s on soft clutter (ICF; MuJoCo stays at micrometres there) and to centimetres within 0.5 s on hard clutter (both). Consequences: (i) a restarted-window comparison against a reference (part1_consistency.py) has a floor equal to this noise — the reference restarted against itself is now a row of that bench and is drawn as the floor; (ii) two training runs with the same seed are not the same run on either backend under clutter contact.
+
+## Restart oracle of the consistency bench (`part1_consistency.py --self-check`)
+
+A fixed run at the reference step (0.1 ms), restarted from the reference's
+own snapshots, must reproduce it over each 0.1 s window (max deviation over
+20 windows, 8 worlds):
+
+| scene | ICF | MuJoCo |
+|---|---|---|
+| ball | 0 (PASS) | 0 (PASS) |
+| soft clutter | 1.9e-4 m (FAIL) | 7.4e-7 m (PASS) |
+| hard clutter | 8.3e-3 m (FAIL) | 8.8e-3 m (FAIL) |
+
+The ball reproduces exactly on both backends, so the restart wiring is
+right; the failures are the solvers' own run-to-run noise measured above,
+amplified over the window. The consistency bench now carries the reference
+step as a fixed row (the reference vs itself) and draws it as the floor.

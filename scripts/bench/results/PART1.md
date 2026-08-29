@@ -413,7 +413,10 @@ millimetres within 0.3 s on soft clutter for ICF (micrometres for MuJoCo)
 and to centimetres within 0.5 s on hard clutter for both. Two training runs
 with the same seed are therefore not the same run under clutter contact on
 either backend, and any comparison against a reference trajectory has this
-noise as its floor.
+noise as its floor: the consistency bench's restart oracle passes exactly on
+the ball for both backends and on soft clutter for MuJoCo (0.7 µm), and
+fails by the solvers' own noise on soft clutter for ICF (0.19 mm) and on
+hard clutter for both (8–9 mm).
 
 ### Momentum (`tables/momentum_probe.md`)
 
