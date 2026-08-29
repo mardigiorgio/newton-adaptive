@@ -56,6 +56,13 @@ BALL_R = 0.05
 BALL_MASS = 0.1
 BALL_DROP = 1.0
 LATTICE_SEED = 7
+# ASSUMED: the paper states no dissipation for the clutters. The Hunt & Crossley
+# factor (1 - d v_n)_+ removes the contact force once bodies separate faster
+# than 1/d; with icf_warp's default d = 10 s/m that is 0.1 m/s, and at a
+# coarse fixed step the lagged force then cannot expel a body a pile has
+# driven into a wall faster than the pile pushes it (through-wall passes at
+# 10 ms: 1.6 % at d = 10, 0 at d = 1 and 0; tables/hard_clutter_forensics.md).
+CLUTTER_HC_DISSIPATION = 1.0
 MUJOCO_TAU_K1E5 = (
     0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
 )
@@ -90,6 +97,12 @@ def _finish(builder: newton.ModelBuilder) -> newton.Model:
 
 
 def _add_bin(builder: newton.ModelBuilder, cfg: newton.ModelBuilder.ShapeConfig) -> None:
+    # Walls span z in [-h, h]: the rim is at h and the bottom face lies far
+    # below the ground plane. A wall whose bottom face coincides with the
+    # floor is degenerate for box-box SAT: a rotated cube driven into the
+    # wall projects a larger overlap on the wall normal than on z, the
+    # bottom face becomes the reference face, and the cube is wedged
+    # between it and the floor (sinks into the ground, launches on release).
     hw, t, h = BIN_HALF, BIN_WALL_T, BIN_WALL_H
     for px, py, hx, hy in [
         (-(hw + t), 0.0, t, hw + t),
@@ -98,7 +111,7 @@ def _add_bin(builder: newton.ModelBuilder, cfg: newton.ModelBuilder.ShapeConfig)
         (0.0, hw + t, hw + t, t),
     ]:
         builder.add_shape_box(
-            body=-1, xform=wp.transform(p=wp.vec3(px, py, h), q=wp.quat_identity()), hx=hx, hy=hy, hz=h, cfg=cfg
+            body=-1, xform=wp.transform(p=wp.vec3(px, py, 0.0), q=wp.quat_identity()), hx=hx, hy=hy, hz=h, cfg=cfg
         )
 
 
@@ -166,7 +179,7 @@ SCENES: dict[str, SceneSpec] = {
     "soft-clutter": SceneSpec(
         "soft-clutter",
         lambda n: build_clutter(n, hard=False),
-        icf={"contact_stiffness": 1.0e3, "contact_stiction_tolerance": 1.0e-2},
+        icf={"contact_stiffness": 1.0e3, "contact_stiction_tolerance": 1.0e-2, "contact_hc_dissipation": CLUTTER_HC_DISSIPATION},
         note="20 spheres in a bin, k=1e3 N/m, v_s=1 cm/s",
         dt_outer=0.1,
         mujoco_solref=(MUJOCO_TAU_K1E5 * 10.0, 1.0),  # k = 1e3: tau scales as 1/sqrt(k)
@@ -174,7 +187,7 @@ SCENES: dict[str, SceneSpec] = {
     "hard-clutter": SceneSpec(
         "hard-clutter",
         lambda n: build_clutter(n, hard=True),
-        icf={"contact_stiffness": 1.0e5, "contact_stiction_tolerance": 1.0e-4},
+        icf={"contact_stiffness": 1.0e5, "contact_stiction_tolerance": 1.0e-4, "contact_hc_dissipation": CLUTTER_HC_DISSIPATION},
         note="10 spheres + 10 cubes in a bin, k=1e5 N/m, v_s=0.1 mm/s",
         dt_outer=0.1,
         mujoco_solref=(MUJOCO_TAU_K1E5, 1.0),
