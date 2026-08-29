@@ -116,8 +116,17 @@ def main() -> int:
     p.add_argument("--n", type=int, default=8)
     p.add_argument("--out", type=str, default=None)
     p.add_argument("--single", nargs=3, metavar=("BACKEND", "KIND", "KNOB"), default=None)
+    p.add_argument("--self-check", action="store_true", help="oracle: a fixed run at the reference step restarted from the reference must reproduce it (deviation <= 1e-6 m)")
     args = p.parse_args()
     out = args.out or f"scripts/bench/results/part1_consistency_{args.scene}.csv"
+    if args.self_check:
+        ok = True
+        for backend in ("icf", "mujoco"):
+            r = _run(args.scene, backend, "fixed", REF_DT, args.n)
+            good = r["dev_max_m"] <= 1e-6 and r["pieces"] == N_PIECES
+            ok &= good
+            print(f"self-check {backend}: dev_max {r['dev_max_m']:.2e} m pieces {r['pieces']} -> {'PASS' if good else 'FAIL'}", flush=True)
+        return 0 if ok else 1
     if args.single is not None:
         backend, kind, knob = args.single
         print("ROW " + json.dumps(_run(args.scene, backend, kind, float(knob), args.n)), flush=True)

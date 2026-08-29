@@ -723,9 +723,11 @@ def stiffness_sweep() -> None:
 
 
 def consistency() -> None:
-    """Measured error vs cost: mean deviation from a dt = 0.1 ms reference over
+    """Measured error vs cost: deviation from a dt = 0.1 ms reference after
     0.1 s windows restarted from the reference (Erez 2015's short-window
-    self-consistency), one panel per scene, every point labeled."""
+    self-consistency) -- max over bodies (the L-inf norm of the error
+    controller) averaged over windows -- one panel per scene, every point
+    labeled."""
     fig, axes = plt.subplots(
         1, len(SCENE_ORDER), figsize=(5.4 * len(SCENE_ORDER), 3.9), constrained_layout=True, squeeze=False
     )
@@ -754,7 +756,7 @@ def consistency() -> None:
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Wall Time (s) per simulated second")
-        ax.set_ylabel("Mean position deviation after 0.1 s (mm)")
+        ax.set_ylabel("Position deviation after 0.1 s, max over bodies,\nmean over windows (mm)")
         ax.set_title(f"{SCENE_TITLE[scene]} — measured error vs cost (reference δt = 0.1 ms, same model)", fontsize=8)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7)

@@ -240,10 +240,11 @@ does not recover the clamp.}
 
 \begin{figure*}[t]\centering
 \includegraphics[width=\textwidth]{figures/consistency.pdf}
-\caption{Measured error versus cost on the clutter scenes: mean position
-deviation from a $\delta t = 0.1$\,ms reference of the same model over
-0.1\,s windows restarted from the reference, against wall time per simulated
-second (8 scenes). Every point states its $\delta t$ or
+\caption{Measured error versus cost on the clutter scenes: position
+deviation from a $\delta t = 0.1$\,ms reference of the same model after
+0.1\,s windows restarted from the reference ($\ell_\infty$ over bodies,
+averaged over 20 windows), against wall time per simulated second (8
+scenes). Every point states its $\delta t$ or
 $\varepsilon_{acc}$.}
 \label{fig:consistency}
 \end{figure*}
@@ -402,9 +403,10 @@ per-world step controller injects none.
 
 ### Self-consistency (`figures/consistency.pdf`)
 
-Mean position deviation from a δt = 0.1 ms reference of the same model over
-0.1 s windows restarted from the reference (20 windows over the 2 s drop,
-8 scenes), against wall time per simulated second — the measured error, on
+Position deviation from a δt = 0.1 ms reference of the same model after
+0.1 s windows restarted from the reference — the ℓ∞ over bodies the error
+controller itself uses, averaged over 20 windows of the 2 s drop, 8 scenes
+— against wall time per simulated second — the measured error, on
 the same axes as the cost, with every point labeled. Each arm is compared
 with its own model's reference, so the figure ranks convergence and cost,
 not fidelity to the physical model (that is `figures/stiffness_sweep.pdf`
