@@ -444,49 +444,41 @@ per-world step controller injects none.
 Position deviation from a δt = 0.1 ms reference of the same model after
 0.1 s windows restarted from the reference — the ℓ∞ over bodies the error
 controller itself uses, averaged over 20 windows of the 2 s drop, 8 scenes
-— against wall time per simulated second — the measured error, on
-the same axes as the cost, with every point labeled. Each arm is compared
-with its own model's reference, so the figure ranks convergence and cost,
-not fidelity to the physical model (that is `figures/stiffness_sweep.pdf`
-and the artifact rows). The reference carries its own error and the 20-body
-pile is chaotic, so the ~1 mm floor at the tight end is the reference's
-uncertainty, not the solvers'.
+— against wall time per simulated second, every point labeled. Each arm is
+compared with its own model's reference, so the figure ranks convergence
+and cost, not fidelity to the physical model (that is
+`figures/stiffness_sweep.pdf` and the artifact rows). The δt = 0.1 ms row
+(hollow marker, dotted line) is the reference restarted against itself:
+the instrument's floor, the solvers' run-to-run noise amplified over the
+window (`tables/determinism_probe.md`) — 11 µm (ICF) and 0.2 µm (MuJoCo)
+on soft clutter, 0.62 mm and 0.28 mm on hard clutter. A deviation within a
+few × of the floor is not a step-size measurement. Idle GPU, one run.
 
-_Floor: the reference restarted against itself (the δt = 0.1 ms row,
-hollow marker and dotted line) is the instrument's floor — the solvers'
-run-to-run noise amplified over the window (`tables/determinism_probe.md`).
-A deviation at or below it is noise, not step error; on hard clutter that
-floor is millimetres and only the coarse end of the panel is a step-size
-measurement. Both panels are being regenerated with the floor rows on an
-idle GPU; the numbers below are from the first run._
-
-* Hard clutter, fixed step: both solvers converge at about O(δt^0.65) over
-  the ladder (ICF 21 mm at 10 ms → 3.0 mm at 0.5 ms; MuJoCo 8.8 → 1.3 mm),
-  MuJoCo at 3–4× lower cost for the same δt.
-* ICF error control sits below fixed ICF at matched cost through the
-  middle of the range (ε = 10⁻³: 4.2 mm at 2.3 s where fixed 1 ms gives
-  7.5 mm at 1.9 s; ε = 10⁻⁴: 1.9 mm at 4.7 s vs 3.0 mm at 3.8 s for fixed
-  0.5 ms) and the requested per-step ε is not the measured deviation
-  (4× at 10⁻³, 130× at 10⁻⁵ after 0.1 s of chaotic contact). At ε = 10⁻⁵
-  the cost jumps 3.4× (16 s) for 1.3 mm, the reference floor.
-* MuJoCo error control never beats fixed MuJoCo at matched deviation on this
-  window: its ε = 10⁻¹ and 10⁻² points cost 3–9× fixed 10 ms for the same
-  5–6 mm, and ε = 10⁻⁵ (1.2 mm, 6.0 s) sits right of fixed 0.5 ms (1.3 mm,
-  1.9 s). Over the impact-dominated 2 s the controller has to take small
-  steps everywhere, which is the fixed-step regime; its saving is in the
-  settled phase (`figures/realtime_trace_n64.pdf`).
-* Soft clutter is not chaotic and the picture is clean: both fixed-step
-  solvers converge at first order (ICF 3.3 mm at 10 ms → 0.12 mm at 0.5 ms,
-  MuJoCo 2.3 → 0.08 mm; O(δt^1.1)), and the requested ε now bounds the
-  measured deviation (0.4 mm at ε = 10⁻³, 43 µm at 10⁻⁵ — errors do not
-  amplify in a settling pile). ICF error control beats fixed ICF across the
-  range, about 2× less deviation at the same cost (ε = 10⁻³: 0.39 mm at
-  0.50 s vs 0.74 mm at 0.57 s for fixed 2 ms; ε = 10⁻⁵: 43 µm at 3.1 s vs
-  0.12 mm at 1.9 s for fixed 0.5 ms). MuJoCo error control lands on its
-  fixed-step line (ε = 10⁻⁴: 0.10 mm at 0.60 s between fixed 1 ms, 0.15 mm
-  at 0.42 s, and 0.5 ms, 0.08 mm at 0.80 s) — a wash. Where error control
-  pays is therefore the solver whose per-step cost is high and whose error
-  falls fastest with the step, not the cheap one.
+* Soft clutter (not chaotic, floor ≤ 11 µm): both fixed-step solvers
+  converge at first order (ICF 3.7 mm at 10 ms → 0.12 mm at 0.5 ms, MuJoCo
+  2.4 → 0.08 mm), and the requested ε bounds the measured deviation
+  (0.39 mm at ε = 10⁻³, 41 µm at 10⁻⁵). ICF error control gives about 2×
+  less deviation than fixed ICF at the same cost across the range
+  (ε = 10⁻³: 0.39 mm at 0.45 s vs 0.73 mm at 0.58 s for fixed 2 ms;
+  ε = 10⁻⁴: 0.14 mm at 1.4 s vs 0.29 mm at 1.0 s for fixed 1 ms; ε = 10⁻⁵:
+  41 µm at 3.2 s vs 0.12 mm at 1.9 s for fixed 0.5 ms). MuJoCo error
+  control lands on its own fixed-step line (ε = 10⁻⁴: 96 µm at 0.54 s,
+  between fixed 1 ms at 0.42 s and 0.5 ms at 0.84 s) — a wash. Error
+  control pays for the solver whose per-step cost is high and whose error
+  falls fastest with the step, not for the cheap one.
+* Hard clutter (chaotic, floor 0.3–0.6 mm): the coarse end is a step-size
+  measurement — ICF 20 mm at 10 ms → 4.6 mm at 1 ms → 2.7 mm at 0.5 ms,
+  MuJoCo 8.3 → 2.3 → 1.2 mm, about O(δt^0.7) for both, MuJoCo at 2–3×
+  lower cost for the same δt; and the requested ε is not the measured
+  deviation there (5.6 mm at ε = 10⁻³, amplified by the pile). The tight
+  end sits within 2–4× of the floor (ICF ε = 10⁻⁵: 1.1 mm at 9.1 s; MuJoCo
+  ε = 10⁻⁵: 0.9 mm at 6.3 s, no better than its ε = 10⁻⁴) and ranks
+  nothing. In the middle, ICF error control at ε = 10⁻³ (5.6 mm, 2.6 s)
+  matches fixed ICF between 1 and 2 ms at the same cost, and MuJoCo error
+  control at ε = 10⁻³ (2.5 mm, 1.4 s) sits right of fixed 1 ms (2.3 mm,
+  0.9 s): on an impact-dominated window neither controller beats its
+  fixed-step line, since it has to take small steps everywhere; the saving
+  is in the settled phase (`figures/realtime_trace_n64.pdf`).
 
 ### Actuated push (`figures/actuated.pdf`, `figures/actuated_chatter.pdf`; trace in `tables/actuated_trace.md`)
 
