@@ -70,7 +70,7 @@ def main() -> int:
     out = "scripts/bench/results/part1_stiffness_sweep.csv"
     rows = []
     for backend in ("icf", "mujoco"):
-        for kind, knob in (("fixed", 1e-2), ("fixed", 1e-3), ("adaptive", 1e-3)):
+        for kind, knob in (("fixed", 1e-2), ("fixed", 1e-3), ("adaptive", 1e-3), ("adaptive", 1e-5)):
             for k in KS:
                 r = subprocess.run([sys.executable, "-m", "scripts.bench.benchmarks.part1_stiffness_sweep", "--single", backend, kind, f"{knob},{k}"],
                                    capture_output=True, text=True, timeout=1800)

@@ -30,8 +30,8 @@ therefore carries both, and ``make_arm`` applies the ICF overrides.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import warp as wp
 
@@ -56,8 +56,14 @@ BALL_R = 0.05
 BALL_MASS = 0.1
 BALL_DROP = 1.0
 LATTICE_SEED = 7
-MUJOCO_TAU_K1E5 = 0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
-MUJOCO_BALL_DAMPRATIO = 0.05  # smallest damping ratio MuJoCo runs stably (0 is not admissible); the model asked for zero
+MUJOCO_TAU_K1E5 = (
+    0.0024  # solref timeconst realizing k = 1e5 N/m at rest: penetration scales as tau^2, 4.4 um at tau = 2 ms (probe)
+)
+# The ball asks for zero dissipation. MuJoCo's reference solref (timeconst,
+# dampratio) cannot take dampratio = 0, but its direct format (-stiffness,
+# -damping) can: an undamped soft constraint. The stiffness is calibrated so
+# the resting ball sinks by m*g/k (scripts/bench/results/tables/mujoco_stiffness_probe.md).
+MUJOCO_BALL_DIRECT_STIFFNESS = 2.24e3
 
 
 @dataclass
@@ -135,7 +141,9 @@ def _clutter_template(hard: bool) -> newton.ModelBuilder:
 def build_clutter(n_worlds: int, hard: bool) -> newton.Model:
     template = _clutter_template(hard)
     ke = 1.0e5 if hard else 1.0e3
-    wall_cfg = newton.ModelBuilder.ShapeConfig(ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=CONTACT_MARGIN, is_visible=False)
+    wall_cfg = newton.ModelBuilder.ShapeConfig(
+        ke=ke, kd=0.02 * ke, mu=CLUTTER_MU, margin=CONTACT_MARGIN, is_visible=False
+    )
     builder = newton.ModelBuilder()
     builder.replicate(template, n_worlds)
     _add_bin(builder, wall_cfg)
@@ -177,15 +185,14 @@ SCENES: dict[str, SceneSpec] = {
         icf={"contact_stiffness": 1.0e3, "contact_hc_dissipation": 0.0},
         horizon_s=10.0,
         note="0.1 kg ball, k=1e3 N/m, zero dissipation, 1 m drop",
-        mujoco_solref=(MUJOCO_TAU_K1E5 * 10.0, MUJOCO_BALL_DAMPRATIO),
+        mujoco_solref=(-MUJOCO_BALL_DIRECT_STIFFNESS, 0.0),
     ),
 }
 
 
-def ball_energy(model: newton.Model, state) -> "list[float]":
+def ball_energy(model: newton.Model, state) -> list[float]:
     """Per-world total energy [J] of the ball scene, zero at rest on the
     ground: 0.5 m |v|^2 + m g (z - r)."""
-    import numpy as np
 
     g = float(-model.gravity.numpy()[0][2])
     m = model.body_mass.numpy()

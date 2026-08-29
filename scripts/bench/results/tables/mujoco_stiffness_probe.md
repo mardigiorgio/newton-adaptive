@@ -33,4 +33,48 @@ Resting penetration scales as timeconst²: 2 ms → 4.4 µm, so timeconst 2.4 ms
   explicit tau=10ms zeta=0       dt= 0.1 ms: energy change    +nan %  rebounds  0  (solref now [0.01 0.  ])
 ```
 
-MuJoCo admits no zero damping ratio (ζ = 0 diverges to NaN); with the smallest stable ζ the ball rebounds 25 times in 10 s but still loses all of its energy — MuJoCo's soft-constraint contact dissipates at every impact regardless of solref, so a conservative contact cannot be represented.
+In the reference solref format (timeconst, dampratio) MuJoCo admits no zero damping ratio (ζ = 0 diverges to NaN); with the smallest stable ζ the ball rebounds 25 times in 10 s but still loses all of its energy. The direct format below does represent the undamped contact.
+
+## Direct solref format (−stiffness, −damping)
+
+MuJoCo's direct format takes the constraint stiffness and damping as numbers
+(a_ref = −stiffness · r − damping · v, in acceleration units) and applies no
+refsafe clamp. Resting sphere, k = 1e5 requested, damping −632 (ζ = 1 at that
+stiffness), stiffness interpolated for m g / k = 6.4 µm at δt = 1 ms:
+
+```
+interpolated direct stiffness for m*g/k at 1 ms: 1.703e+05
+  calibrated direct solref, dt=10.00 ms: rest -26114759.1 um (target 6.4)   launched: unstable
+  calibrated direct solref, dt= 5.00 ms: rest  -1561953.0 um (target 6.4)   launched: unstable
+  calibrated direct solref, dt= 2.00 ms: rest        6.4 um (target 6.4)
+  calibrated direct solref, dt= 1.00 ms: rest        6.4 um (target 6.4)
+  calibrated direct solref, dt= 0.25 ms: rest        6.4 um (target 6.4)
+```
+
+The clamp in the reference format is the guard against this: the soft
+constraint is stable only while ω δt stays below ~2 (ω = √(k/m_eff) = 1240
+rad/s for the 65 g sphere at k = 1e5 → δt < 1.6 ms), and the reference
+format enforces it by softening (τ ≥ 2 δt) instead of exploding. Either
+way a fixed-step MuJoCo arm at δt = 10 ms realizes at most k ≈ m_eff / (4 δt²)
+of order 1e2–1e3 N/m per 65 g body. The clutter arms keep the reference
+format (MuJoCo's default and its own safety rule).
+
+Undamped ball (k = 1e3, zero dissipation) in the direct format, stiffness
+interpolated for the resting depth m g / k = 0.98 mm (measured 1.01 mm at
+−2.24e3):
+
+```
+ dt [ms]  energy change %  rebounds   (direct solref (-2.24e+03, 0))
+   10.00            -3.28        10
+    5.00          -104.60        10
+    2.00             0.51        10
+    1.00            -0.16        10
+    0.50            -0.08        10
+    0.20            -0.03        10
+```
+
+ω δt = 100 × 0.01 = 1 at δt = 10 ms, inside the stable range: the undamped
+soft constraint conserves the ball's energy to 0.2 % at δt ≤ 1 ms (the
+5 ms row is the one exception on the ladder and is reported as measured).
+The ball's MuJoCo arm uses this solref (`MUJOCO_BALL_DIRECT_STIFFNESS`); the
+earlier ζ = 0.05 rows above are superseded.
