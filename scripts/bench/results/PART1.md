@@ -387,7 +387,7 @@ penetration relative to the resting depth m·g/k. Hard clutter, 64 scenes:
   6.5 µm (MuJoCo) and 6.1 µm (ICF) against the model's 6.4 µm; ICF error
   control sits at 5.7–6.9 µm from ε = 10⁻² on, MuJoCo error control needs
   ε = 10⁻⁴ (6.8 µm; 20 µm at 10⁻³, 143 µm at 10⁻²).
-* Soft clutter: _(rerun pending)_.
+* Soft clutter: every setting of every arm is artifact-free (max ≤ 7.4 mm against the 22.7 mm impact depth, no ejections); ICF rests at the model's 0.64 mm (0.63–0.68 mm) at every δt and ε, MuJoCo at 0.52–0.56 mm (its soft-clutter solref is 1.37× stiffer than the model, B3) and at 1.0–3.1 mm under error control at ε ≥ 10⁻².
 
 ### Work-precision (`figures/workprecision.pdf`, `figures/speed_bars.pdf`)
 
