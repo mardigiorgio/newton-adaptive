@@ -4,46 +4,46 @@
 
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
-| ICF real-time rate | 1024% | 504% | 206% | 83% |
-| ICF artifacts | No (pen 4.1 mm, eject 0.0%) | No (pen 3.9 mm, eject 0.0%) | No (pen 3.9 mm, eject 0.0%) | No (pen 3.6 mm, eject 0.0%) |
-| MuJoCo real-time rate | 2421% | 760% | 333% | 126% |
-| MuJoCo artifacts | No (pen 4.9 mm, eject 0.0%) | No (pen 5.7 mm, eject 0.0%) | No (pen 6.2 mm, eject 0.0%) | No (pen 6.4 mm, eject 0.0%) |
+| ICF real-time rate | 765% | 488% | 175% | 68% |
+| ICF artifacts | No (pen 4.5 mm, eject 0.0%) | No (pen 7.2 mm, eject 0.0%) | No (pen 7.2 mm, eject 0.0%) | No (pen 8.7 mm, eject 0.0%) |
+| MuJoCo real-time rate | 2238% | 831% | 400% | 157% |
+| MuJoCo artifacts | No (pen 22.3 mm, eject 0.0%) | Yes (pen 22.9 mm, eject 0.0%) | Yes (pen 23.7 mm, eject 0.0%) | No (pen 20.0 mm, eject 0.0%) |
 
 | Fixed step δt | 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|
-| ICF real-time rate | 897% | 534% | 237% | 130% |
-| ICF artifacts | No (pen 4.2 mm, eject 0.0%) | No (pen 4.5 mm, eject 0.0%) | No (pen 4.5 mm, eject 0.0%) | No (pen 4.6 mm, eject 0.0%) |
-| MuJoCo real-time rate | 2426% | 1199% | 493% | 248% |
-| MuJoCo artifacts | No (pen 3.8 mm, eject 0.0%) | No (pen 4.5 mm, eject 0.0%) | No (pen 5.8 mm, eject 0.0%) | No (pen 6.5 mm, eject 0.0%) |
+| ICF real-time rate | 894% | 482% | 235% | 122% |
+| ICF artifacts | No (pen 5.3 mm, eject 0.0%) | No (pen 6.9 mm, eject 0.0%) | No (pen 8.3 mm, eject 0.0%) | No (pen 9.3 mm, eject 0.0%) |
+| MuJoCo real-time rate | 2297% | 1043% | 468% | 244% |
+| MuJoCo artifacts | No (pen 21.9 mm, eject 0.0%) | No (pen 15.8 mm, eject 0.0%) | No (pen 19.2 mm, eject 0.0%) | No (pen 18.1 mm, eject 0.0%) |
 
 ### Hard clutter  (artifact if max penetration > 2.27 mm = the model's impact depth v·√(m/k), or any ejection)
 
 | Error control ε_acc | 1e-1 | 1e-2 | 1e-3 | 1e-4 |
 |---|---|---|---|---|
-| ICF real-time rate | 263% | 166% | 74% | 35% |
-| ICF artifacts | Yes (pen 7.0 mm, eject 0.0%) | No (pen 0.8 mm, eject 0.0%) | No (pen 0.3 mm, eject 0.0%) | No (pen 0.3 mm, eject 0.0%) |
-| MuJoCo real-time rate | 1090% | 332% | 96% | 34% |
-| MuJoCo artifacts | Yes (pen 10.1 mm, eject 0.0%) | Yes (pen 3.9 mm, eject 0.0%) | No (pen 1.1 mm, eject 0.0%) | No (pen 0.7 mm, eject 0.0%) |
+| ICF real-time rate | 329% | 181% | 85% | 30% |
+| ICF artifacts | Yes (pen 3.1 mm, eject 0.0%) | No (pen 1.1 mm, eject 0.0%) | No (pen 0.8 mm, eject 0.0%) | No (pen 0.6 mm, eject 0.0%) |
+| MuJoCo real-time rate | 1080% | 335% | 96% | 36% |
+| MuJoCo artifacts | Yes (pen 10.1 mm, eject 0.0%) | No (pen 2.1 mm, eject 0.0%) | No (pen 0.9 mm, eject 0.0%) | No (pen 0.7 mm, eject 0.0%) |
 
 | Fixed step δt | 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|
-| ICF real-time rate | 489% | 340% | 170% | 88% |
-| ICF artifacts | Yes (pen 27.8 mm, eject 1.6%) | Yes (pen 9.4 mm, eject 0.0%) | Yes (pen 3.9 mm, eject 0.0%) | No (pen 0.9 mm, eject 0.0%) |
-| MuJoCo real-time rate | 1569% | 799% | 296% | 151% |
-| MuJoCo artifacts | Yes (pen 6.8 mm, eject 0.0%) | Yes (pen 3.1 mm, eject 0.0%) | No (pen 0.9 mm, eject 0.0%) | No (pen 0.7 mm, eject 0.0%) |
+| ICF real-time rate | 541% | 346% | 172% | 93% |
+| ICF artifacts | Yes (pen 4.1 mm, eject 0.0%) | Yes (pen 5.7 mm, eject 0.0%) | No (pen 2.1 mm, eject 0.0%) | No (pen 1.6 mm, eject 0.0%) |
+| MuJoCo real-time rate | 1545% | 806% | 294% | 159% |
+| MuJoCo artifacts | Yes (pen 13.4 mm, eject 0.0%) | Yes (pen 2.8 mm, eject 0.0%) | No (pen 1.5 mm, eject 0.0%) | No (pen 0.7 mm, eject 0.0%) |
 
 # Fixed-step reference levels — wall time [s] per simulated second
 
 | scene | arm | N | δt = 10 ms | 5 ms | 2 ms | 1 ms |
 |---|---|---|---|---|---|---|
-| soft-clutter | ICF fixed | 1 | 0.111 | 0.187 | 0.422 | 0.767 |
-| soft-clutter | MuJoCo fixed | 1 | 0.0412 | 0.0834 | 0.203 | 0.403 |
-| soft-clutter | ICF fixed | 1024 | 3.91 | 6.66 | 14.3 | 25.1 |
-| soft-clutter | MuJoCo fixed | 1024 | 0.0835 | 0.169 | 0.417 | 0.844 |
-| hard-clutter | ICF fixed | 1 | 0.204 | 0.294 | 0.588 | 1.13 |
-| hard-clutter | MuJoCo fixed | 1 | 0.0637 | 0.125 | 0.338 | 0.663 |
-| hard-clutter | ICF fixed | 1024 | 7.47 | 10.9 | 20.9 | 38.2 |
-| hard-clutter | MuJoCo fixed | 1024 | 0.183 | 0.389 | 1.04 | 2.11 |
+| soft-clutter | ICF fixed | 1 | 0.112 | 0.207 | 0.426 | 0.822 |
+| soft-clutter | MuJoCo fixed | 1 | 0.0435 | 0.0958 | 0.214 | 0.409 |
+| soft-clutter | ICF fixed | 1024 | 3.99 | 7.36 | 14.7 | 29 |
+| soft-clutter | MuJoCo fixed | 1024 | 0.0875 | 0.19 | 0.435 | 0.838 |
+| hard-clutter | ICF fixed | 1 | 0.185 | 0.289 | 0.582 | 1.07 |
+| hard-clutter | MuJoCo fixed | 1 | 0.0647 | 0.124 | 0.34 | 0.628 |
+| hard-clutter | ICF fixed | 1024 | 6.31 | 10.4 | 21.3 | 38.3 |
+| hard-clutter | MuJoCo fixed | 1024 | 0.183 | 0.387 | 1.04 | 2.11 |
 
 # Bouncing ball (Fig. 8 scene): energy change after 10 s and rebounds (paper: 11)
 
