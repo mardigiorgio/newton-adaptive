@@ -37,7 +37,7 @@ untouched.
   unverifiable; the scripts remain. Re-measure before relying on anything it appeared to show.
 
 (The Trossen teacher/student workstream was removed 2026-07-02: it predated and did not use the
-IsaacLabRubato (then isaac-rubato) study setup.)
+icra2027 (then isaac-rubato) study setup.)
 
 ## Running
 
