@@ -12,12 +12,12 @@ Sources: **P** CENIC paper · **MJ** MuJoCo default · **ICF** icf_warp default 
 | order p | 2 | P |
 | error norm | ‖q − q̂‖∞, absolute | P |
 | δt_max | 0.1 s clutter · 10 ms ball, actuated | P · O |
-| δt_min | 1 µs | O |
+| δt_min | 1 µs (hits: ≤ 2 / 6950 attempts, one cell; 0 elsewhere) | O |
 | ε_tol, ICF | max(10⁻³ ε_acc, 10⁻⁸) | P |
 | ε_tol, MuJoCo | 10⁻⁸ | MJ |
 | march budget | 65536 work-precision · 4096 others | O |
 
-*Table 1. Step-size controller, identical in both error-controlled configurations. Error estimate by step doubling (three solves, two geometry queries per attempt), accept when e ≤ ε_acc. The paper's Alg. 1 has no minimum shrink and no δt floor; neither was reached in any reported run. ε_tol is the inner Newton tolerance under error control; MuJoCo keeps its own default. A world that exhausts the march budget is marked and never plotted.*
+*Table 1. Step-size controller, identical in both error-controlled configurations. Error estimate by step doubling (three solves, two geometry queries per attempt), accept when e ≤ ε_acc. The paper's Alg. 1 has no minimum shrink and no δt floor; measured floor occupancy at ε down to 10⁻⁶ is zero except 2 of 6950 attempts in one hard-clutter cell (`floor_occupancy.md`). ε_tol is the inner Newton tolerance under error control; MuJoCo keeps its own default. A world that exhausts the march budget is marked and never plotted.*
 
 | δt | benches | source |
 |---|---|---|
@@ -41,7 +41,7 @@ Sources: **P** CENIC paper · **MJ** MuJoCo default · **ICF** icf_warp default 
 | impedance | solimp (0.9, 0.95, 1 mm, 0.5, 2) | — | MJ |
 | refsafe | on (τ ≥ 2 δt) | — | MJ |
 
-*Table 3. Contact parameters per solver. The models differ by design; MuJoCo's τ is calibrated so a resting 65 g sphere sinks m g/k at δt = 1 ms, the same depth ICF gives with k exactly. MuJoCo's stiffness scales with effective mass and is clamped by refsafe (stiffness sweep); the ball is undamped in both. The clutters' dissipation is our assumption (sensitivity recorded). The training scenes use MuJoCo's elliptic cone with impratio 10 — sensitivity probe pending.*
+*Table 3. Contact parameters per solver. The models differ by design; MuJoCo's τ is calibrated so a resting 65 g sphere sinks m g/k at δt = 1 ms, the same depth ICF gives with k exactly. MuJoCo's stiffness scales with effective mass and is clamped by refsafe (stiffness sweep); the ball is undamped in both. The clutters' dissipation is our assumption (sensitivity recorded). The training scenes use MuJoCo's elliptic cone with impratio 10; measured effect on hard-clutter penetration ≤ 15 % at matched knobs, no ejections either way (`mujoco_cone_probe.md`).*
 
 | setting | MuJoCo | ICF |
 |---|---|---|
@@ -86,8 +86,8 @@ Sources: **P** CENIC paper · **MJ** MuJoCo default · **ICF** icf_warp default 
 1. Different contact models by design, each at its own calibrated compliance.
 2. Dissipation laws differ (ζ = 1 vs d = 1 s/m); d is assumed.
 3. ICF relaxes its inner tolerance under error control (eq. 34); MuJoCo does not.
-4. Friction cones differ (pyramidal vs regularized round).
+4. Friction cones differ (pyramidal vs regularized round); MuJoCo's cone choice moves penetration ≤ 15 % (probe).
 5. Joint PD implicit in ICF, stiffness-explicit in MuJoCo's implicitfast.
 6. Different narrowphases; both point contact, margin 0.
-7. A 1 µs floor and a 0.1 minimum shrink exist in our controllers, not in Alg. 1.
+7. A 1 µs floor and a 0.1 minimum shrink exist in our controllers, not in Alg. 1; measured floor occupancy is zero to ε = 10⁻⁶ (2/6950 attempts in one cell).
 8. δt_max = 10 ms on the ball and actuated scenes; the paper used 0.1 s on clutter only.
