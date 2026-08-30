@@ -195,7 +195,10 @@ def main() -> int:
     p.add_argument("--out", type=str, default=None)
     p.add_argument("--single", nargs=3, metavar=("ARM", "KNOB", "PASS"), default=None)
     args = p.parse_args()
-    out = args.out or f"scripts/bench/results/part1_penetration_{args.scene}.csv"
+    # The margin variant must never share the default filename with the
+    # margin-0 run: a later margin pass would silently clobber the plain CSV.
+    suffix = f"_margin{round(args.margin * 1e3):g}mm" if args.margin else ""
+    out = args.out or f"scripts/bench/results/part1_penetration_{args.scene}{suffix}.csv"
 
     if args.single is not None:
         arm_name, knob_s, which = args.single
