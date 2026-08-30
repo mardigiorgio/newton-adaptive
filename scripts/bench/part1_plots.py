@@ -550,7 +550,13 @@ def artifacts() -> None:
                 for x, y, ej, lab in zip(xs, ys, [p[2] for p in pts], [p[3] for p in pts])
                 if y <= 1.0 and not ej
             ]
-            if clean:
+            # A star means "cheapest artifact-free setting". It is only drawn
+            # when the criterion separates this arm's settings on this scene:
+            # if every point sits within 25 % of the bound or below and none
+            # ejects, the flag is straddling the bound's own approximation and
+            # a star would rank noise (soft clutter).
+            separated = any(y > 1.25 or ej for y, ej in zip(ys, [p[2] for p in pts]))
+            if clean and separated:
                 x, y, lab = min(clean)
                 ax.plot(x, y, marker="*", ms=15, color=st["color"], mec="k", mew=0.6, ls="none", zorder=5)
                 cheapest[arm] = (x, lab)
@@ -748,8 +754,12 @@ def consistency() -> None:
                     ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6)
                     ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.7)
                     lab = "floor"
+                # fixed arms label above the point, EC arms below: EC points can
+                # land on a fixed-arm point (same wall, same deviation) and the
+                # labels must not collide
+                dy = 4 if not arm.endswith("adaptive") else -9
                 ax.annotate(
-                    lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"]
+                    lab, (x, y), textcoords="offset points", xytext=(4, dy), fontsize=5.5, color=STYLE[arm]["color"]
                 )
         ax.set_xscale("log")
         ax.set_yscale("log")

@@ -199,7 +199,8 @@ def story_convergence() -> None:
         for x, y, lab, fl in pts:
             if fl:
                 ax.plot([x], [y], marker=STYLE[arm]["marker"], mfc="none", color=STYLE[arm]["color"], ls="none", ms=6); ax.axhline(y, color=STYLE[arm]["color"], lw=0.6, ls=":", alpha=0.6); lab = "floor"
-            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 3), fontsize=5.5, color=STYLE[arm]["color"])
+            dy = 4 if not arm.endswith("adaptive") else -9  # EC labels below: EC points can land on fixed-arm points
+            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, dy), fontsize=5.5, color=STYLE[arm]["color"])
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Wall Time (s)"); ax.set_ylabel("Deviation (mm)")
     ax.set_title("(b)", fontsize=10, loc="left")
