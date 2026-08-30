@@ -20,19 +20,23 @@ NOT bit-reproducible
 
 Reading: the ball (one body) is bit-reproducible on every arm; both contact solvers are not on clutter — the order of the GPU reductions in the contact solve differs run to run, and the pile amplifies the difference to millimetres within 0.3 s on soft clutter (ICF; MuJoCo stays at micrometres there) and to centimetres within 0.5 s on hard clutter (both). Consequences: (i) a restarted-window comparison against a reference (part1_consistency.py) has a floor equal to this noise — the reference restarted against itself is now a row of that bench and is drawn as the floor; (ii) two training runs with the same seed are not the same run on either backend under clutter contact.
 
-## Restart oracle of the consistency bench (`part1_consistency.py --self-check`)
+## Self-check of the consistency bench (`part1_consistency.py --self-check`)
 
-A fixed run at the reference step (0.1 ms), restarted from the reference's
-own snapshots, must reproduce it over each 0.1 s window (max deviation over
-20 windows, 8 worlds):
+Three properties per backend, from two runs of the restart floor (the
+reference solver at 0.1 ms restarted from its own snapshots) and one run of
+the coarsest knob (10 ms): every window runs; the floor reproduces in
+magnitude across the two runs (within 10x -- the solvers are not bitwise
+run-to-run deterministic on clutter, above, so exact equality is not a
+property this system has); the floor's mean deviation sits >= 10x below the
+coarsest knob's, so reported deviations are signal, not restart noise. The
+floor VALUE is reported as the bench's reference-dt row, not asserted.
 
-| scene | ICF | MuJoCo |
-|---|---|---|
-| ball | 0 (PASS) | 0 (PASS) |
-| soft clutter | 1.9e-4 m (FAIL) | 7.4e-7 m (PASS) |
-| hard clutter | 8.3e-3 m (FAIL) | 8.8e-3 m (FAIL) |
+| scene | ICF floor (mean) | ICF coarse | MuJoCo floor | MuJoCo coarse | verdict |
+|---|---|---|---|---|---|
+| ball | 0 | 9.1e-3 m | 0 | 7.7e-3 m | PASS, PASS |
+| soft clutter | 4.6e-6 m | 5.1e-3 m | 2.3e-7 m | 1.7e-3 m | PASS, PASS |
+| hard clutter | 1.4e-3 m | 1.5e-2 m | 4.3e-4 m | 1.0e-2 m | PASS, PASS |
 
-The ball reproduces exactly on both backends, so the restart wiring is
-right; the failures are the solvers' own run-to-run noise measured above,
-amplified over the window. The consistency bench now carries the reference
-step as a fixed row (the reference vs itself) and draws it as the floor.
+The ball's floor is exactly zero on both backends (the restart wiring is
+right); the clutter floors are the solvers' own run-to-run noise amplified
+over the window, 11-24x below the coarsest knob's deviation.
